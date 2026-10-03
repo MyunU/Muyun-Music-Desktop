@@ -247,6 +247,40 @@ QByteArray aes128EcbEncrypt(const QByteArray &plain, const QByteArray &key)
     return out;
 }
 
+/// 无填充 ECB（LX 音源脚本协议里 aes-128-ecb 就是 NoPadding，见官方 user-api-preload.js）。
+/// 数据不是 16 字节整数倍时返回空（与 Node createCipheriv 无自动填充时的报错语义一致）。
+QByteArray aes128EcbEncryptNoPad(const QByteArray &plain, const QByteArray &key)
+{
+    if (key.size() < 16 || (plain.size() % 16) != 0) return QByteArray();
+    quint8 rk[44][4];
+    expandKey(normalizeKey(key), rk);
+    QByteArray out;
+    quint8 block[16], enc[16];
+    for (int i = 0; i < plain.size(); i += 16) {
+        memcpy(block, plain.constData() + i, 16);
+        encryptBlock(block, enc, rk);
+        out.append(reinterpret_cast<const char *>(enc), 16);
+    }
+    return out;
+}
+
+/// 无填充 ECB 解密（不做 pkcs7 去填充）
+QByteArray aes128EcbDecryptNoPad(const QByteArray &cipher, const QByteArray &key)
+{
+    if (key.size() < 16 || cipher.isEmpty() || (cipher.size() % 16) != 0)
+        return QByteArray();
+    quint8 rk[44][4];
+    expandKey(normalizeKey(key), rk);
+    QByteArray out;
+    quint8 block[16], dec[16];
+    for (int i = 0; i < cipher.size(); i += 16) {
+        memcpy(block, cipher.constData() + i, 16);
+        decryptBlock(block, dec, rk);
+        out.append(reinterpret_cast<const char *>(dec), 16);
+    }
+    return out;
+}
+
 QByteArray aes128CbcEncrypt(const QByteArray &plain, const QByteArray &key,
                             const QByteArray &iv)
 {

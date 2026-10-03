@@ -120,12 +120,21 @@ QString MusicSdk::resolveUrl(const Song &song, AudioQuality quality, AudioQualit
 {
     // 1) 优先用 LX 自定义音源脚本解析（当已加载脚本且歌曲带 lx 元信息）
     if (hasLxScript() && song.hasLx) {
+        // 协议只有 128k/320k/flac/flac24bit 四档，且 inited.sources[src].qualitys
+        // 就是"这个源支持哪些音质"的权威声明：先把自己的音质投影过去，
+        // 再按声明过滤——没声明的档位直接跳过，别拿 undefined 去问脚本（白跑一次网络）。
+        const QStringList declared = m_lxEngine->declaredQualitys(song.lx.source);
         const auto chain = qualityFallbackChain(quality);
         for (auto q : chain) {
-            const QString url = m_lxEngine->musicUrl(song.lx.source, song.lx.toMap(),
-                                                     qualityId(q));
+            const QString reqId = LxScriptEngine::protocolQualityId(qualityId(q));
+            if (!declared.isEmpty() && !declared.contains(reqId)) continue;
+            const QString url = m_lxEngine->musicUrl(song.lx.source, song.lx.toMap(), reqId);
             if (!url.isEmpty()) {
-                if (actualQuality) *actualQuality = q;
+                if (actualQuality) {
+                    bool known = false;
+                    const AudioQuality real = qualityFromId(reqId, &known);
+                    *actualQuality = known ? real : q;
+                }
                 return url;
             }
         }

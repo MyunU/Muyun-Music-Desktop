@@ -11,36 +11,66 @@ full-format audio effects (EQ / reverb / 3D surround / loudness), LX Music scrip
 > 实际播放与下载 100% 依赖**你自己导入的 LX 音源脚本**（设置 → 在线音源 → 导入）。
 > 请自行确认所在地法律与平台条款，仅用于学习与个人使用。
 
+**当前版本：v1.0.1** ｜ [下载](#下载) ｜ [已知问题](#已知问题) ｜ [从源码构建](#从源码构建) ｜ [许可](#许可)
+
 ---
 
 ## 功能
 
-**播放与队列**
+### 播放与队列
+
 - 播放 / 暂停 / 上一首 / 下一首 / 进度拖拽 / 音量 / 静音，四种播放模式（顺序、列表循环、单曲循环、随机）
 - 播放队列抽屉、下一首播放、失败自动跳过、设备切换续播
 - 在线音频缓存（key = 歌曲身份 + 音质），启动自动清理 3 天前缓存
 
-**歌词**
+### 歌词
+
 - 逐字歌词、翻译 / 罗马音合并显示、全屏播放页三种样式（经典 / Apple Music 风 / Mineradio 舞台）
 - 独立桌面歌词窗：工具条 + 设置窗，字号与高度自适应
 
-**音效（全格式）**
+### 音效（全格式）
+
 - 10 段均衡器、环境混响（小房间 / 金属板 / 大厅 / 教堂四预设）、3D 环绕（等功率声像摆动）、响度均衡
 - MP3 走 minimp3（时长样本级精确），其余格式（FLAC / M4A / OGG / OPUS / WAV …）走 Qt 自带的 FFmpeg
 - 管道：后台解码 → DSP（源采样率）→ 重采样 → 环形缓冲，主线程只做 memcpy；参数调整即时生效不重解码
 
-**音乐库**
+### 音乐库
+
 - 本地音乐扫描、标签读写、时长精确校准（MP3 帧头遍历 / OGG granule position）
 - 收藏、自建歌单、最近播放；收藏页与自建歌单支持批量（全选 / 批量下载 / 批量移除）
 - 收藏在线歌单（整单进侧栏）、按歌曲换源
 
-**多平台与网络**
+### 多平台与网络
+
 - 搜索 + 联想（跨平台聚合）、榜单、推荐歌单、歌单广场（分类 + 分页，带列表缓存与并行预热）
+- LX 音源脚本按官方协议实现 `globalThis.lx` 全套宿主 API：`request`（含取消函数）、`utils.buffer`、
+  `utils.crypto`（`md5` / `aesEncrypt` / `randomBytes` / `rsaEncrypt`）、`utils.zlib`、
+  `currentScriptInfo`、`setTimeout` / `clearTimeout`，并按 `inited.sources` 声明的音质取链接
 - 局域网同步：暮云 ↔ 暮云，并兼容洛雪移动版协议（配对码 / AES+RSA 握手 / WS / 三方合并）
 
-**其它**
-- 无边框窗口（原生边缘缩放、最大化 / 全屏 / ESC 阶梯）、深浅色主题、系统托盘
+### 其它
+
+- 无边框窗口（原生边缘缩放、最大化 / 全屏 / ESC 阶梯：舞台沉浸 → 全屏播放页 → 窗口全屏 →
+  退出最大化 → 关闭主窗口，弹层在场时让位给弹层）、深浅色主题、系统托盘
+- 单实例守护：重复启动唤起已有窗口；权限不一致（管理员 ↔ 普通）时也**不双开**，会明确提示
 - 启动静默检查更新（GitHub 版本清单），支持"不再提醒此版本"
+
+## 已知问题
+
+1. **最大化对第三方任务栏美化 / 透明工具"不可见"**：我们的最大化是**手动改窗口几何**（不走系统
+   `ShowWindow(SW_MAXIMIZE)`），窗口因此没有 `WS_MAXIMIZE` 状态位、`IsZoomed()` 为假——
+   靠"检测到最大化窗口就把任务栏从全透明切成毛玻璃 / 其他材质"的工具（TranslucentTB 一类）认不出来。
+   用 **F11 全屏**（真全屏）不受影响。
+2. **已运行的实例若是管理员权限**，用普通权限再启动时只能弹提示、**无法把它的窗口唤到前台**
+   （Windows 完整性级别限制，不是我们的 bug）。
+3. **启动时偶发 1~2 条 Qt 跨线程警告**（`Cannot create children for a parent that is in a different thread`），
+   不影响功能，仍在排查。
+4. **升级安装前请先退出正在运行的暮云音乐**：当前安装器不会自动关闭正在跑的实例，
+   程序开着时装新版会因文件被占用而失败，且失败回滚可能把你已有的安装弄成半新半旧。
+   托盘里也请右键退出（`⚙ 设置 → 关闭主窗口时` 选"最小化到托盘"时，程序其实还在运行）。
+
+> 说明：**音源脚本只支持新版 `globalThis.lx` 格式**。旧版 `userApi` / `registerSource` 不支持，
+> 导入时会明确提示——这是刻意的取舍，不是缺陷。
 
 ## 下载
 
@@ -49,9 +79,11 @@ full-format audio effects (EQ / reverb / 3D surround / loudness), LX Music scrip
 - `MuyunMusic-<版本>.exe` —— 安装版（Windows 10/11 x64，无需另装 Qt）
 - `MuyunMusic-<版本>.zip` —— 便携版（解压后直接运行 `MuyunMusic.exe`）
 
+> 从旧版升级：**先退出正在运行的暮云音乐**（含托盘里的实例），再运行新版安装包。详见[已知问题](#已知问题)第 4 条。
+
 ## 从源码构建
 
-**依赖**
+### 依赖
 
 | 需要 | 版本 | 说明 |
 |---|---|---|
@@ -59,7 +91,7 @@ full-format audio effects (EQ / reverb / 3D surround / loudness), LX Music scrip
 | MinGW GCC | 13.1（Qt 自带 `Tools/mingw1310_64`） | 其它版本（如 GCC 16）编译会段错误 |
 | CMake | ≥ 3.20 | 生成器用 `MinGW Makefiles` |
 
-**步骤**
+### 步骤
 
 ```powershell
 # 1) 拉取舞台（MuyunStage）需要的一次性第三方文件：WebView2 SDK 头 + Loader DLL、three.js、gsap
@@ -75,14 +107,16 @@ cmake --build build --target MuyunMusic --parallel 4
 
 产物在 `build/MuyunMusic.exe`（依赖由 `windeployqt` 自动部署到同目录）。
 
-**开关**
+### 开关
 
 - `-DMUYUN_CONSOLE=ON`：编译成控制台程序（跑 `--test-*` 自检、看运行日志用）
 - `-DMUYUN_SELFTES=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXE_LINKER_FLAGS=-s`：发布构建
   （编译级剔除全部自检与调试输出，体积 4.6MB → 3.2MB）
 - `-DMUYUN_STAGE=OFF`：不编译舞台（纯 Win32 + WebView2 的独立进程 `MuyunStage.exe`）
 
-**打包**（可选）：`package/build_payload.ps1` 出便携 zip、`package/build_installer.ps1` 出安装包
+### 打包（可选）
+
+`package/build_payload.ps1` 出便携 zip、`package/build_installer.ps1` 出安装包
 （需 .NET Framework 4 的 `csc.exe`）。
 
 ## 数据目录
@@ -92,28 +126,19 @@ cmake --build build --target MuyunMusic --parallel 4
 
 ## 自检
 
-开发版（`-DMUYUN_SELFTES=ON`）内置 20+ 项端到端自检，例如：
+开发版（`-DMUYUN_SELFTES=ON`）内置 29 项端到端自检，例如：
 
 ```powershell
 $env:MUYUN_STORE_ROOT = "$env:TEMP\muyun-test"   # 隔离数据目录（会写数据的自检必须设，否则拒绝运行）
-MuyunMusic.exe --test-dsp          # DSP 波形：EQ / 混响 / 环绕 / 响度均衡
-MuyunMusic.exe --test-effects-live # 音效管线真实出声
-MuyunMusic.exe --test-lyric-merge  # 歌词译文配对
-MuyunMusic.exe --test-update       # 更新提示（离线，可用 MUYUN_UPDATE_LIVE_URL 验真网络）
+MuyunMusic.exe --test-dsp              # DSP 波形：EQ / 混响 / 环绕 / 响度均衡
+MuyunMusic.exe --test-effects-live     # 音效管线真实出声
+MuyunMusic.exe --test-lyric-merge      # 歌词译文配对
+MuyunMusic.exe --test-update           # 更新提示（离线，可用 MUYUN_UPDATE_LIVE_URL 验真网络）
+MuyunMusic.exe --test-lxsource         # LX 音源脚本协议一致性（逐条断言，全离线）
+MuyunMusic.exe --test-esc-ladder       # ESC 阶梯（含退最大化 / 关主窗口 / 弹层让位）
+MuyunMusic.exe --test-ime              # 输入法上下文守护（任何焦点下都能切中英文）
+MuyunMusic.exe --test-single-instance  # 单实例守护（第二个实例不双开、能唤起主窗）
 ```
-
-## 已知问题
-
-> 下面这几条是**已知但还没修**的，会优先在下个版本处理。欢迎 Issue 补充复现步骤。
-
-1. **输入法切换只能在输入框里生效**：焦点不在搜索框等输入框时，按输入法切换键
-   （Ctrl+Space / Shift 等）切不了中英文，必须先点进某个输入框才行。
-2. **Esc 键少了最后两步**：现在的 Esc 阶梯是「退舞台沉浸 → 退全屏播放页 → 退窗口全屏」，
-   但在**窗口最大化**时按 Esc 不会退出最大化，也**不能关闭主窗口**。计划补成
-   「… → 退窗口全屏 → 退出最大化 → 关闭主窗口」。
-3. **单实例守护在"权限不一致"时失效**：先用**管理员权限**运行，再用**普通权限**启动，
-   会同时跑起两个实例（普通权限这边连不上管理员实例创建的命名管道，于是自己又起了一个），
-   不会唤起已有窗口。
 
 ## 许可
 

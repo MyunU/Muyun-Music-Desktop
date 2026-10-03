@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(MuyunMusic VERSION 1.0.0 LANGUAGES CXX C)
+project(MuyunMusic VERSION 1.0.1 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -122,7 +122,9 @@ target_compile_definitions(MuyunMusic PRIVATE
 )
 
 if(WIN32)
-    target_link_libraries(MuyunMusic PRIVATE psapi)
+    # imm32：ImeGuard 要在"焦点不在输入框"时把窗口 IME 上下文接回来
+    # （Qt 的 QWindowsInputContext 遇到不接受输入法的焦点对象会 ImmAssociateContext(hwnd, NULL)）
+    target_link_libraries(MuyunMusic PRIVATE psapi imm32)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -238,4 +240,11 @@ target_link_libraries(lx_smoke_test PRIVATE
     quickjs
     Qt6::Core Qt6::Network Qt6::Concurrent
 )
+# LxScriptEngine 的 utils.zlib 用 zlib（与主程序同一套：MinGW sysroot 自带 libz.a）
+if(MINGW)
+    target_link_libraries(lx_smoke_test PRIVATE z)
+else()
+    find_package(ZLIB REQUIRED)
+    target_link_libraries(lx_smoke_test PRIVATE ZLIB::ZLIB)
+endif()
 endif()

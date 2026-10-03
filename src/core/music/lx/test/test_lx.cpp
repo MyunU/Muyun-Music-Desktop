@@ -36,6 +36,24 @@ int main(int argc, char *argv[])
     LOG("[3] 加载成功 inited=%d name=%s\n", engine.inited() ? 1 : 0,
         engine.scriptInfo().value("name").toString().toUtf8().constData());
 
+    // 协议一致性脚本会把断言结果塞进 inited 的 __protocolReport，这里原样打出来
+    int protoProblems = 0;
+    {
+        const QVariantMap info = engine.scriptInfo();
+        const QVariantList problems = info.value(QStringLiteral("__protocolReport")).toList();
+        const int checks = info.value(QStringLiteral("__protocolChecks")).toInt();
+        if (checks > 0) {
+            protoProblems = int(problems.size());
+            LOG("[3a] 协议断言 %d 项，未通过 %d 项\n", checks, int(problems.size()));
+            for (const QVariant &p : problems)
+                LOG("     [FAIL] %s\n", p.toString().toUtf8().constData());
+        }
+        const QVariantMap sources = info.value(QStringLiteral("sources")).toMap();
+        LOG("[3c] 过滤后 sources=%s tx.qualitys=%s\n",
+            QStringList(sources.keys()).join(QLatin1Char(',')).toUtf8().constData(),
+            engine.declaredQualitys(QStringLiteral("tx")).join(QLatin1Char(',')).toUtf8().constData());
+    }
+
     // 二次加载同一脚本（模拟用户切换音源再切回——修复前会报 redeclaration）
     if (!engine.loadScript(scriptPath, &err)) {
         LOG("[FAIL] 二次加载失败: %s\n", err.toUtf8().constData());
@@ -62,5 +80,6 @@ int main(int argc, char *argv[])
 
     if (r.first.isEmpty()) { LOG("[FAIL] 空链接\n"); return 2; }
     LOG("[PASS] url=%s\n", r.first.toUtf8().constData());
+    if (protoProblems > 0) { LOG("[FAIL] 协议断言未通过 %d 项\n", protoProblems); return 3; }
     return 0;
 }

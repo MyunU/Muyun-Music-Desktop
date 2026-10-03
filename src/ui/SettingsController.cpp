@@ -5,6 +5,7 @@
 #include "core/network/HttpClient.h"
 #include "core/utils/Crypto.h"
 #include "core/music/MusicSdk.h"
+#include "core/music/lx/LxScriptEngine.h"
 
 #include <QDir>
 #include <QFile>
@@ -413,17 +414,18 @@ bool SettingsController::importLxSourceFile(const QString &filePath)
     const QString content = QString::fromUtf8(f.readAll());
     f.close();
 
-    // 有效性校验：兼容两代音源脚本格式（挡掉 404 页/无效 JS）
-    //  · 旧版：registerSource(...)
-    //  · 新版 userApi：globalThis.lx + on('request') + send(EVENT_NAMES.inited)
+    // 有效性校验：**只认新版 globalThis.lx 协议**（挡掉 404 页/无效 JS）。
+    // 旧格式（脚本侧 registerSource / userApi 宿主环境）我们没有实现过 shim，
+    // 放进去只会在用户机器上"导入成功、播放全挂"，所以这里直接说清楚。
     const QString trimmed = content.trimmed();
-    const bool looksLikeSource =
-        content.contains(QStringLiteral("registerSource")) ||               // 旧版
-        content.contains(QStringLiteral("EVENT_NAMES")) ||                  // 新版
-        (content.contains(QStringLiteral("inited")) &&
-         content.contains(QStringLiteral("request")));                      // 新版变体
-    if (trimmed.isEmpty() || !looksLikeSource) {
-        emit importFailed(QStringLiteral("不是有效的音源脚本（未识别到音源特征）"));
+    if (trimmed.isEmpty() || !LxScriptEngine::looksLikeLxScript(content)) {
+        const bool looksLegacy =
+            content.contains(QStringLiteral("registerSource"))
+            || content.contains(QStringLiteral("userApi"));
+        emit importFailed(looksLegacy
+            ? QStringLiteral("暂不支持旧版音源脚本（registerSource / userApi），"
+                             "请导入新版 globalThis.lx 格式的脚本")
+            : QStringLiteral("不是有效的音源脚本（未识别到新版 globalThis.lx 特征）"));
         return false;
     }
 

@@ -23,12 +23,17 @@ class QQuickMouseEvent;   // 定义在 Qt 私有头里；自检只往 clicked �
 #include <QTimer>
 #include <QLocalServer>
 #include <QLocalSocket>
+#include <QThread>
+#include <QProcess>
 #include <QPointer>
 #include <memory>
 
 #ifdef Q_OS_WIN
 #include <windows.h>
 #include <psapi.h>
+#ifdef MUYUN_SELFTES
+#include <imm.h>      // --test-ime：读/断言窗口的 IME 上下文与转换状态
+#endif
 #endif
 
 #include <QImage>
@@ -64,10 +69,13 @@ class QQuickMouseEvent;   // 定义在 Qt 私有头里；自检只往 clicked �
 #include "ui/LxSyncServer.h"
 #ifdef MUYUN_SELFTES
 #include "core/sync/LxMockClient.h"
+#include "core/music/lx/LxScriptEngine.h"
+#include "core/music/lx/test/LxProtocolCheck.h"
 #endif // MUYUN_SELFTES
 #include <QElapsedTimer>
 #include <functional>
 #include "ui/HotkeyManager.h"
+#include "ui/ImeGuard.h"
 #include "ui/FramelessWindow.h"
 #include "ui/SyncController.h"
 #include "ui/StageBridge.h"
@@ -94,6 +102,7 @@ using namespace Muyun;
 
 #ifdef MUYUN_SELFTES
 /// DSP 自检：验证均衡器与混响确实改变了信号
+static const char *u8(const QString &s);   // UTF-8 输出（定义在下方自检工具区）
 static int runDspSelfTest()
 {
     // 本自检的 setter 会写 audio-effects 设置文档 → 必须隔离（四-56 补防呆，与 --test-effects* 同规格）
@@ -611,11 +620,102 @@ static int runCryptoSelfTest()
     return (dec == plain && rt == msg) ? 0 : 1;
 }
 
-/// 音源在线导入自检：下载 URL → 校验两代格式 → QuickJS 真实加载（send('inited')）
+/// 音源脚本协议自检：
+///  ① 内置协议一致性脚本（全离线）——把官方协议逐条变成断言，缺哪个 API 直接 FAIL；
+///  ② 可选在线腿：给了 URL 就走"下载 → 新版特征校验 → QuickJS 真加载"（与导入同一条路）。
 /// 用法：MuyunMusic.exe --test-lxsource [url]
 static int runLxSourceSelfTest(const QString &url)
 {
-    printf("=== 音源在线导入自检 ===\n");
+    printf("=== 音源脚本协议自检 ===\n");
+    int fail = 0;
+
+    // ---- ① 内置协议一致性脚本 ----
+    {
+        const QString path = QDir::tempPath()
+            + QStringLiteral("/muyun-lx-proto-%1.js").arg(QDateTime::currentMSecsSinceEpoch());
+        bool written = false;
+        {
+            QFile pf(path);
+            if (pf.open(QIODevice::WriteOnly)) {
+                pf.write(Muyun::LxTest::kProtocolCheckScript);
+                pf.close();
+                written = true;
+            }
+        }
+        if (!written) {
+            printf("[FAIL] 无法写出协议自检脚本到临时目录\n");
+            ++fail;
+        } else {
+            Muyun::LxScriptEngine engine;   // 独立引擎：不碰用户正在用的那份音源
+            QString err;
+            const bool loaded = engine.loadScript(path, &err);
+            printf("[%s] 协议脚本加载并 send('inited')（%s）\n", loaded ? "PASS" : "FAIL",
+                   u8(loaded ? QStringLiteral("ok") : err));
+            if (!loaded) {
+                ++fail;
+            } else {
+                const QVariantMap info = engine.scriptInfo();
+                const QVariantList problems =
+                    info.value(QStringLiteral("__protocolReport")).toList();
+                const int checks = info.value(QStringLiteral("__protocolChecks")).toInt();
+                printf("     协议断言 %d 项，未通过 %d 项\n", checks, int(problems.size()));
+                for (const QVariant &p : problems) {
+                    printf("[FAIL] 协议断言：%s\n", u8(p.toString()));
+                    ++fail;
+                }
+                if (problems.isEmpty() && checks > 0)
+                    printf("[PASS] lx.utils / currentScriptInfo / 宿主定时器 全部符合协议\n");
+
+                // inited.sources 按协议收敛：非法源、非法音质都必须被剔掉
+                const QVariantMap sources = info.value(QStringLiteral("sources")).toMap();
+                const bool srcFiltered = !sources.contains(QStringLiteral("xm"))
+                                         && sources.contains(QStringLiteral("tx"));
+                printf("[%s] sources 过滤非法源（xm 剔除、tx 保留）\n",
+                       srcFiltered ? "PASS" : "FAIL");
+                if (!srcFiltered) ++fail;
+
+                const QStringList txQualitys = engine.declaredQualitys(QStringLiteral("tx"));
+                const bool qFiltered = (txQualitys == QStringList({ QStringLiteral("128k"),
+                                                                   QStringLiteral("flac"),
+                                                                   QStringLiteral("flac24bit") }));
+                printf("[%s] qualitys 过滤非法音质（master 被剔 → %s）\n",
+                       qFiltered ? "PASS" : "FAIL", qPrintable(txQualitys.join(QLatin1Char(','))));
+                if (!qFiltered) ++fail;
+
+                const QStringList txActions =
+                    sources.value(QStringLiteral("tx")).toMap()
+                           .value(QStringLiteral("actions")).toStringList();
+                const bool aFiltered = (txActions == QStringList({ QStringLiteral("musicUrl") }));
+                printf("[%s] actions 过滤（非 local 源只留 musicUrl → %s）\n",
+                       aFiltered ? "PASS" : "FAIL", qPrintable(txActions.join(QLatin1Char(','))));
+                if (!aFiltered) ++fail;
+
+                // 真实派发：handler 在 setTimeout 里 resolve，证明定时器接进了微任务泵；
+                // 返回值里带 musicInfo.duration 的**类型与严格相等结果**——
+                // 宿主→JS 的数字一旦退化成字符串，脚本的 ===260 / !==200 就会全错（四-61 真踩过）
+                QVariantMap mi;
+                mi[QStringLiteral("songmid")] = QStringLiteral("MID123");
+                mi[QStringLiteral("duration")] = 260.0;
+                QString e2;
+                const QString link = engine.musicUrl(QStringLiteral("tx"), mi,
+                                                     QStringLiteral("320k"), &e2);
+                const QString want = QStringLiteral(
+                    "https://proto.example.com/play?mid=MID123&dur=number:true");
+                const bool linkOk = link == want;
+                printf("[%s] request 事件派发 + 定时器里 resolve 收得住 + 数字不退化成字符串（%s）\n",
+                       linkOk ? "PASS" : "FAIL",
+                       qPrintable(linkOk ? link : (e2.isEmpty() ? link : e2)));
+                if (!linkOk) ++fail;
+            }
+            QFile::remove(path);
+        }
+    }
+
+    // ---- ② 可选在线腿 ----
+    if (url.isEmpty()) {
+        printf("[SKIP] 未给 URL，跳过在线导入腿（--test-lxsource <url> 可验真实脚本）\n");
+        return fail == 0 ? 0 : 1;
+    }
     const QString savePath = QDir::tempPath()
                              + QStringLiteral("/muyun-lxsource-test-%1.js").arg(QDateTime::currentMSecsSinceEpoch());
 
@@ -635,24 +735,21 @@ static int runLxSourceSelfTest(const QString &url)
     printf("[%s] 下载 %s（%s）\n", dlOk ? "PASS" : "FAIL", qPrintable(dlOk ? "ok" : dlErr), qPrintable(url));
     if (!dlOk) { QFile::remove(savePath); return 1; }
 
-    // 2) 校验（与 importLxSourceFile 同规则：旧版 registerSource 或新版 userApi 特征）
+    // 2) 校验（与 importLxSourceFile 同规则：只认新版 globalThis.lx 协议）
     QFile f(savePath);
     QString content;
     if (f.open(QIODevice::ReadOnly)) { content = QString::fromUtf8(f.readAll()); f.close(); }
-    const bool valid = !content.trimmed().isEmpty()
-        && (content.contains(QStringLiteral("registerSource"))
-            || content.contains(QStringLiteral("EVENT_NAMES"))
-            || (content.contains(QStringLiteral("inited")) && content.contains(QStringLiteral("request"))));
-    printf("[%s] 音源特征校验（registerSource/EVENT_NAMES/inited）\n", valid ? "PASS" : "FAIL");
+    const bool valid = Muyun::LxScriptEngine::looksLikeLxScript(content);
+    printf("[%s] 音源特征校验（新版 globalThis.lx / EVENT_NAMES）\n", valid ? "PASS" : "FAIL");
     if (!valid) { QFile::remove(savePath); return 2; }
 
-    // 3) QuickJS 真实加载（新版脚本须能 send('inited') 完成初始化）
+    // 3) QuickJS 真实加载（脚本须能 send('inited') 完成初始化）
     QString err;
     const bool loaded = MusicSdk::instance()->loadLxScript(savePath, &err);
     printf("[%s] QuickJS 加载初始化：%s\n", loaded ? "PASS" : "FAIL", qPrintable(loaded ? "ok" : err));
 
     QFile::remove(savePath);
-    return loaded ? 0 : 3;
+    return (loaded && fail == 0) ? 0 : 3;
 }
 
 /// 下载端到端自检：加载 LX 脚本 → 搜索 → 加入下载队列 → 跑事件循环直到完成/失败
@@ -1391,6 +1488,91 @@ static bool writeUpdateFeedFile(const QString &path, const QByteArray &body)
 }
 
 #endif // MUYUN_SELFTES
+// ===========================================================================
+// 单实例守护（2026-10-04 重写：权限不一致时也不再双开）
+// ===========================================================================
+
+/// 守护判定结果
+enum class InstanceOutcome {
+    Skipped,     ///< 自检模式：不抢单实例（允许并行调试）
+    Primary,     ///< 本进程是唯一实例，唤起监听已就绪
+    Raised,      ///< 已有实例且唤起成功 → 本进程静默退出
+    Blocked      ///< 已有实例但够不着（多半是权限不一致）→ 提示后退出，绝不双开
+};
+
+#ifdef Q_OS_WIN
+/**
+ * @brief 同会话"已经有一个实例"的凭据：命名互斥体
+ *
+ * 为什么不能只靠命名管道判重：管理员实例建的管道，普通权限进程连不上
+ * （Qt 默认 UserAccessOption + Windows 强制完整性控制 MIC），旧写法把"连不上"
+ * 当成"没有别的实例"，于是双开（README 已知问题③）。互斥体只要**读语义**就能跨权限判出来：
+ *  ① 安全描述符给 NULL DACL —— 默认 DACL 只放行创建者，换个权限连打开都打不开；
+ *  ② 只申请 SYNCHRONIZE —— MIC 禁止"低权限写高权限对象"，要 ALL_ACCESS 必被
+ *     ACCESS_DENIED 挡死，而 SYNCHRONIZE 属读语义，能过。
+ * 名字用 Local\ 前缀（当前登录会话内唯一，普通用户不需要 SeCreateGlobalPrivilege）。
+ */
+static void *acquireInstanceMutex(bool *alreadyRunning, QString *diag)
+{
+    if (alreadyRunning) *alreadyRunning = false;
+    SECURITY_DESCRIPTOR sd;
+    if (!InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION)) {
+        if (diag) *diag = QStringLiteral("初始化安全描述符失败 err=%1").arg(GetLastError());
+        return nullptr;
+    }
+    // NULL DACL（bDaclPresent=TRUE + ACL=nullptr）= 所有人都有全部访问权
+    if (!SetSecurityDescriptorDacl(&sd, TRUE, nullptr, FALSE)) {
+        if (diag) *diag = QStringLiteral("设置 DACL 失败 err=%1").arg(GetLastError());
+        return nullptr;
+    }
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = FALSE;
+    sa.lpSecurityDescriptor = &sd;
+
+    HANDLE h = CreateMutexExW(&sa, L"Local\\MuyunMusic.singleInstance", 0, SYNCHRONIZE);
+    const DWORD err = GetLastError();
+    if (!h) {
+        // 拿不到句柄也可能是"对象存在但我没权限"——那同样说明已有实例在跑，不能当没有
+        if (err == ERROR_ACCESS_DENIED) {
+            if (alreadyRunning) *alreadyRunning = true;
+            if (diag) *diag = QStringLiteral("互斥体存在但当前权限打不开（err=5）");
+        } else {
+            if (diag) *diag = QStringLiteral("CreateMutexExW 失败 err=%1").arg(err);
+        }
+        return nullptr;
+    }
+    const bool exists = (err == ERROR_ALREADY_EXISTS);
+    if (alreadyRunning) *alreadyRunning = exists;
+    if (diag) *diag = exists ? QStringLiteral("互斥体已存在（已有实例）")
+                             : QStringLiteral("互斥体新建（本进程是唯一实例）");
+    return h;   // 句柄故意不关：进程活着，对象就活着
+}
+#endif // Q_OS_WIN
+
+/// 通知已运行实例把主界面唤到前台。三次机会 × 400ms：
+/// 对方可能正在启动（安装版冷启动慢），一次连不上就判"没有实例"也是旧版双开的成因之一。
+static bool raiseExistingInstance(const QString &key, QString *diag)
+{
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        QLocalSocket probe;
+        probe.connectToServer(key);
+        if (probe.waitForConnected(600)) {
+            probe.write("raise");
+            probe.flush();
+            probe.waitForBytesWritten(400);
+            probe.disconnectFromServer();
+            if (diag) *diag = QStringLiteral("唤起成功（第%1次尝试）").arg(attempt + 1);
+            return true;
+        }
+        if (diag)
+            *diag = QStringLiteral("唤起失败（第%1次）error=%2 %3")
+                        .arg(attempt + 1).arg(int(probe.error())).arg(probe.errorString());
+        if (attempt < 2) QThread::msleep(400);
+    }
+    return false;
+}
+
 int main(int argc, char *argv[])
 {
     // 把 Qt 内部消息（含 QML 报错）直接写到 stderr，便于诊断
@@ -1462,15 +1644,15 @@ int main(int argc, char *argv[])
 
     // ---- 单实例守护 ----
     // 再次启动程序 → 通知已运行实例（含最小化到托盘托管的）唤起主界面，本进程静默退出。
-    // 自检模式（--test-*）不受限，允许多实例并行调试。
+    // 自检模式（--test-*）不受限，允许多实例并行调试；两个例外见下面 guardActive：
+    // --test-single-instance（父：当主实例跑）与 --single-instance-probe（子：当第二实例跑）。
     // 关键：探测+抢注监听必须放在一切重初始化之前。此前 listen 在 main 末尾，安装版冷启动
     // 慢（杀软扫描/QML 编译），双击两下都探测失败 → 双双起飞（单实例失效根因）。
-    // 现在尽早抢注命名管道：谁 listen 成功谁是主实例，抢输的一方唤起对方后立即退出；
-    // raise 到达时窗口还没建好 → 记入 pending，mainWin 创建后补一次唤起（见下方接线）。
+    // 判重顺序：先命名互斥体（跨权限也判得出"有没有别人"），再用管道唤起（够得着就唤醒）。
     static const QString kSingleKey = QStringLiteral("MuyunMusic.singleInstance");
     const bool isSelfTest = std::any_of(args.cbegin(), args.cend(),
         [](const QString &a) { return a.startsWith(QStringLiteral("--test-")); });
-    struct RaiseBox { QPointer<QQuickWindow> win; bool pending = false; };
+    struct RaiseBox { QPointer<QQuickWindow> win; bool pending = false; int hits = 0; };
     auto raiseBox = std::make_shared<RaiseBox>();   // 被监听回调持有，shared_ptr 管理生命周期
     auto raiseWindow = [](QQuickWindow *w) {
         if (!w) return;
@@ -1486,20 +1668,32 @@ int main(int argc, char *argv[])
         }
 #endif
     };
-    if (!isSelfTest) {
-        auto tryRaise = []() -> bool {
-            QLocalSocket probe;
-            probe.connectToServer(kSingleKey);
-            if (!probe.waitForConnected(600)) return false;
-            probe.write("raise");
-            probe.flush();
-            probe.waitForBytesWritten(400);
-            probe.disconnectFromServer();
-            return true;
-        };
-        if (tryRaise()) return 0;
-        QLocalServer::removeServer(kSingleKey);   // 清理上次异常退出的残留监听
+
+    const bool probeChild = args.contains(QStringLiteral("--single-instance-probe"));
+    const bool guardActive = !isSelfTest || probeChild
+                             || args.contains(QStringLiteral("--test-single-instance"));
+    InstanceOutcome outcome = InstanceOutcome::Skipped;
+    QString instanceDiag;
+#ifdef Q_OS_WIN
+    bool otherInstanceRunning = false;
+    void *instanceMutex = acquireInstanceMutex(&otherInstanceRunning, &instanceDiag);
+    Q_UNUSED(instanceMutex);   // 故意不关：本进程活着，互斥体就活着
+#else
+    const bool otherInstanceRunning = false;
+#endif
+
+    if (!guardActive) {
+        outcome = InstanceOutcome::Skipped;
+    } else if (otherInstanceRunning) {
+        // 已有实例：够得着就唤起它；够不着（权限不一致 / 管道没建好）也**不再自己起一个**
+        outcome = raiseExistingInstance(kSingleKey, &instanceDiag)
+                      ? InstanceOutcome::Raised : InstanceOutcome::Blocked;
+    } else {
+        QLocalServer::removeServer(kSingleKey);   // 清理上次异常退出的残留监听（只在主实例路径做）
         auto *singleSrv = new QLocalServer(&app);
+        // Qt 默认 UserAccessOption：只有同用户同权限能连。改 WorldAccessOption，
+        // 让"先开普通权限、再以管理员权限启动"这一侧至少连得上、能唤起。
+        singleSrv->setSocketOptions(QLocalServer::WorldAccessOption);
         QObject::connect(singleSrv, &QLocalServer::newConnection, singleSrv,
                          [singleSrv, raiseBox, raiseWindow]() {
             if (QLocalSocket *c = singleSrv->nextPendingConnection()) {
@@ -1507,15 +1701,126 @@ int main(int argc, char *argv[])
                 c->disconnectFromServer();
                 c->deleteLater();
             }
+            ++raiseBox->hits;
             if (QQuickWindow *w = raiseBox->win.data()) raiseWindow(w);
             else raiseBox->pending = true;   // 启动中：主界面就绪后补唤起
         });
-        if (!singleSrv->listen(kSingleKey)) {
-            // 另一实例抢先把监听建起来了 → 唤起它并静默退出；
-            // 连不上（对方正在退出等）则继续自己跑，兜底不误杀
-            if (tryRaise()) return 0;
+        if (singleSrv->listen(kSingleKey)) {
+            outcome = InstanceOutcome::Primary;
+        } else if (raiseExistingInstance(kSingleKey, &instanceDiag)) {
+            // 极小概率竞态：判重之后、监听建好之前被另一个实例抢先 → 唤起它
+            outcome = InstanceOutcome::Raised;
+        } else {
+            // 建不起监听又唤不起别人：继续自己跑，兜底不误杀（与老行为一致）
+            outcome = InstanceOutcome::Skipped;
             qWarning() << "[single] 监听失败且无法唤起已有实例";
         }
+    }
+
+#ifdef MUYUN_SELFTES
+    // 探针子实例：只跑上面这套判定，把结论打到 stdout 后退出（不建窗口、不碰数据）
+    if (probeChild) {
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        static const char *kNames[] = { "Skipped", "Primary", "Raised", "Blocked" };
+        printf("PROBE 判定=%s 说明=%s\n", kNames[int(outcome)],
+               u8(instanceDiag.isEmpty() ? QStringLiteral("-") : instanceDiag));
+        fflush(stdout);
+        return finishSelfTest(0);
+    }
+#endif // MUYUN_SELFTES
+
+    // ---- 单实例守护自检 ----
+    // 父进程按正常流程当"唯一实例"，再派子进程当"第二个实例"，断言：
+    //  ① 子进程绝不判成 Primary（不双开）；② 子进程能把"唤起"送到父进程（真唤起了窗口）。
+    // 跨权限（管理员↔普通）那一侧本机没法自动化（要 UAC 弹窗），但判重靠的是
+    // "命名互斥体 + 只申请 SYNCHRONIZE"，与权限无关；子进程够不着管道时会判 Blocked 而不是双开。
+    // 用法：MuyunMusic.exe --test-single-instance
+#ifdef MUYUN_SELFTES
+    if (args.contains(QStringLiteral("--test-single-instance"))) {
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        printf("=== 单实例守护自检 ===\n");
+        int fail = 0;
+
+        const bool primary = (outcome == InstanceOutcome::Primary);
+        if (!primary) {
+            // 机器上已经有一个暮云在跑（比如用户开着的开发版）→ 本自检没法当主实例
+            printf("[SKIP] 已有实例在运行（判定=%d），单实例自检需要一个干净的主实例\n",
+                   int(outcome));
+            fflush(stdout);
+            return finishSelfTest(0);
+        }
+        printf("[PASS] 本进程判为唯一实例并建起唤起监听\n");
+
+        // 派子实例：必须"不双开"，且把唤起打到我们头上
+        auto runProbe = [raiseBox](int round) -> QString {
+            QProcess child;
+            const QString exe = QCoreApplication::applicationFilePath();
+            child.setProgram(exe);
+            child.setArguments({ QStringLiteral("--single-instance-probe") });
+            QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+            env.insert(QStringLiteral("MUYUN_QUIET_SINGLE_INSTANCE"), QStringLiteral("1"));
+            child.setProcessEnvironment(env);
+            child.start();
+            if (!child.waitForStarted(10000))
+                return QStringLiteral("[FATAL] 子进程起不来 %1").arg(exe);
+            // 一边等一边泵事件：QLocalServer 收连接要事件循环，
+            // 干等 waitForFinished 会把子进程的唤起饿死（假失败）
+            const qint64 deadline = QDateTime::currentMSecsSinceEpoch() + 25000;
+            while (child.state() != QProcess::NotRunning
+                   && QDateTime::currentMSecsSinceEpoch() < deadline)
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+            if (child.state() != QProcess::NotRunning) {
+                child.kill();
+                child.waitForFinished(2000);
+                return QStringLiteral("[FATAL] 第%1个子实例超时未退出").arg(round);
+            }
+            return QString::fromUtf8(child.readAllStandardOutput()).trimmed();
+        };
+
+        const int hitsBefore = raiseBox->hits;
+        const QString out1 = runProbe(1);
+        printf("     子实例输出：%s\n", u8(out1.isEmpty() ? QStringLiteral("(空)") : out1));
+        const bool notDouble = out1.contains(QStringLiteral("判定=Raised"))
+                               || out1.contains(QStringLiteral("判定=Blocked"));
+        printf("[%s] 第二个实例没有变成主实例（不双开）\n", notDouble ? "PASS" : "FAIL");
+        if (!notDouble) ++fail;
+        const bool woke = (raiseBox->hits > hitsBefore);
+        printf("[%s] 子实例把「唤起」送到了主实例（收到 %d 次）\n",
+               woke ? "PASS" : "FAIL", raiseBox->hits - hitsBefore);
+        if (!woke) ++fail;
+
+        // 连开两个也不双开（旧版"双击两下双双起飞"就是这条没兜住）
+        const int hits2 = raiseBox->hits;
+        const QString out2 = runProbe(2);
+        const bool notDouble2 = out2.contains(QStringLiteral("判定=Raised"))
+                                || out2.contains(QStringLiteral("判定=Blocked"));
+        printf("[%s] 连续第二次启动仍不双开（%s）\n", notDouble2 ? "PASS" : "FAIL",
+               u8(out2.split(QLatin1Char('\n')).last()));
+        if (!notDouble2 || raiseBox->hits <= hits2) ++fail;
+
+        printf("单实例守护自检结束（%d 项失败）\n", fail);
+        fflush(stdout);
+        return finishSelfTest(fail == 0 ? 0 : 4);
+    }
+#endif // MUYUN_SELFTES
+
+    // 上面那套判定落地：已有实例 → 唤起它并静默退出；够不着 → 明说后退出（绝不双开）。
+    if (outcome == InstanceOutcome::Raised)
+        return 0;
+    if (outcome == InstanceOutcome::Blocked) {
+        // 够不着的那个实例：多半是以管理员权限先启动的。明说，别静默双开。
+        const QString msg = QStringLiteral(
+            "暮云音乐已经在运行了，但这个实例够不着它（通常是已运行的那个用了管理员权限）。\n\n"
+            "请先在任务栏 / 系统托盘找到已打开的窗口；\n"
+            "如果确实要用当前权限再开一个，请先退出已运行的实例。");
+        qWarning().noquote() << "[single] 已有实例但无法唤起：" << instanceDiag;
+        if (!qEnvironmentVariableIsSet("MUYUN_QUIET_SINGLE_INSTANCE")) {
+#ifdef Q_OS_WIN
+            MessageBoxW(nullptr, reinterpret_cast<LPCWSTR>(msg.utf16()),
+                        L"暮云音乐", MB_OK | MB_ICONINFORMATION | MB_TOPMOST);
+#endif
+        }
+        return 0;
     }
 
     // 自检模式
@@ -1527,9 +1832,10 @@ int main(int argc, char *argv[])
 #ifdef MUYUN_SELFTES
     if (args.contains(QStringLiteral("--test-lxsource"))) {
         const int si = args.indexOf(QStringLiteral("--test-lxsource"));
+        // 不传 URL 就只跑内置协议一致性（离线可重复）；传了才加跑真脚本在线腿
         const QString url = (si + 1 < args.size() && !args.at(si + 1).startsWith(QStringLiteral("--")))
             ? args.at(si + 1)
-            : QStringLiteral("https://raw.githubusercontent.com/pdone/lx-music-source/main/huibq/latest.js");
+            : QString();
         return finishSelfTest(runLxSourceSelfTest(url));
     }
 #endif // MUYUN_SELFTES
@@ -1691,6 +1997,10 @@ int main(int argc, char *argv[])
     // 那时主窗的 QML Shortcut 和页面 keydown 都可能收不到键（用户实测 ESC 失灵的真身）。
     // 注册与否由 QML 决定（它同时知道播放页/舞台是否开着），且只在"前台是我们的窗"时占着。
     engine.rootContext()->setContextProperty(QStringLiteral("hotkey"), hotkey);
+
+    // 输入法上下文守护：Qt 在"焦点对象不接受输入法"时会把整个窗口的 IME 摘掉，
+    // 于是焦点不在输入框时 Ctrl+Space / Shift 切不了中英文（用户报的已知问题①）。
+    auto *imeGuard = new ImeGuard(qApp);
 
     // Windows 无边框：原生边缘缩放 + 最大化几何修复（替代 QML MouseArea 抖动方案）
     auto *frameless = new FramelessWindow(qApp);
@@ -3453,6 +3763,7 @@ int main(int argc, char *argv[])
     auto *mainWin = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
     stage->attachWindow(mainWin);
     hotkey->attach(mainWin);
+    imeGuard->attach(mainWin);
     // mineradio 舞台是独立进程窗，它抢焦点时本应用会判为"后台"→ 热键保活，
     // 保证舞台全屏界面里 F11 仍能切主窗全屏。
     QObject::connect(stage, &Muyun::StageBridge::activeChanged, hotkey,
@@ -4265,6 +4576,323 @@ int main(int argc, char *argv[])
             fflush(stdout);
             finishSelfTest(all ? 0 : 4);
         });
+    }
+#endif // MUYUN_SELFTES
+
+    // ESC 阶梯端到端（补了第④⑤步之后）：
+    //   ③ 窗口全屏 → 退全屏（回归）  ④ 最大化 → 退最大化（新增）
+    //   弹层在场 → Esc 归弹层，阶梯**不许**抢（否则"关菜单"变成"关窗口"）
+    //   ⑤ 普通态 → 关闭主窗口（走 root.close() → onClosing 按 exitAction 分流）
+    // 用法：MuyunMusic.exe --test-esc-ladder   （必须 MUYUN_STORE_ROOT 隔离：会开弹层/关窗）
+#ifdef MUYUN_SELFTES
+    if (args.contains(QStringLiteral("--test-esc-ladder"))) {
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        printf("=== ESC 阶梯自检（含新增两步）===\n");
+        if (qEnvironmentVariableIsEmpty("MUYUN_STORE_ROOT")) {
+            printf("[FAIL] 必须设 MUYUN_STORE_ROOT 隔离后再跑（会开弹层、触发关窗）\n");
+            return finishSelfTest(4);
+        }
+        if (!mainWin) { printf("[FAIL] 没有主窗口\n"); return finishSelfTest(4); }
+
+        static bool exitFsOk = false, exitMaxOk = false, popupSafeOk = false, closeOk = false;
+        static bool didFs = false, didMax = false;
+        auto prop = [mainWin](const char *p) { return mainWin->property(p).toBool(); };
+        auto call = [mainWin](const char *m) { QMetaObject::invokeMethod(mainWin, m); };
+        auto raiseOwn = [mainWin]() {
+            // 键要落到我们的窗：先把主窗抬到前台（等价于用户点了一下窗口）
+#ifdef Q_OS_WIN
+            HWND hw = reinterpret_cast<HWND>(mainWin->winId());
+            if (!hw) return;
+            keybd_event(VK_MENU, 0, 0, 0);
+            keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
+            const HWND fg = GetForegroundWindow();
+            const DWORD fgTid = fg ? GetWindowThreadProcessId(fg, nullptr) : 0;
+            const DWORD myTid = GetCurrentThreadId();
+            if (fgTid && fgTid != myTid) AttachThreadInput(myTid, fgTid, TRUE);
+            BringWindowToTop(hw);
+            SetForegroundWindow(hw);
+            if (fgTid && fgTid != myTid) AttachThreadInput(myTid, fgTid, FALSE);
+            mainWin->requestActivate();
+#endif
+        };
+        auto pressEsc = [raiseOwn](const char *tag) {
+            raiseOwn();
+            QTimer::singleShot(400, qApp, [tag]() {
+                printf("    %s：注入真实 Esc\n", tag);
+                fflush(stdout);
+#ifdef Q_OS_WIN
+                keybd_event(VK_ESCAPE, 0, 0, 0);
+                Sleep(30);
+                keybd_event(VK_ESCAPE, 0, KEYEVENTF_KEYUP, 0);
+#endif
+            });
+        };
+        auto findByObj = [mainWin](const char *objName) -> QObject * {
+            return mainWin->findChild<QObject*>(QString::fromLatin1(objName));
+        };
+
+        using EStep = std::pair<int, std::function<void()>>;
+        auto steps = std::make_shared<std::vector<EStep>>();
+        auto idx = std::make_shared<size_t>(0);
+        auto run = std::make_shared<std::function<void()>>();
+        *run = [steps, idx, run]() {
+            if (*idx >= steps->size()) return;
+            const EStep s = steps->at(*idx);
+            QTimer::singleShot(s.first, qApp, [s, idx, run, steps]() {
+                s.second();
+                ++(*idx);
+                if (*idx < steps->size()) (*run)();
+            });
+        };
+
+        // 起点：把窗口恢复到"窗口态、没最大化、没弹层"
+        steps->push_back({600, [mainWin, prop, call]() {
+            if (prop("fullScreenOn")) call("toggleFullScreen");
+            if (prop("maximized")) call("toggleMaximize");
+            QMetaObject::invokeMethod(mainWin, "closeLyricsPage");
+            QCoreApplication::processEvents();
+            printf("    基线：全屏=%d 最大化=%d 可见=%d\n", int(prop("fullScreenOn")),
+                   int(prop("maximized")), int(mainWin->isVisible()));
+        }});
+        // ③ 进全屏 → 断前置 → 按 Esc → 断后置
+        steps->push_back({500, [call]() { call("toggleFullScreen"); }});
+        steps->push_back({500, [prop, pressEsc]() {
+            didFs = prop("fullScreenOn");
+            printf("    第③步前置：确实在窗口全屏里=%d\n", int(didFs));
+            pressEsc("阶梯第③步");
+        }});
+        steps->push_back({900, [prop, call]() {
+            exitFsOk = !prop("fullScreenOn");
+            printf("[%s] 第③步：Esc 退窗口全屏（现在全屏=%d）\n",
+                   (didFs && exitFsOk) ? "PASS" : "FAIL", int(prop("fullScreenOn")));
+            call("toggleMaximize");          // 紧接着验第④步
+        }});
+        // ④ 最大化 → Esc 退出最大化（新增）
+        steps->push_back({500, [prop, pressEsc]() {
+            didMax = prop("maximized");
+            printf("    第④步前置：确实在最大化态=%d\n", int(didMax));
+            pressEsc("阶梯第④步");
+        }});
+        steps->push_back({900, [prop, findByObj]() {
+            exitMaxOk = !prop("maximized");
+            printf("[%s] 第④步：Esc 退出最大化（新增；现在最大化=%d）\n",
+                   (didMax && exitMaxOk) ? "PASS" : "FAIL", int(prop("maximized")));
+            if (QObject *panel = findByObj("settingsPanelObj"))
+                QMetaObject::invokeMethod(panel, "open");
+            QCoreApplication::processEvents();
+        }});
+        // 弹层在场：Esc 归弹层，阶梯一步都不许动
+        steps->push_back({500, [findByObj, pressEsc]() {
+            QObject *panel = findByObj("settingsPanelObj");
+            printf("    弹层前置：设置面板 visible=%d\n",
+                   panel ? int(panel->property("visible").toBool()) : -1);
+            pressEsc("弹层在场");
+        }});
+        steps->push_back({900, [prop, findByObj, mainWin]() {
+            popupSafeOk = mainWin->isVisible() && !prop("fullScreenOn") && !prop("maximized");
+            printf("[%s] 弹层在场时 Esc 没被阶梯抢走（窗口还在、窗口状态一步没动）\n",
+                   popupSafeOk ? "PASS" : "FAIL");
+            if (QObject *panel = findByObj("settingsPanelObj"))
+                QMetaObject::invokeMethod(panel, "close");
+            QCoreApplication::processEvents();
+        }});
+        // ⑤ 普通态 → 关闭主窗口（onClosing 按 exitAction 分流；隔离档默认"询问"）
+        steps->push_back({400, [pressEsc]() { pressEsc("阶梯第⑤步"); }});
+        steps->push_back({900, [mainWin, findByObj]() {
+            QObject *dlg = findByObj("exitDialogObj");
+            const bool asked = dlg && dlg->property("visible").toBool();
+            const bool hidden = !mainWin->isVisible();
+            closeOk = asked || hidden;
+            printf("[%s] 第⑤步：Esc 关闭主窗口（%s）\n", closeOk ? "PASS" : "FAIL",
+                   asked ? "弹出退出确认（按设置分流）" : (hidden ? "窗口已关闭/隐藏" : "什么都没发生"));
+            const bool all = didFs && exitFsOk && didMax && exitMaxOk && popupSafeOk && closeOk;
+            printf("ESC 阶梯自检结束（%s）\n", all ? "全绿" : "有失败项");
+            fflush(stdout);
+            finishSelfTest(all ? 0 : 4);
+        }});
+        (*run)();
+    }
+#endif // MUYUN_SELFTES
+
+    // 输入法上下文守护自检（用户报的已知问题①：焦点不在输入框时切不了中英文）
+    // 硬断言：把 activeFocus 交给一个不接受输入法的普通 Item —— Qt 的
+    //   QWindowsInputContext::updateEnabled() 会当场 ImmAssociateContext(hwnd, NULL)
+    //   把窗口 IME 摘掉；守护必须把它接回来，否则 Ctrl+Space / Shift 根本进不了 IME。
+    // 真按键腿：注入一次 Ctrl+Space 看窗口的中英/开关位会不会翻。基线（输入框里）都不翻，
+    //   说明本机 IME 没把这个快捷键配上 → 那条只打 [SKIP]，不假绿也不假红。
+    // 用法：MuyunMusic.exe --test-ime
+#ifdef MUYUN_SELFTES
+    if (args.contains(QStringLiteral("--test-ime"))) {
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        printf("=== 输入法上下文守护自检 ===\n");
+        if (qEnvironmentVariableIsEmpty("MUYUN_STORE_ROOT")) {
+            printf("[FAIL] 必须设 MUYUN_STORE_ROOT 隔离后再跑（会改焦点与输入法状态）\n");
+            return finishSelfTest(4);
+        }
+#ifndef Q_OS_WIN
+        printf("[SKIP] 非 Windows，无此问题\n");
+        return finishSelfTest(0);
+#else
+        if (!mainWin) { printf("[FAIL] 没有主窗口\n"); return finishSelfTest(4); }
+        auto hwndMain = [mainWin]() { return reinterpret_cast<HWND>(mainWin->winId()); };
+        auto imeContext = [hwndMain]() {
+            const HWND h = hwndMain();
+            if (!h) return false;
+            HIMC c = ImmGetContext(h);
+            if (c) ImmReleaseContext(h, c);
+            return c != nullptr;
+        };
+        // 输入法状态 = 开关位 + 转换模式（中英/全半角都体现在这里）
+        auto imeState = [hwndMain](quint32 *out) {
+            const HWND h = hwndMain();
+            if (!h) return false;
+            HIMC c = ImmGetContext(h);
+            if (!c) return false;
+            DWORD flags = 0, sent = 0;
+            const BOOL ok = ImmGetConversionStatus(c, &flags, &sent);
+            const BOOL opened = ImmGetOpenStatus(c);
+            ImmReleaseContext(h, c);
+            if (!ok) return false;
+            *out = (opened ? 0x10000u : 0u) | quint32(flags);
+            return true;
+        };
+        auto raiseOwn = [mainWin]() {
+            const HWND hw = reinterpret_cast<HWND>(mainWin->winId());
+            if (!hw) return;
+            keybd_event(VK_MENU, 0, 0, 0);
+            keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
+            const HWND fg = GetForegroundWindow();
+            const DWORD fgTid = fg ? GetWindowThreadProcessId(fg, nullptr) : 0;
+            const DWORD myTid = GetCurrentThreadId();
+            if (fgTid && fgTid != myTid) AttachThreadInput(myTid, fgTid, TRUE);
+            BringWindowToTop(hw);
+            SetForegroundWindow(hw);
+            if (fgTid && fgTid != myTid) AttachThreadInput(myTid, fgTid, FALSE);
+            mainWin->requestActivate();
+        };
+        auto pressCtrlSpace = []() {
+            keybd_event(VK_CONTROL, 0, 0, 0);
+            Sleep(20);
+            keybd_event(VK_SPACE, 0, 0, 0);
+            Sleep(20);
+            keybd_event(VK_SPACE, 0, KEYEVENTF_KEYUP, 0);
+            Sleep(20);
+            keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
+        };
+        auto pumpFor = [](int ms) {
+            QElapsedTimer t; t.start();
+            while (t.elapsed() < ms)
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+        };
+
+        // ⚠ 步骤回调在 if 块退出之后才跑：跨回调的变量一律 static，
+        //    小工具按**值**捕获（按引用捕获块内局部 lambda 会悬垂，见四-60 教训）
+        static bool ctxAtStartup = false, ctxInField = false, ctxAfterBlur = false;
+        static bool baselineToggles = false, outsideToggles = false;
+        using IStep = std::pair<int, std::function<void()>>;
+        auto steps = std::make_shared<std::vector<IStep>>();
+        auto idx = std::make_shared<size_t>(0);
+        auto run = std::make_shared<std::function<void()>>();
+        *run = [steps, idx, run]() {
+            if (*idx >= steps->size()) return;
+            const IStep s = steps->at(*idx);
+            QTimer::singleShot(s.first, qApp, [s, idx, run, steps]() {
+                s.second();
+                ++(*idx);
+                if (*idx < steps->size()) (*run)();
+            });
+        };
+
+        // ① **启动态先测**：用户报的就是"没点过输入框时切不了"。
+        //    先点输入框再测会把坏状态遮掉（Qt 一有文本框拿到焦点就自己把上下文开回来）。
+        steps->push_back({700, [mainWin, raiseOwn, imeContext, imeState, pressCtrlSpace,
+                                pumpFor]() {
+            raiseOwn();
+            pumpFor(200);
+            ctxAtStartup = imeContext();
+            quint32 s0 = 0, s1 = 0;
+            const bool got0 = imeState(&s0);
+            pressCtrlSpace();
+            pumpFor(400);
+            const bool got1 = imeState(&s1);
+            printf("[%s] 启动后没点过任何输入框：窗口挂着 IME 上下文=%d（读得到输入法状态=%d）\n",
+                   (ctxAtStartup && got0) ? "PASS" : "FAIL", int(ctxAtStartup), int(got0));
+        }});
+        // ② 基线：焦点进搜索框（TextInput），量一次 Ctrl+Space 到底切不切得动
+        steps->push_back({200, [mainWin, raiseOwn, imeContext, imeState, pressCtrlSpace,
+                                pumpFor]() {
+            if (QObject *si = mainWin->findChild<QObject*>(QStringLiteral("searchInputObj")))
+                QMetaObject::invokeMethod(si, "forceActiveFocus");
+            pumpFor(300);
+            ctxInField = imeContext();
+            quint32 m0 = 0, m1 = 0;
+            const bool got0 = imeState(&m0);
+            pressCtrlSpace();
+            pumpFor(400);
+            const bool got1 = imeState(&m1);
+            baselineToggles = got0 && got1 && (m0 != m1);
+            printf("[%s] 焦点在搜索框时窗口挂着 IME 上下文\n", ctxInField ? "PASS" : "FAIL");
+            printf("     基线（输入框里按 Ctrl+Space）：%08X → %08X，%s\n", m0, m1,
+                   baselineToggles ? "有变化" : "无变化");
+        }});
+        // ③ 把焦点交给不接受输入法的普通 Item：Qt 的 updateEnabled() 会在这里摘掉上下文
+        steps->push_back({200, [mainWin, imeContext]() {
+            if (QQuickItem *ci = mainWin->contentItem())
+                QMetaObject::invokeMethod(ci, "forceActiveFocus");
+            QCoreApplication::processEvents();
+            printf("     焦点刚交给非输入框 Item 的瞬间：IME 上下文还在=%d\n",
+                   int(imeContext()));
+        }});
+        // ④ 守护必须在 200ms 周期内把它接回来 —— 这条就是修复本身
+        steps->push_back({700, [imeContext, raiseOwn, imeState, pressCtrlSpace, pumpFor]() {
+            ctxAfterBlur = imeContext();
+            printf("[%s] 焦点不在输入框时窗口仍挂着 IME 上下文（守护已接回）\n",
+                   ctxAfterBlur ? "PASS" : "FAIL");
+            raiseOwn();
+            pumpFor(200);
+            quint32 m0 = 0, m1 = 0;
+            const bool got0 = imeState(&m0);
+            pressCtrlSpace();
+            pumpFor(400);
+            const bool got1 = imeState(&m1);
+            outsideToggles = got0 && got1 && (m0 != m1);
+            printf("     非输入框焦点按 Ctrl+Space：%08X → %08X，%s\n", m0, m1,
+                   outsideToggles ? "有变化" : "无变化");
+        }});
+        steps->push_back({100, [imeGuard]() {
+            int fail = 0;
+            if (!ctxAtStartup) {
+                printf("[FAIL] 启动后没点过输入框时窗口没有 IME 上下文 → 切换键进不了 IME\n");
+                ++fail;
+            }
+            if (!ctxInField) {
+                printf("[FAIL] 基线就不对：焦点在输入框时窗口也没有 IME 上下文\n");
+                ++fail;
+            }
+            if (!ctxAfterBlur) {
+                printf("[FAIL] 焦点离开输入框后窗口没有 IME 上下文 → Ctrl+Space 进不了 IME\n");
+                ++fail;
+            }
+            // 对照证据：守护真接回过（MUYUN_NO_IME_GUARD=1 时这里是 0，上面几条会红）
+            const int restores = imeGuard->restoreCount();
+            printf("[%s] 守护确实把被 Qt 摘掉的 IME 上下文接回来了（累计 %d 次）\n",
+                   restores > 0 ? "PASS" : "FAIL", restores);
+            if (restores <= 0) ++fail;
+            if (baselineToggles && !outsideToggles) {
+                printf("[FAIL] 输入框里能切、外面切不了（用户报的现象还在）\n");
+                ++fail;
+            } else if (!baselineToggles) {
+                printf("[SKIP] 本机输入法没把 Ctrl+Space 配成切换键，真按键腿不计入判定\n");
+            } else {
+                printf("[PASS] 任何焦点下 Ctrl+Space 都能切中英文\n");
+            }
+            printf("输入法守护自检结束（%d 项失败）\n", fail);
+            fflush(stdout);
+            finishSelfTest(fail == 0 ? 0 : 4);
+        }});
+        (*run)();
+        // 不 return：步骤靠 app.exec() 的定时器驱动，出口在最后一个步骤里（finishSelfTest）
+#endif // Q_OS_WIN
     }
 #endif // MUYUN_SELFTES
 

@@ -14,6 +14,13 @@ QByteArray aes128EcbEncrypt(const QByteArray &plain, const QByteArray &key);
 QByteArray aes128CbcEncrypt(const QByteArray &plain, const QByteArray &key,
                             const QByteArray &iv);
 
+/// AES-128 ECB 加密，**无填充**（数据须为 16 字节整数倍，否则返回空）
+/// —— LX 音源脚本协议 `utils.crypto.aesEncrypt(buf,'aes-128-ecb',key,iv)` 就是 NoPadding
+QByteArray aes128EcbEncryptNoPad(const QByteArray &plain, const QByteArray &key);
+
+/// AES-128 ECB 解密，**无填充**
+QByteArray aes128EcbDecryptNoPad(const QByteArray &cipher, const QByteArray &key);
+
 /// AES-128 ECB 解密（用于 QRC/KRC 等歌词解密），PKCS7 去填充
 QByteArray aes128EcbDecrypt(const QByteArray &cipher, const QByteArray &key);
 

@@ -302,6 +302,7 @@ Window {
                             Icon { name: "search"; iconSize: 15; iconColor: theme.subTextColor }
                             TextInput {
                                 id: searchInput
+                                objectName: "searchInputObj"      // 自检用（--test-ime：文本框焦点基线）
                                 Layout.fillWidth: true
                                 verticalAlignment: Text.AlignVCenter
                                 color: theme.textColor
@@ -1071,6 +1072,7 @@ Window {
     // 退出确认弹窗（可记住选择）
     Popup {
         id: exitDialog
+        objectName: "exitDialogObj"     // 自检用（--test-esc-ladder：断言关窗意图落到 onClosing 分流）
         property bool rememberChecked: false
         modal: true
         dim: true
@@ -2349,8 +2351,10 @@ Window {
         sequence: "Ctrl+D"
         onActivated: root.toggleDesktopLyrics()
     }
-    // Esc 阶梯（用户 2026-10-02 定）：① 舞台沉浸模式 → 退沉浸；② 全屏播放/歌词页开着 → 关页；
-    // ③ 窗口全屏(F11) → 退全屏。
+    // Esc 阶梯（用户 2026-10-02 定前三步、2026-10-04 补齐后两步）：
+    // ① 舞台沉浸模式 → 退沉浸；② 全屏播放/歌词页开着 → 关页；③ 窗口全屏(F11) → 退全屏；
+    // ④ 窗口最大化 → 退出最大化；⑤ 都没有 → 关闭主窗口（走 root.close()，
+    //    由 onClosing 按用户设置分流：询问 / 最小化到托盘 / 直接退出，别绕过它）。
     // 键的来源有两条，都汇到这里/页面：主窗有焦点时走下面的 Shortcut；焦点被舞台（独立进程
     // WebView2）叼走时走 C++ 的 Esc 系统热键（escapeRequested → runEscLadder 或 stage.sendEsc）。
     // 舞台开着时阶梯裁判交给页面（stage.sendEsc）——它才知道自己是否真在沉浸，主程序那份
@@ -2362,23 +2366,46 @@ Window {
             else lyricsPage.close()
             return
         }
-        if (lyricsPage.visible) lyricsPage.close()           // 播放页开着但舞台没开 → 退播放页
-        else if (root.fullScreenOn) root.toggleFullScreen()  // 最后退窗口全屏
+        if (lyricsPage.visible) lyricsPage.close()             // 播放页开着但舞台没开 → 退播放页
+        else if (root.fullScreenOn) root.toggleFullScreen()    // 退窗口全屏
+        else if (root.maximized) root.toggleMaximize()         // 退最大化（新增）
+        else root.close()                                      // 关主窗口（新增）
     }
+
+    // 焦点是否落在某个弹层（Popup / Menu / Drawer）里。
+    // Qt 的 QQuickPopup 只在"自己有 active focus"时才用 Esc 关自己，且**没有** ShortcutOverride
+    // 保护——窗口级 Shortcut 一旦常开，就会把"关菜单"这一键吃下去顺手关掉主窗（灾难）。
+    // 弹层项都挂在窗口的 Overlay 下面，所以从焦点项往上找父级，撞到 Overlay 就算数。
+    // 绑定靠 activeFocusItem 变化驱动（它带 NOTIFY），不会算一次就冻住。
+    readonly property bool focusInsidePopup: {
+        var ov = Overlay.overlay
+        var it = root.activeFocusItem
+        if (!ov || !it) return false
+        while (it) {
+            if (it === ov) return true
+            it = it.parent
+        }
+        return false
+    }
+    // Esc 的"让路"判据：有弹层/输入框在场时，这一键归它们，阶梯不许动。
+    // 已知弹层逐个点名（它们不一定抢焦点）+ 通用焦点兜底（委托里的换源菜单等没法点名）。
+    readonly property bool escClaimed: settingsPanel.visible || effectsPanel.visible
+        || queueDrawer.visible || sourceDrawer.visible || downloadDrawer.visible
+        || newPlaylistDialog.visible || deletePlaylistDialog.visible
+        || lxModeDialog.visible || exitDialog.visible || appUpdateDialog.visible
+        || searchInput.activeFocus || root.focusInsidePopup
+
     Shortcut {
         sequence: "Escape"
-        enabled: root.fullScreenOn || lyricsPage.visible
+        enabled: !root.escClaimed
         onActivated: root.runEscLadder()
     }
-    // Esc 系统热键的接管窗口期（QML 是唯一写入者）：播放页开着 / 舞台开着 / **窗口全屏**。
-    // 最后一条是关键：阶梯走到"只剩退窗口全屏"时播放页和舞台都没了，若不接管，这一键就得
-    // 靠"主窗正好有焦点"才收得到——而舞台刚退出时前台常在别处，键直接丢（用户实测最后一步没反应）。
+    // Esc 系统热键的接管窗口期（QML 是唯一写入者）：播放页开着 / 舞台开着 /
+    // 窗口全屏 / **窗口最大化**（阶梯第④步要它，否则最大化时前台常在别处就丢键）。
     // 有弹层/输入框在场时让开，不抢它们的 Esc。C++ 侧还会再按"前台是不是我们的窗"复查才真注册。
     readonly property bool escGuardWanted: lyricsPage.visible
         || (typeof stage !== "undefined" && stage.active)
-        || (root.fullScreenOn && !(settingsPanel.visible || effectsPanel.visible
-                                   || queueDrawer.visible || newPlaylistDialog.visible
-                                   || deletePlaylistDialog.visible || searchInput.activeFocus))
+        || ((root.fullScreenOn || root.maximized) && !root.escClaimed)
     onEscGuardWantedChanged: root.syncEscGuard()
     function syncEscGuard() {
         if (typeof hotkey !== "undefined") hotkey.setEscGuard(root.escGuardWanted)
