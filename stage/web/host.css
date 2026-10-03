@@ -1,0 +1,79 @@
+/* MuyunStage 宿主页补充样式：只补 Sollin Tailwind 工具类等价物与全局底色，
+   视觉全部交给 mineradio.css（作用域 .mineradio-player） */
+html, body {
+  margin: 0; padding: 0; height: 100%;
+  background: #05060a;
+  overflow: hidden;
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+}
+#stage-root {
+  position: fixed; inset: 0;
+  z-index: 50;
+}
+/* 控制簇布局（对应 Sollin 的 flex items-center gap-1 min-w-0 flex-shrink-0） */
+.control-cluster { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.control-track   { display: flex; align-items: center; gap: 8px; min-width: 0; flex-shrink: 1; }
+.control-cluster.actions   { flex: 1 1 0; min-width: 0; }
+.control-cluster.transport { flex: 0 0 auto; }
+.control-cluster.modes     { flex: 1 1 0; justify-content: flex-end; min-width: 0; }
+#time-display { white-space: nowrap; }
+/* 独立打开页面（无主进程连接）时给出静默提示 */
+#stage-offline-hint {
+  position: fixed; left: 14px; bottom: 12px; z-index: 60;
+  color: #ffffff77; font: 12px/1.4 "Microsoft YaHei UI", sans-serif;
+  pointer-events: none; display: none;
+}
+
+/* 翻译开关 chip（右上角） */
+#mr-trans-chip {
+  position: fixed; top: 16px; right: 16px; z-index: 40;
+  width: 40px; height: 40px; border-radius: 20px;
+  display: flex; align-items: center; justify-content: center;
+  font: 600 15px/1 "Microsoft YaHei UI", sans-serif;
+  color: rgba(255,255,255,.88); cursor: pointer; user-select: none;
+  background: rgba(14,15,20,.72); border: 1px solid rgba(255,255,255,.16);
+  transition: background .2s, border-color .2s, color .2s;
+}
+#mr-trans-chip:hover { background: rgba(34,36,44,.9); }
+#mr-trans-chip.on {
+  color: #fff;
+  background: #e0424a;
+  border-color: #e0424a;
+}
+
+/* ---- 沉浸模式空闲自动隐藏（host.js wakeUi 挂/摘 ui-idle-hidden）：
+     2 秒无操作 → 鼠标与底部组件栏一起消失，动一下鼠标即唤回 ---- */
+.mineradio-player.immersive-mode.ui-idle-hidden,
+.mineradio-player.immersive-mode.ui-idle-hidden * {
+  cursor: none !important;
+}
+.mineradio-player.immersive-mode.ui-idle-hidden #bottom-bar {
+  opacity: 0 !important;
+  pointer-events: none !important;
+  transform: translateX(-50%) translateY(96px) scale(.97) !important;
+  background: transparent !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  box-shadow: none !important;
+}
+
+/* ---- WebView2 兼容性修正 ----
+   backdrop-filter 在 three.js WebGL 画布上方合成时可能整块渲染成黑色
+   （音量 popover 悬浮黑块 bug）。音量弹层改不透明底 + 常规阴影。 */
+.mineradio-player .volume-popover {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  background: rgba(14, 15, 20, 0.95) !important;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35) !important;
+}
+/* 控制条玻璃 SVG 位移滤镜同样基于 backdrop-filter：
+   若在某些驱动上失败会整条变黑，这里保留但降级为纯 blur 兜底 */
+.mineradio-player.control-glass-svg-ok #bottom-bar.visible {
+  backdrop-filter: blur(30px) saturate(1.4) !important;
+  -webkit-backdrop-filter: blur(30px) saturate(1.4) !important;
+}
+.mineradio-player.control-glass-svg-ok #bottom-bar.visible #play-btn {
+  backdrop-filter: blur(24px) saturate(1.3) !important;
+  -webkit-backdrop-filter: blur(24px) saturate(1.3) !important;
+}

@@ -1,0 +1,57 @@
+# 构建产物（build-con=控制台自检版，build-rel=发布版，均不入库）
+build/
+build-*/
+*.o
+*.obj
+*.exe
+*.dll
+*.a
+*.so
+*.dylib
+
+# Qt 运行时依赖（windeployqt 生成的 DLL 目录，在 build/ 内已被忽略）
+multimedia/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# IDE
+.vscode/
+.idea/
+*.user
+
+# 系统
+Thumbs.db
+.DS_Store
+
+# 用户数据（本地音源脚本、播放缓存等，不传）
+*.audio
+muyun-audio/
+
+# 调试/运行日志
+*.log
+
+# MuyunStage 第三方 SDK 归档（用 stage/sdk/fetch-sdk.ps1 重新拉取）
+stage/sdk/*.tgz
+stage/sdk/*.zip
+stage/sdk/webview2/
+# 微软 WebView2 SDK 的头文件（2.8MB，nuget 可重新拉取；不入库＝不重复分发微软 SDK）
+stage/sdk/include/
+# 舞台运行时产物（下载封面/音频/WebView2 用户数据）
+stage/web/track.bin
+stage/web/covers/*.jpg
+stage/web/covers/*.png
+!stage/web/covers/test.png
+stage/webview2-data/
+wv2data*/
+
+# 开发备忘录（不属于程序，禁止随仓库/推送分发）
+HANDOFF.md
+MEMORY.md
+
+# 打包输出与脚本缓存
+package/
+package_scripts/

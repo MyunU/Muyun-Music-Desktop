@@ -1,0 +1,8 @@
+{
+  "_comment": "更新提示用的版本清单。发新版：改 version/notes 与下面两个 url，并把同版本号的安装包传到 Releases。",
+  "version": "1.0.0",
+  "pubDate": "2026-10-04",
+  "notes": "首个开源版本。\n\n· 多平台搜索、榜单与歌单广场\n· 逐字歌词、桌面歌词、三种全屏播放页\n· 全格式音效：均衡器 / 混响 / 3D 环绕 / 响度均衡\n· 本地音乐库、收藏与歌单、局域网同步\n· 播放与下载由用户自行导入的 LX 音源脚本提供",
+  "pageUrl": "https://github.com/MyunU/Muyun-Music-Desktop/releases/tag/v1.0.0",
+  "downloadUrl": "https://github.com/MyunU/Muyun-Music-Desktop/releases/download/v1.0.0/MuyunMusic-1.0.0.exe"
+}

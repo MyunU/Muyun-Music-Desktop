@@ -1,0 +1,3 @@
+// 由 CMake 在 configure 阶段生成（见 CMakeLists.txt）：把本机图标绝对路径填进来。
+// 仓库里不放写死路径的 app.rc，否则别人 clone 到别的目录编不过。
+IDI_ICON1 ICON "@MUYUN_APP_ICON@"

@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ff9a76"/>
+      <stop offset="45%" stop-color="#ff7eb3"/>
+      <stop offset="100%" stop-color="#8e6bd8"/>
+    </linearGradient>
+    <linearGradient id="cloud" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#ffe8f0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 圆角背景 -->
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#sky)"/>
+
+  <!-- 暮云：柔和云朵 -->
+  <g fill="url(#cloud)" opacity="0.96">
+    <circle cx="112" cy="150" r="34"/>
+    <circle cx="150" cy="138" r="42"/>
+    <circle cx="192" cy="152" r="28"/>
+    <rect x="96" y="150" width="112" height="44" rx="22"/>
+  </g>
+
+  <!-- 音符：从云中升起 -->
+  <g fill="#ffffff">
+    <circle cx="92" cy="82" r="12"/>
+    <circle cx="176" cy="70" r="12"/>
+  </g>
+  <g stroke="#ffffff" stroke-width="9" stroke-linecap="round" fill="none">
+    <path d="M92 82 L92 140"/>
+    <path d="M176 70 L176 128"/>
+    <path d="M92 118 Q128 92 176 106"/>
+    <path d="M92 82 Q128 60 176 70"/>
+  </g>
+</svg>

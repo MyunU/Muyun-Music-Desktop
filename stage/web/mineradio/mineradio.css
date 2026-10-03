@@ -1,0 +1,994 @@
+/*!
+ * Mineradio 播放界面样式（移植版，作用域限定于 .mineradio-player 覆盖层）
+ * 提取自 Mineradio 项目 public/index.html <style>（GPL-3.0）
+ *   https://github.com/XxHuberrr/Mineradio
+ * body./:root 级状态选择器已重写到覆盖层根节点。
+ */
+.mineradio-player{position:fixed;inset:0;overflow:hidden;background:#000;color:#e8ecef;font-family:var(--font-sans);-webkit-font-smoothing:antialiased}
+.mineradio-player *{box-sizing:border-box}
+/* ===== [mineradio css:root vars] source lines 24-27 ===== */
+.mineradio-player{--font-sans:"Noto Sans SC","PingFang SC","HarmonyOS Sans SC","Alibaba PuHuiTi","Inter",-apple-system,BlinkMacSystemFont,system-ui,sans-serif;--font-mono:"JetBrains Mono","Geist Mono","SF Mono",ui-monospace,monospace;--fc-bg:#08090B;--fc-paper:#0E1014;--fc-ink:#E8ECEF;--fc-ink-2:#D2D7DC;--fc-muted:#8A9099;--fc-hair:#1A1D22;--fc-hair-2:#262A31;--fc-accent:#00F5D4;--fc-accent-hov:#00E0BE;--fc-accent-rgb:0,245,212;--fc-blue:#2442ff;--fc-warm:#f8f4ee;--chill-ink:#030608;--chill-deep:#061116;--chill-cyan:#8fe9ff;--chill-blue:#73a7ff;--chill-mint:#9cffdf;--chill-soft:rgba(214,248,255,.9);--champagne:#f4d28a;--champagne-deep:#9a6f2c;--home-accent:#00f5d4;--home-accent-rgb:0,245,212;--visual-tint:#9db8cf;--source-netease:#d95b67;--source-qq:#00F5D4;--source-local:#9db8cf}
+
+.mineradio-player{--glass-bg:linear-gradient(112deg,rgba(72,74,76,.62),rgba(24,27,30,.70) 48%,rgba(8,12,14,.74));--glass-bg-focus:linear-gradient(112deg,rgba(88,91,92,.68),rgba(28,32,35,.76) 50%,rgba(8,13,15,.82));--glass-border:rgba(0,245,212,.30);--glass-border-soft:rgba(255,255,255,.095);--glass-shadow:0 22px 64px rgba(0,0,0,.30),0 0 34px rgba(0,245,212,.052),inset 0 1px 0 rgba(255,255,255,.16),inset 0 -24px 58px rgba(0,0,0,.16);--glass-shadow-focus:0 24px 72px rgba(0,0,0,.34),0 0 0 1px rgba(0,245,212,.13),0 0 42px rgba(0,245,212,.075),inset 0 1px 0 rgba(255,255,255,.20)}
+
+.mineradio-player{--saved-panel-glass-bg:rgba(0,0,0,.10);--saved-panel-glass-filter:blur(12px) saturate(1.8) brightness(1.16);--saved-panel-glass-svg-filter:url(#mineradio-control-glass-filter) saturate(1);--saved-panel-glass-shadow:inset 0 0 2px 1px rgba(255,255,255,.35),inset 0 0 10px 4px rgba(255,255,255,.15),0 4px 16px rgba(17,17,26,.05),0 8px 24px rgba(17,17,26,.05),0 16px 56px rgba(17,17,26,.05),inset 0 4px 16px rgba(17,17,26,.05),inset 0 8px 24px rgba(17,17,26,.05),inset 0 16px 56px rgba(17,17,26,.05);--saved-panel-glass-radius:50px;--saved-button-glass-bg:rgba(0,0,0,.10);--saved-button-glass-filter:blur(12px) saturate(1.8) brightness(1.16);--saved-button-glass-svg-filter:url(#mineradio-control-glass-filter) saturate(1);--saved-button-glass-shadow:inset 0 0 2px 1px rgba(255,255,255,.34),inset 0 0 10px 4px rgba(255,255,255,.13),0 10px 30px rgba(0,0,0,.18);--saved-button-glass-hover-bg:rgba(255,255,255,.055);--saved-button-glass-hover-shadow:inset 0 0 2px 1px rgba(255,255,255,.42),inset 0 0 12px 5px rgba(255,255,255,.17),0 12px 34px rgba(0,0,0,.22),0 0 18px rgba(255,255,255,.06)}
+
+.mineradio-player{--home-icon-color:#f4d28a;--home-icon-rgb:244,210,138;--visual-icon-color:#7fd8ff;--visual-icon-rgb:127,216,255}
+/* ===== [mineradio css:background & canvas] source lines 86-112 ===== */
+/* ---------- 背景 ---------- */
+.mineradio-player #custom-bg{position:fixed;inset:0;z-index:0;background:var(--custom-bg-color,#000);overflow:hidden;transition:background .35s ease}
+
+.mineradio-player #custom-bg-video{position:absolute;inset:-1px;width:calc(100% + 2px);height:calc(100% + 2px);object-fit:cover;opacity:var(--custom-bg-video-opacity,0);filter:none;transform:scale(1.002);transition:opacity .35s ease;pointer-events:none;background:#000}
+
+.mineradio-player #custom-bg::before{content:'';position:absolute;inset:-1px;background-image:var(--custom-bg-image,none);background-size:cover;background-position:center;opacity:var(--custom-bg-image-opacity,0);filter:none;transform:scale(1.002);transition:opacity .35s ease,background-image .35s ease;pointer-events:none}
+
+.mineradio-player #custom-bg::after{content:'';position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,0,0,.06),rgba(0,0,0,.16));opacity:var(--custom-bg-overlay-opacity,0);pointer-events:none}
+
+.mineradio-player.custom-background-override #custom-bg::after{background:linear-gradient(180deg,rgba(0,0,0,.018),rgba(0,0,0,.045))}
+
+.mineradio-player.custom-background-override.custom-background-flat #custom-bg::after{opacity:0!important}
+
+.mineradio-player.custom-background-video #custom-bg::before{opacity:0!important}
+
+.mineradio-player #album-bg{position:fixed;inset:0;z-index:0;background-size:cover;background-position:center;filter:blur(120px) brightness(0.18) saturate(1.5);transform:scale(1.4);transition:background-image 1.5s ease,opacity 1.5s ease;opacity:0}
+
+.mineradio-player #album-bg.visible{opacity:1}
+
+.mineradio-player.custom-background-override #album-bg{opacity:0!important}
+
+.mineradio-player #canvas-container{position:fixed;inset:0;z-index:1;transition:opacity 1450ms cubic-bezier(.16,1,.3,1),transform 1450ms cubic-bezier(.16,1,.3,1)}
+
+.mineradio-player #canvas-container canvas{display:block;width:100%!important;height:100%!important}
+
+.mineradio-player #canvas-container:focus,.mineradio-player #canvas-container:focus-visible,.mineradio-player #canvas-container canvas:focus,.mineradio-player #canvas-container canvas:focus-visible,.mineradio-player html:focus,.mineradio-player html:focus-visible,.mineradio-player:focus,.mineradio-player:focus-visible{outline:none!important;box-shadow:none!important}
+
+.mineradio-player #canvas-container canvas{outline:none!important;border:0!important}
+
+.mineradio-player.render-deep-sleep #canvas-container,.mineradio-player.render-deep-sleep #idle-guide-canvas,.mineradio-player.render-deep-sleep #splash-canvas,.mineradio-player.render-deep-sleep #hand-canvas{opacity:0!important;visibility:hidden!important}
+
+.mineradio-player.splash-active:not(.splash-revealing) #canvas-container{opacity:.16;transform:scale(1)}
+
+.mineradio-player.splash-active.splash-revealing #canvas-container{opacity:1;transform:scale(1)}
+
+.mineradio-player #idle-guide-canvas{position:fixed;inset:0;z-index:2;width:100%;height:100%;pointer-events:none;opacity:0;transition:opacity .7s cubic-bezier(.22,1,.36,1)}
+
+.mineradio-player.idle-guide-on #idle-guide-canvas{opacity:1!important}
+
+.mineradio-player.home-wallpaper-preview #idle-guide-canvas{opacity:0!important;visibility:hidden!important}
+
+.mineradio-player.idle-guide-interactive #canvas-container{cursor:grab}
+
+.mineradio-player.idle-guide-dragging #canvas-container{cursor:grabbing}
+
+.mineradio-player #free-camera-hint{position:fixed;z-index:22;left:24px;bottom:92px;max-width:min(420px,calc(100vw - 48px));padding:10px 12px;border-radius:12px;border:1px solid rgba(255,255,255,.10);background:rgba(5,6,8,.78);box-shadow:0 18px 52px rgba(0,0,0,.42),inset 0 1px 0 rgba(255,255,255,.08);backdrop-filter:blur(18px) saturate(1.08);-webkit-backdrop-filter:blur(18px) saturate(1.08);color:rgba(255,255,255,.72);font-size:11px;line-height:1.45;opacity:0;transform:translateY(8px);pointer-events:none;transition:opacity .2s,transform .2s}
+
+.mineradio-player #free-camera-hint.show{opacity:1;transform:translateY(0)}
+
+.mineradio-player #free-camera-hint b{color:#fff;font-weight:780}
+
+
+/* ===== [mineradio css:thumb + bottom controls + immersive] source lines 504-775 ===== */
+/* ---------- 左下小封面 ---------- */
+.mineradio-player #thumb-wrap{position:fixed;z-index:6;left:24px;bottom:24px;display:none;align-items:center;gap:14px;opacity:0;pointer-events:none;transition:opacity .8s ease}
+
+.mineradio-player #thumb-wrap.visible{opacity:1;pointer-events:auto}
+
+.mineradio-player #thumb-cover{width:64px;height:64px;border-radius:8px;object-fit:cover;background:rgba(255,255,255,0.05);box-shadow:0 8px 32px rgba(0,0,0,0.4);transition:transform .15s ease}
+
+.mineradio-player #thumb-info{display:flex;flex-direction:column;gap:4px;max-width:250px;min-width:0}
+
+.mineradio-player #thumb-title{font-size:13px;font-weight:500;color:rgba(255,255,255,0.92);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;transition:color .2s,text-shadow .2s}
+
+.mineradio-player #thumb-artist{font-size:11px;font-weight:300;color:rgba(255,255,255,0.45);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:.5px;cursor:pointer;transition:color .2s,text-shadow .2s}
+
+.mineradio-player #thumb-title:hover,.mineradio-player #thumb-artist:hover{color:#fff0bf;text-shadow:0 0 16px rgba(244,210,138,.22)}
+
+
+/* ---------- 底部控件 ---------- */
+.mineradio-player .control-glass-filter-svg{position:absolute;width:0;height:0;overflow:hidden;pointer-events:none}
+
+.mineradio-player #bottom-handle{position:fixed;z-index:8;left:50%;bottom:13px;width:236px;height:28px;border:0;border-radius:999px;background:transparent;box-shadow:none;backdrop-filter:none;-webkit-backdrop-filter:none;transform:translateX(-50%) translateY(0) scale(.96);opacity:.14;cursor:pointer;transition:opacity .42s cubic-bezier(.16,1,.3,1),transform .42s cubic-bezier(.16,1,.3,1);display:flex;align-items:center;justify-content:center;padding:0}
+
+.mineradio-player #bottom-handle::before{content:'';position:absolute;inset:-12px -18px -8px;border-radius:999px;background:transparent}
+
+.mineradio-player #bottom-handle span{display:block;width:164px;height:4px;border-radius:999px;background:rgba(255,255,255,.72);box-shadow:0 0 16px rgba(255,255,255,.15),inset 0 1px 0 rgba(255,255,255,.70);transform:scaleX(.88);transition:transform .42s cubic-bezier(.16,1,.3,1),opacity .42s,box-shadow .42s}
+
+.mineradio-player #bottom-handle:hover,.mineradio-player #bottom-handle.active,.mineradio-player.controls-handle-awake #bottom-handle{opacity:.82;transform:translateX(-50%) translateY(-2px) scale(1)}
+
+.mineradio-player #bottom-handle:hover span,.mineradio-player #bottom-handle.active span,.mineradio-player.controls-handle-awake #bottom-handle span{transform:scaleX(1);opacity:1}
+
+.mineradio-player.controls-visible #bottom-handle{opacity:0;pointer-events:none;transform:translateX(-50%) translateY(10px) scale(.78)}
+
+.mineradio-player.controls-visible #bottom-handle span{width:168px;opacity:0}
+
+.mineradio-player.immersive-mode #bottom-handle{opacity:0!important;pointer-events:none!important;transform:translateX(-50%) translateY(16px) scale(.92)!important}
+
+.mineradio-player #bottom-bar{position:fixed;z-index:6;bottom:16px;left:50%;transform:translateX(-50%) translateY(36px) scale(.972);display:flex;flex-direction:column;align-items:center;gap:10px;opacity:0;pointer-events:none;filter:none;transition:opacity .34s cubic-bezier(.16,1,.3,1),bottom .34s cubic-bezier(.16,1,.3,1),width .34s,transform .46s cubic-bezier(.16,1,.3,1),filter .38s cubic-bezier(.16,1,.3,1);width:min(1080px,calc(100vw - 56px));padding:9px 22px 14px;border-radius:50px;background:transparent;border:0;backdrop-filter:none;-webkit-backdrop-filter:none;box-shadow:none}
+
+.mineradio-player.control-glass-svg-ok #bottom-bar{backdrop-filter:none;-webkit-backdrop-filter:none}
+
+.mineradio-player #bottom-bar::before{content:none}
+
+.mineradio-player #bottom-bar::after{content:none}
+
+.mineradio-player #bottom-bar.visible{opacity:.91;pointer-events:auto;transform:translateX(-50%) translateY(0) scale(1);filter:blur(0);background:rgba(0,0,0,.10);backdrop-filter:blur(12px) saturate(1.8) brightness(1.16);-webkit-backdrop-filter:blur(12px) saturate(1.8) brightness(1.16);box-shadow:inset 0 0 2px 1px rgba(255,255,255,.35),inset 0 0 10px 4px rgba(255,255,255,.15),0 4px 16px rgba(17,17,26,.05),0 8px 24px rgba(17,17,26,.05),0 16px 56px rgba(17,17,26,.05),inset 0 4px 16px rgba(17,17,26,.05),inset 0 8px 24px rgba(17,17,26,.05),inset 0 16px 56px rgba(17,17,26,.05)}
+
+.mineradio-player.control-glass-svg-ok #bottom-bar.visible{background:rgba(0,0,0,.10);backdrop-filter:url(#mineradio-control-glass-filter) saturate(1);-webkit-backdrop-filter:url(#mineradio-control-glass-filter) saturate(1)}
+
+.mineradio-player #bottom-bar.soft-hidden{opacity:0;pointer-events:none;transform:translateX(-50%) translateY(88px) scale(.972);filter:none;background:transparent;backdrop-filter:none;-webkit-backdrop-filter:none;box-shadow:none}
+
+.mineradio-player.home-controls-locked #bottom-bar{opacity:0!important;pointer-events:none!important;transform:translateX(-50%) translateY(92px) scale(.985)!important;filter:none!important;background:transparent!important;backdrop-filter:none!important;-webkit-backdrop-filter:none!important;box-shadow:none!important}
+
+.mineradio-player #bottom-bar.stage-mode{bottom:14px;width:calc(100vw - 56px)}
+
+.mineradio-player #progress-bar{position:relative;z-index:1;align-self:center;width:calc(100% - clamp(86px,10vw,156px));height:4px;margin:4px auto 1px;background:rgba(255,255,255,0.095);border-radius:999px;cursor:pointer;transition:height .2s,background .2s,box-shadow .2s,width .2s;overflow:visible;box-shadow:inset 0 1px 1px rgba(255,255,255,.12),inset 0 -1px 1px rgba(0,0,0,.20)}
+
+.mineradio-player #progress-bar:hover,.mineradio-player #progress-bar.is-dragging{height:5px;background:rgba(255,255,255,.14);box-shadow:0 0 18px rgba(var(--fc-accent-rgb),.10),inset 0 1px 1px rgba(255,255,255,.18)}
+
+.mineradio-player #progress-fill{height:100%;width:0%;background:linear-gradient(90deg,rgba(255,255,255,.92),rgba(var(--fc-accent-rgb),.74));border-radius:999px;transition:width .12s linear;box-shadow:0 0 16px rgba(var(--fc-accent-rgb),.18)}
+
+.mineradio-player #progress-thumb{position:absolute;left:0;top:50%;width:13px;height:13px;border-radius:50%;background:radial-gradient(circle at 34% 28%,#fff 0,#fff 28%,rgba(194,235,255,.86) 74%);box-shadow:0 0 0 1px rgba(255,255,255,.34),0 0 18px rgba(178,229,255,.28);transform:translate(-50%,-50%) scale(.72);opacity:0;pointer-events:none;transition:opacity .16s,transform .16s}
+
+.mineradio-player #progress-bar:hover #progress-thumb,.mineradio-player #progress-bar.is-dragging #progress-thumb{opacity:1;transform:translate(-50%,-50%) scale(1)}
+
+.mineradio-player #progress-thumb::before,.mineradio-player #progress-thumb::after{content:'';position:absolute;left:50%;top:50%;width:3px;height:3px;border-radius:50%;background:rgba(255,255,255,.9);box-shadow:0 0 10px rgba(255,68,88,.42);opacity:0;transform:translate(-50%,-50%)}
+
+.mineradio-player #progress-bar.is-dragging #progress-thumb::before{animation:thumb-particle-a .62s ease-out infinite}
+
+.mineradio-player #progress-bar.is-dragging #progress-thumb::after{animation:thumb-particle-b .72s ease-out infinite}
+
+.mineradio-player .progress-drag-particle{position:fixed;z-index:999;left:0;top:0;width:4px;height:4px;border-radius:50%;background:rgba(255,255,255,.92);box-shadow:0 0 12px rgba(0,245,212,.36);pointer-events:none;animation:progress-particle-fade .62s ease-out forwards}
+
+@keyframes thumb-particle-a{0%{opacity:.8;transform:translate(-50%,-50%) scale(1)}100%{opacity:0;transform:translate(-18px,-17px) scale(.2)}}
+
+@keyframes thumb-particle-b{0%{opacity:.7;transform:translate(-50%,-50%) scale(1)}100%{opacity:0;transform:translate(16px,13px) scale(.22)}}
+
+@keyframes progress-particle-fade{0%{opacity:.95;transform:translate3d(var(--px,0),var(--py,0),0) scale(1)}100%{opacity:0;transform:translate3d(calc(var(--px,0) + var(--dx,0)),calc(var(--py,0) + var(--dy,0)),0) scale(.15)}}
+
+.mineradio-player #controls{position:relative;z-index:1;width:100%;display:grid;grid-template-columns:minmax(340px,1.08fr) minmax(380px,auto) minmax(400px,1.08fr);align-items:center;gap:18px}
+
+.mineradio-player .control-cluster{display:flex;align-items:center;gap:13px;min-width:0;height:62px}
+
+.mineradio-player .control-cluster.actions{grid-column:1;justify-content:flex-start;overflow:visible}
+
+.mineradio-player .control-cluster.transport{grid-column:2;justify-content:center}
+
+.mineradio-player .control-cluster.modes{grid-column:3;justify-content:flex-end}
+
+.mineradio-player .control-divider{display:none}
+
+.mineradio-player .control-track{display:flex;align-items:center;gap:12px;min-width:0;flex:1}
+
+.mineradio-player .control-cluster.actions #quality-control{flex:0 0 auto;margin-left:-2px}
+
+.mineradio-player .control-cover{width:52px;height:52px;border-radius:12px;background-size:cover;background-position:center;background-color:rgba(255,255,255,.070);border:0;box-shadow:0 10px 28px rgba(0,0,0,.24),inset 0 1px 0 rgba(255,255,255,.20),inset 0 0 0 1px rgba(255,255,255,.08);transition:transform .18s ease,opacity .2s ease,box-shadow .2s ease;flex:0 0 auto}
+
+.mineradio-player .control-cover.cover-empty{background-image:radial-gradient(circle at 35% 28%,rgba(255,255,255,.18),transparent 24%),linear-gradient(135deg,rgba(255,255,255,.10),rgba(255,255,255,.025));box-shadow:inset 0 1px 0 rgba(255,255,255,.055),0 8px 22px rgba(0,0,0,.22)}
+
+.mineradio-player .control-meta{min-width:0;max-width:360px;display:flex;flex-direction:column;gap:3px}
+
+.mineradio-player .control-title{font-size:13.5px;font-weight:700;color:rgba(255,255,255,.92);line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
+
+.mineradio-player .control-artist{font-size:11.5px;color:rgba(255,255,255,.48);line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
+
+.mineradio-player .control-title:hover,.mineradio-player .control-artist:hover{color:#fff;text-shadow:0 0 16px rgba(0,245,212,.20)}
+
+.mineradio-player .ctrl-btn{flex:0 0 auto;width:36px;height:36px;background:transparent;border:0;border-radius:11px;color:rgba(255,255,255,0.70);cursor:pointer;transition:color .18s,transform .18s,text-shadow .18s,background .18s,box-shadow .18s;display:flex;align-items:center;justify-content:center;padding:0;will-change:transform}
+
+.mineradio-player .ctrl-btn:focus{outline:none}
+
+.mineradio-player .ctrl-btn:focus-visible{outline:1px solid rgba(var(--fc-accent-rgb),.34);outline-offset:2px}
+
+.mineradio-player .ctrl-btn svg{width:21px;height:21px}
+
+.mineradio-player .ctrl-btn:hover{color:#fff;background:rgba(255,255,255,.045);transform:translateY(-1px);text-shadow:0 0 10px rgba(0,245,212,.12);box-shadow:inset 0 1px 0 rgba(255,255,255,.045)}
+
+.mineradio-player .ctrl-btn:active{transform:translateY(0) scale(.96)}
+
+.mineradio-player .ctrl-btn.active{color:rgba(210,244,241,.90);text-shadow:0 0 12px rgba(0,245,212,.16)}
+
+.mineradio-player .ctrl-btn.liked{color:#ff7a90;text-shadow:0 0 18px rgba(255,122,144,.36)}
+
+.mineradio-player .ctrl-btn.busy{opacity:.55;pointer-events:none}
+
+.mineradio-player #play-mode-btn[data-mode="loop"]{color:rgba(255,255,255,.70)}
+
+.mineradio-player #play-mode-btn[data-mode="shuffle"],.mineradio-player #play-mode-btn[data-mode="single"]{color:rgba(210,244,241,.90);text-shadow:0 0 12px rgba(0,245,212,.15)}
+
+.mineradio-player #play-mode-btn.mode-switching #play-mode-icon{animation:play-mode-pop .42s cubic-bezier(.16,1,.3,1)}
+
+@keyframes play-mode-pop{0%{opacity:.4;transform:translateY(3px) scale(.84) rotate(-18deg)}65%{opacity:1;transform:translateY(-1px) scale(1.10) rotate(4deg)}100%{opacity:1;transform:translateY(0) scale(1) rotate(0)}}
+
+.mineradio-player .heart-svg{width:21px;height:21px;display:block;fill:currentColor;stroke:none;filter:drop-shadow(0 0 0 rgba(255,122,144,0))}
+
+.mineradio-player .liked .heart-svg{filter:drop-shadow(0 0 10px rgba(255,122,144,.34))}
+
+.mineradio-player .song-action-btn .heart-svg,.mineradio-player .qi-act button .heart-svg{width:15px;height:15px}
+
+.mineradio-player .volume-control,.mineradio-player .quality-control{position:relative;display:flex;align-items:center;justify-content:center}
+
+.mineradio-player .volume-control::before,.mineradio-player .quality-control::before{content:'';position:absolute;left:-34px;right:-34px;bottom:18px;height:70px;display:none;z-index:0}
+
+.mineradio-player .volume-control.open::before,.mineradio-player .volume-control:hover::before,.mineradio-player .volume-control:focus-within::before,.mineradio-player .quality-control.open::before,.mineradio-player .quality-control:hover::before,.mineradio-player .quality-control:focus-within::before{display:block}
+
+.mineradio-player .volume-control.muted .ctrl-btn{color:rgba(255,255,255,.38)}
+
+.mineradio-player .volume-popover{position:absolute;left:50%;bottom:46px;transform:translateX(-50%) translateY(8px);width:154px;height:42px;padding:0 12px;border-radius:14px;border:1px solid rgba(255,255,255,.09);background:rgba(12,12,16,.78);backdrop-filter:blur(24px) saturate(1.12);-webkit-backdrop-filter:blur(24px) saturate(1.12);box-shadow:0 18px 48px rgba(0,0,0,.38),inset 0 1px 0 rgba(255,255,255,.07);display:flex;align-items:center;gap:9px;opacity:0;pointer-events:none;transition:opacity .2s,transform .2s;z-index:1}
+
+.mineradio-player .volume-control .ctrl-btn,.mineradio-player .quality-control .ctrl-btn{position:relative;z-index:2}
+
+.mineradio-player .volume-control.open .volume-popover,.mineradio-player .volume-control:hover .volume-popover,.mineradio-player .volume-control:focus-within .volume-popover,.mineradio-player .quality-control.open .quality-popover,.mineradio-player .quality-control:hover .quality-popover,.mineradio-player .quality-control:focus-within .quality-popover{opacity:1;pointer-events:auto;transform:translateX(-50%) translateY(0)}
+
+.mineradio-player #quality-btn.quality-pill{width:auto;min-width:56px;padding:0 11px;border-radius:13px;font-size:11px;font-weight:800;letter-spacing:.2px;color:rgba(237,245,255,.82);background:rgba(255,255,255,.038);box-shadow:inset 0 1px 0 rgba(255,255,255,.08)}
+
+.mineradio-player #quality-btn-label{display:block;min-width:30px;text-align:center;white-space:nowrap}
+
+.mineradio-player .quality-popover{position:absolute;left:50%;bottom:46px;transform:translateX(-50%) translateY(8px);width:228px;padding:8px;border-radius:14px;border:1px solid rgba(157,184,207,.24);background:rgba(10,11,14,.82);backdrop-filter:blur(24px) saturate(1.25);-webkit-backdrop-filter:blur(24px) saturate(1.25);box-shadow:0 18px 48px rgba(0,0,0,.38),inset 0 1px 0 rgba(255,255,255,.08);display:grid;grid-template-columns:1fr;gap:6px;opacity:0;pointer-events:none;transition:opacity .2s,transform .2s;z-index:8}
+
+.mineradio-player .quality-option{min-height:40px;border-radius:9px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.045);color:rgba(255,255,255,.70);font-family:inherit;font-size:12px;font-weight:800;letter-spacing:.1px;cursor:pointer;transition:background .2s,border-color .2s,color .2s,transform .2s;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:7px 10px;text-align:left}
+
+.mineradio-player .quality-option span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+.mineradio-player .quality-option small{font-size:9.5px;font-weight:700;color:rgba(255,255,255,.42);letter-spacing:0;white-space:nowrap}
+
+.mineradio-player .quality-option:hover{transform:translateY(-1px);color:#fff;background:rgba(255,255,255,.09)}
+
+.mineradio-player .quality-option.active{color:#eaf2ff;border-color:rgba(157,184,207,.46);background:rgba(157,184,207,.16);box-shadow:inset 0 1px 0 rgba(255,255,255,.08)}
+
+.mineradio-player .quality-option.locked{opacity:.42;cursor:not-allowed;transform:none!important}
+
+.mineradio-player .quality-option.locked small::after{content:' · 需网易云SVIP';color:rgba(244,210,138,.88)}
+
+.mineradio-player #volume-slider{width:92px;accent-color:var(--fc-accent);cursor:pointer}
+
+.mineradio-player #volume-value{width:34px;text-align:right;font-size:10px;color:rgba(255,255,255,.52);font-variant-numeric:tabular-nums}
+
+.mineradio-player .mini-queue-popover{position:absolute;left:50%;bottom:calc(100% + 14px);width:min(420px,calc(100vw - 32px));max-height:min(420px,calc(100vh - 170px));padding:14px;border-radius:16px;border:1px solid rgba(255,255,255,.075);background:linear-gradient(145deg,rgba(18,18,23,.82),rgba(8,8,12,.88));backdrop-filter:blur(30px) saturate(1.08);-webkit-backdrop-filter:blur(30px) saturate(1.08);box-shadow:0 22px 70px rgba(0,0,0,.46),inset 0 1px 0 rgba(255,255,255,.065);opacity:0;pointer-events:none;transform:translateX(-50%) translateY(12px) scale(.98);transition:opacity .22s,transform .22s;z-index:7;overflow:hidden}
+
+.mineradio-player .mini-queue-popover.show{opacity:1;pointer-events:auto;transform:translateX(-50%) translateY(0) scale(1)}
+
+.mineradio-player .mini-queue-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:10px}
+
+.mineradio-player .mini-queue-title{font-size:12px;font-weight:700;color:rgba(255,255,255,.92);letter-spacing:.4px}
+
+.mineradio-player .mini-queue-count{font-size:10.5px;color:rgba(255,255,255,.44);margin-top:3px}
+
+.mineradio-player .mini-queue-list{display:flex;flex-direction:column;gap:6px;max-height:min(320px,calc(100vh - 250px));overflow:auto;padding-right:2px;overscroll-behavior:contain}
+
+.mineradio-player .mini-queue-list::-webkit-scrollbar{width:3px}
+
+.mineradio-player .mini-queue-list::-webkit-scrollbar-thumb{background:rgba(255,255,255,.20);border-radius:3px}
+
+.mineradio-player .mini-queue-item{display:flex;align-items:center;gap:10px;padding:8px;border-radius:11px;border:1px solid rgba(255,255,255,.055);background:rgba(255,255,255,.032);cursor:pointer;transition:background .18s,border-color .18s,transform .18s,box-shadow .18s;will-change:transform,opacity}
+
+.mineradio-player .mini-queue-item:hover{background:rgba(255,255,255,.07);transform:translateY(-1px)}
+
+.mineradio-player .mini-queue-item.now{border-color:rgba(0,245,212,.36);background:rgba(0,245,212,.075);box-shadow:inset 0 1px 0 rgba(255,255,255,.08),0 10px 28px rgba(0,245,212,.06)}
+
+.mineradio-player .mini-queue-item img,.mineradio-player .mini-queue-cover{width:38px;height:38px;border-radius:7px;object-fit:cover;background:rgba(255,255,255,.07);flex-shrink:0}
+
+.mineradio-player .mini-queue-info{flex:1;min-width:0}
+
+.mineradio-player .mini-queue-name{font-size:12px;color:rgba(255,255,255,.90);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+.mineradio-player .mini-queue-item.now .mini-queue-name{color:#fff}
+
+.mineradio-player .mini-queue-sub{font-size:10.5px;color:rgba(255,255,255,.42);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
+
+.mineradio-player .mini-queue-remove{width:24px;height:24px;border:none;border-radius:6px;background:rgba(255,255,255,.06);color:rgba(255,255,255,.50);cursor:pointer;line-height:1}
+
+.mineradio-player .mini-queue-remove:hover{background:rgba(255,86,100,.78);color:#fff}
+
+.mineradio-player .mini-queue-remove.mini-queue-next:hover{background:rgba(0,245,212,.16);color:#eafffb}
+
+.mineradio-player .mini-queue-empty{padding:24px 8px;text-align:center;color:rgba(255,255,255,.35);font-size:11.5px}
+
+.mineradio-player .mini-queue-skeleton{height:56px;border-radius:12px;border:1px solid rgba(255,255,255,.06);background:linear-gradient(90deg,rgba(255,255,255,.035),rgba(0,245,212,.085),rgba(255,255,255,.035));background-size:220% 100%;animation:queue-shimmer 1.05s linear infinite}
+
+.mineradio-player .mini-queue-skeleton + .mini-queue-skeleton{margin-top:6px}
+
+@keyframes queue-shimmer{0%{background-position:120% 0}100%{background-position:-120% 0}}
+
+.mineradio-player .lyrics-word-icon{font-weight:800;font-size:20px;line-height:1;color:currentColor;font-family:'PingFang SC','Microsoft YaHei',sans-serif}
+
+.mineradio-player #play-btn{width:58px;height:58px;border:0;border-radius:50%;color:rgba(255,255,255,.96);background:rgba(0,0,0,.10);transition:transform .20s cubic-bezier(.16,1,.3,1),background .20s,box-shadow .20s,filter .20s;box-shadow:inset 0 0 2px 1px rgba(255,255,255,.34),inset 0 0 10px 4px rgba(255,255,255,.13),0 10px 30px rgba(0,0,0,.18);backdrop-filter:blur(12px) saturate(1.8) brightness(1.16);-webkit-backdrop-filter:blur(12px) saturate(1.8) brightness(1.16)}
+
+.mineradio-player.control-glass-svg-ok #play-btn{backdrop-filter:blur(24px) saturate(1) brightness(1);-webkit-backdrop-filter:blur(24px) saturate(1) brightness(1)}
+
+.mineradio-player #play-btn svg{width:24px;height:24px}
+
+.mineradio-player #play-btn:hover{background:rgba(255,255,255,.055);transform:translateY(-1px) scale(1.012);box-shadow:inset 0 0 2px 1px rgba(255,255,255,.42),inset 0 0 12px 5px rgba(255,255,255,.17),0 12px 34px rgba(0,0,0,.22),0 0 18px rgba(var(--fc-accent-rgb),.10)}
+
+.mineradio-player #play-btn:active{transform:translateY(0) scale(.965);box-shadow:inset 0 0 2px 1px rgba(255,255,255,.28),inset 0 0 10px 4px rgba(255,255,255,.10),0 8px 22px rgba(0,0,0,.20)}
+
+.mineradio-player #time-display{flex:0 0 auto;height:36px;display:flex;align-items:center;justify-content:center;padding:0 2px;font-size:12px;color:rgba(255,255,255,0.50);letter-spacing:.35px;min-width:86px;text-align:center;font-variant-numeric:tabular-nums}
+
+.mineradio-player.diy-mode #bottom-bar{width:min(1160px,calc(100vw - 148px));left:calc(50% - 34px);bottom:18px}
+
+.mineradio-player.diy-mode #bottom-bar.stage-mode{width:min(1160px,calc(100vw - 148px));bottom:18px}
+
+@media (max-width: 1180px){.mineradio-player.diy-mode #bottom-bar,.mineradio-player.diy-mode #bottom-bar.stage-mode{width:calc(100vw - 142px);padding:9px 14px 12px;left:calc(50% - 34px)}.mineradio-player.diy-mode #controls{grid-template-columns:minmax(240px,1fr) minmax(214px,auto) minmax(260px,auto);gap:8px}.mineradio-player .control-cluster{gap:8px}.mineradio-player .control-cover{width:44px;height:44px}.mineradio-player .control-meta{max-width:138px}.mineradio-player .ctrl-btn{width:32px;height:32px}.mineradio-player .ctrl-btn svg{width:19px;height:19px}.mineradio-player.diy-mode #play-btn{width:54px;height:54px}.mineradio-player.diy-mode #time-display{min-width:72px;font-size:11px}}
+
+@media (max-width: 920px){.mineradio-player #bottom-bar,.mineradio-player #bottom-bar.stage-mode{width:calc(100vw - 28px);padding:9px 14px 12px}.mineradio-player #controls{grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);gap:8px}.mineradio-player .control-cluster{gap:8px;height:56px}.mineradio-player .control-cover{width:44px;height:44px}.mineradio-player .control-meta{max-width:170px}.mineradio-player .control-title{font-size:12.5px}.mineradio-player .control-artist{font-size:11px}.mineradio-player .ctrl-btn{width:32px;height:32px}.mineradio-player .ctrl-btn svg{width:19px;height:19px}.mineradio-player .volume-popover,.mineradio-player .quality-popover{bottom:42px}.mineradio-player #play-btn{width:54px;height:54px}.mineradio-player #time-display{display:none}}
+
+@media (max-width: 620px){.mineradio-player #bottom-bar,.mineradio-player #bottom-bar.stage-mode{width:calc(100vw - 20px)}.mineradio-player #controls{grid-template-columns:1fr}.mineradio-player .control-cluster{grid-column:1!important;justify-content:center}.mineradio-player .control-cluster.transport{order:1}.mineradio-player .control-cluster.actions{order:2}.mineradio-player .control-cluster.modes{order:3}.mineradio-player .control-track{display:none}.mineradio-player .heart-svg{width:19px;height:19px}}
+
+/* ---------- 控制栏自适应实验：中轴固定 + 左右等宽弹性 ---------- */
+.mineradio-player #bottom-bar,.mineradio-player #bottom-bar.stage-mode,.mineradio-player.simple-mode #bottom-bar{
+  box-sizing:border-box;
+  width:min(1120px,calc(100vw - clamp(20px,5vw,72px)));
+  padding:clamp(8px,1.2vw,11px) clamp(12px,2.2vw,24px) clamp(10px,1.35vw,14px);
+}
+
+.mineradio-player.diy-mode #bottom-bar,.mineradio-player.diy-mode #bottom-bar.stage-mode{
+  left:50%;
+  width:min(1120px,calc(100vw - clamp(28px,8vw,148px)));
+}
+
+.mineradio-player #controls,.mineradio-player.simple-mode #controls,.mineradio-player.diy-mode #controls{
+  grid-template-columns:minmax(0,1fr) max-content minmax(0,1fr);
+  gap:clamp(8px,1.7vw,18px);
+}
+
+.mineradio-player .control-cluster{min-width:0}
+
+.mineradio-player .control-cluster.actions{
+  justify-content:flex-start;
+  overflow:visible;
+}
+
+.mineradio-player .control-cluster.transport{
+  justify-self:center;
+  justify-content:center;
+  width:max-content;
+  gap:clamp(8px,1.1vw,13px);
+}
+
+.mineradio-player .control-cluster.modes{
+  justify-content:flex-end;
+  overflow:visible;
+}
+
+.mineradio-player .control-track{
+  flex:1 1 auto;
+  min-width:0;
+}
+
+.mineradio-player .control-meta{
+  max-width:min(320px,100%);
+}
+
+@media (max-width:1180px){
+  .mineradio-player.diy-mode #bottom-bar,.mineradio-player.diy-mode #bottom-bar.stage-mode{
+    left:50%;
+    width:calc(100vw - clamp(28px,8vw,142px));
+  }
+
+  .mineradio-player .control-meta{max-width:min(220px,100%)}
+
+}
+
+@media (max-width:920px){
+  .mineradio-player #bottom-bar,.mineradio-player #bottom-bar.stage-mode,.mineradio-player.simple-mode #bottom-bar,.mineradio-player.diy-mode #bottom-bar,.mineradio-player.diy-mode #bottom-bar.stage-mode{
+    width:calc(100vw - 28px);
+  }
+
+  .mineradio-player #controls,.mineradio-player.simple-mode #controls,.mineradio-player.diy-mode #controls{
+    grid-template-columns:minmax(0,1fr) max-content minmax(0,1fr);
+  }
+
+  .mineradio-player .control-meta{max-width:min(170px,100%)}
+
+}
+
+@media (max-width:720px){
+  .mineradio-player .control-cover{display:none}
+
+  .mineradio-player .control-meta{max-width:min(132px,100%)}
+
+  .mineradio-player .control-cluster.modes{gap:6px}
+
+}
+
+@media (max-width:1180px){
+  .mineradio-player.diy-mode #quality-control{display:none!important}
+
+  .mineradio-player.diy-mode .control-cluster.modes{gap:7px}
+
+  .mineradio-player.diy-mode #controls{gap:10px}
+
+}
+
+@media (max-width:1040px){
+  .mineradio-player.diy-mode #time-display,.mineradio-player.diy-mode #controls-hide-btn{display:none!important}
+
+  .mineradio-player.diy-mode .control-track{max-width:260px}
+
+}
+
+@media (max-width:940px){
+  .mineradio-player.diy-mode .lyrics-toggle-btn,.mineradio-player.diy-mode #volume-control,.mineradio-player.diy-mode .fullscreen-toggle-btn{display:none!important}
+
+}
+
+@media (max-width:620px){
+  .mineradio-player #controls,.mineradio-player.simple-mode #controls,.mineradio-player.diy-mode #controls{
+    grid-template-columns:1fr;
+  }
+
+  .mineradio-player .control-cluster.actions,.mineradio-player .control-cluster.transport,.mineradio-player .control-cluster.modes{
+    justify-content:center;
+    width:100%;
+  }
+
+}
+
+.mineradio-player.immersive-mode #desktop-titlebar,.mineradio-player.immersive-mode #search-area,.mineradio-player.immersive-mode #top-right,.mineradio-player.immersive-mode #thumb-wrap,.mineradio-player.immersive-mode #fx-fab,.mineradio-player.immersive-mode #fx-panel,.mineradio-player.immersive-mode #trial-banner,.mineradio-player.immersive-mode #ai-depth-chip,.mineradio-player.immersive-mode #beat-chip,.mineradio-player.immersive-mode #gesture-hud,.mineradio-player.immersive-mode #hand-canvas,.mineradio-player.immersive-mode #hint,.mineradio-player.immersive-mode #upload-tip,.mineradio-player.immersive-mode #drop-overlay,.mineradio-player.immersive-mode #idle-guide-canvas,.mineradio-player.immersive-mode #login-guide-canvas,.mineradio-player.immersive-mode #toast,.mineradio-player.immersive-mode #source-fallback-notice,.mineradio-player.immersive-mode .modal-mask{opacity:0!important;visibility:hidden!important;pointer-events:none!important}
+
+.mineradio-player.immersive-mode .modal-mask{display:none!important}
+
+.mineradio-player.immersive-mode #bottom-bar.visible{z-index:32;bottom:22px;width:min(620px,calc(100vw - 56px));padding:10px 20px 13px;gap:9px;border-radius:22px;background:radial-gradient(circle at 20% 0%,rgba(255,255,255,.13),transparent 35%),linear-gradient(112deg,rgba(255,255,255,.060),rgba(12,15,18,.45) 52%,rgba(2,4,7,.58));border-color:rgba(255,255,255,.060);box-shadow:0 20px 70px rgba(0,0,0,.32),0 0 42px rgba(152,221,255,.055),inset 0 1px 0 rgba(255,255,255,.15),inset 0 -22px 58px rgba(0,0,0,.18);backdrop-filter:blur(46px) saturate(1.36);-webkit-backdrop-filter:blur(46px) saturate(1.36)}
+
+.mineradio-player.immersive-mode #bottom-bar.soft-hidden{opacity:0;pointer-events:none;transform:translateX(-50%) translateY(96px) scale(.97);filter:none;background:transparent;backdrop-filter:none;-webkit-backdrop-filter:none;box-shadow:none}
+
+.mineradio-player.immersive-mode #progress-bar{height:4px;background:rgba(255,255,255,.10)}
+
+.mineradio-player.immersive-mode #progress-bar:hover,.mineradio-player.immersive-mode #progress-bar.is-dragging{height:5px;background:rgba(255,255,255,.14)}
+
+.mineradio-player.immersive-mode #controls{display:flex;align-items:center;justify-content:center;gap:16px}
+
+.mineradio-player.immersive-mode .control-cluster{grid-column:auto!important;justify-content:center;height:64px;gap:14px}
+
+.mineradio-player.immersive-mode .control-cluster.actions{display:none}
+
+.mineradio-player.immersive-mode .control-cluster.transport{display:flex;order:1}
+
+.mineradio-player.immersive-mode .control-cluster.modes{display:flex;order:2;gap:14px}
+
+.mineradio-player.immersive-mode .control-track,.mineradio-player.immersive-mode #heart-btn,.mineradio-player.immersive-mode #collect-btn,.mineradio-player.immersive-mode #play-mode-btn,.mineradio-player.immersive-mode .lyrics-toggle-btn,.mineradio-player.immersive-mode #mini-queue-btn,.mineradio-player.immersive-mode #quality-control,.mineradio-player.immersive-mode #volume-control,.mineradio-player.immersive-mode #controls-hide-btn,.mineradio-player.immersive-mode .control-divider,.mineradio-player.immersive-mode .fullscreen-toggle-btn{display:none!important}
+
+.mineradio-player.immersive-mode #mini-queue-popover{display:none!important}
+
+.mineradio-player.immersive-mode .ctrl-btn{width:40px;height:40px;border-radius:12px}
+
+.mineradio-player.immersive-mode .ctrl-btn svg{width:22px;height:22px}
+
+.mineradio-player.immersive-mode #play-btn{width:64px;height:64px}
+
+.mineradio-player.immersive-mode #play-btn svg{width:25px;height:25px}
+
+.mineradio-player.immersive-mode #immersive-btn{color:#fff;text-shadow:0 0 18px rgba(255,255,255,.38)}
+
+.mineradio-player.immersive-mode #time-display{display:flex;height:40px;align-items:center;justify-content:center;min-width:86px;font-size:12px;color:rgba(255,255,255,.58)}
+
+@media (max-width: 620px){.mineradio-player.immersive-mode #bottom-bar{width:calc(100vw - 20px);padding:10px 12px 12px}.mineradio-player.immersive-mode #controls{gap:10px}.mineradio-player.immersive-mode .control-cluster{gap:10px;height:60px}.mineradio-player.immersive-mode .ctrl-btn{width:36px;height:36px}.mineradio-player.immersive-mode .ctrl-btn svg{width:20px;height:20px}.mineradio-player.immersive-mode #play-btn{width:58px;height:58px}.mineradio-player.immersive-mode #time-display{min-width:72px;font-size:10.5px}}
+
+@media (max-width: 420px){.mineradio-player.immersive-mode #time-display{display:none}}
+
+.mineradio-player.immersive-mode::after{content:'';position:fixed;left:0;right:0;bottom:0;height:118px;z-index:5;pointer-events:none;background:linear-gradient(180deg,rgba(0,0,0,0),rgba(0,0,0,.16))}
+
+
+/* ===== [mineradio css:spin keyframes] source lines 966-966 ===== */
+@keyframes spin{to{transform:rotate(360deg)}}
+/* ===== [mineradio css:ai/beat chips] source lines 971-979 ===== */
+/* ---------- AI 深度加载角标 ---------- */
+.mineradio-player #ai-depth-chip{position:fixed;z-index:7;top:80px;right:24px;background:rgba(10,10,16,0.85);border:1px solid rgba(244,210,138,0.32);padding:8px 14px;border-radius:14px;font-size:11px;color:var(--champagne);letter-spacing:.4px;display:none;align-items:center;gap:8px;backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px)}
+
+.mineradio-player #ai-depth-chip.show{display:flex}
+
+.mineradio-player #ai-depth-chip .mini-spin{width:11px;height:11px;border:1.5px solid rgba(244,210,138,.24);border-top-color:var(--champagne);border-radius:50%;animation:spin .7s linear infinite}
+
+
+.mineradio-player #beat-chip{position:fixed;z-index:7;top:122px;right:24px;background:rgba(10,10,16,0.85);border:1px solid rgba(126,226,168,0.3);padding:8px 14px;border-radius:14px;font-size:11px;color:#7ee2a8;letter-spacing:.4px;display:none;align-items:center;gap:8px;backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px)}
+
+.mineradio-player #beat-chip.show{display:flex}
+
+.mineradio-player #beat-chip .mini-spin{width:11px;height:11px;border:1.5px solid rgba(126,226,168,.25);border-top-color:#7ee2a8;border-radius:50%;animation:spin .7s linear infinite}
+
+
+/* ===== [mineradio css:fx panel] source lines 1017-1269 ===== */
+/* ============================================================ */
+.mineradio-player #fx-panel{position:fixed;z-index:18;right:-460px;bottom:92px;width:min(444px,calc(100vw - 48px));max-height:min(650px,calc(100vh - 132px));overflow:auto;overscroll-behavior:contain;background:var(--glass-bg);border:1px solid rgba(0,245,212,0.16);border-radius:20px;padding:18px 18px 20px;backdrop-filter:blur(44px) saturate(1.34);-webkit-backdrop-filter:blur(44px) saturate(1.34);box-shadow:var(--glass-shadow);opacity:0;transition:right .55s cubic-bezier(.16,1,.3,1),opacity .45s cubic-bezier(.16,1,.3,1),transform .55s cubic-bezier(.16,1,.3,1);pointer-events:none;transform:translateY(18px) scale(.97);scrollbar-width:thin;scrollbar-color:rgba(0,245,212,.22) transparent}
+
+.mineradio-player #fx-panel.show,.mineradio-player #fx-panel.peek{right:24px;opacity:1;pointer-events:auto;transform:translateY(0)}
+
+.mineradio-player #fx-panel.show{animation:fx-panel-in .56s cubic-bezier(.16,1,.3,1)}
+
+.mineradio-player #fx-panel.closing{animation:fx-panel-out .26s cubic-bezier(.5,0,.7,1)}
+
+.mineradio-player #fx-panel::-webkit-scrollbar{width:3px}
+
+.mineradio-player #fx-panel::-webkit-scrollbar-thumb{background:rgba(0,245,212,.24);border-radius:3px}
+
+.mineradio-player #fx-fab{position:fixed;z-index:19;right:24px;bottom:24px;width:54px;height:54px;border-radius:50%;border:1px solid rgba(0,245,212,.30);background:linear-gradient(145deg,rgba(255,255,255,.16),rgba(255,255,255,.055) 48%,rgba(0,245,212,.055));color:rgba(232,236,239,.88);display:flex;align-items:center;justify-content:center;cursor:pointer;backdrop-filter:blur(26px) saturate(1.34);-webkit-backdrop-filter:blur(26px) saturate(1.34);box-shadow:0 14px 40px rgba(0,0,0,.34),0 0 24px rgba(0,245,212,.07),inset 0 1px 0 rgba(255,255,255,.18);transition:bottom .38s cubic-bezier(.16,1,.3,1),transform .28s cubic-bezier(.16,1,.3,1),background .28s,border-color .28s,color .28s,box-shadow .28s}
+
+.mineradio-player #fx-fab:hover,.mineradio-player #fx-fab.active{transform:translateY(-2px) scale(1.04);background:rgba(0,245,212,.075);border-color:rgba(0,245,212,.50);color:#fff}
+
+.mineradio-player #fx-fab svg{transition:transform .38s cubic-bezier(.16,1,.3,1)}
+
+.mineradio-player #fx-fab.active svg{transform:rotate(90deg)}
+
+.mineradio-player #fx-fab-hide-btn{position:fixed;z-index:20;right:84px;bottom:37px;width:18px;height:28px;border-radius:999px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.035);color:rgba(255,255,255,.34);font-size:11px;line-height:1;opacity:0;transform:translateX(6px) scale(.92);transition:right .28s cubic-bezier(.16,1,.3,1),bottom .38s cubic-bezier(.16,1,.3,1),opacity .18s,transform .18s,background .18s,color .18s,border-color .18s;cursor:pointer}
+
+.mineradio-player #fx-fab:hover + #fx-fab-hide-btn,.mineradio-player #fx-fab-hide-btn:hover,.mineradio-player #fx-fab-hide-btn.on{opacity:1;transform:translateX(0) scale(1)}
+
+.mineradio-player #fx-fab-hide-btn:hover,.mineradio-player #fx-fab-hide-btn.on{border-color:rgba(var(--fc-accent-rgb),.34);background:rgba(var(--fc-accent-rgb),.10);color:#fff}
+
+.mineradio-player.fx-fab-auto-hide #fx-fab{right:-76px;opacity:0;visibility:hidden;pointer-events:none;transition:right .28s cubic-bezier(.16,1,.3,1),bottom .38s cubic-bezier(.16,1,.3,1),opacity .18s,visibility 0s linear .18s,transform .24s,background .28s,border-color .28s,color .28s,box-shadow .28s}
+
+.mineradio-player.fx-fab-auto-hide.fx-fab-peek #fx-fab{right:24px;opacity:1;visibility:visible;pointer-events:auto;transition:right .28s cubic-bezier(.16,1,.3,1),bottom .38s cubic-bezier(.16,1,.3,1),opacity .16s,transform .24s,background .28s,border-color .28s,color .28s,box-shadow .28s}
+
+.mineradio-player.fx-fab-auto-hide #fx-fab-hide-btn{right:-76px;opacity:0;visibility:hidden;pointer-events:none;transform:translateX(6px) scale(.92);transition:right .28s cubic-bezier(.16,1,.3,1),bottom .38s cubic-bezier(.16,1,.3,1),opacity .18s,visibility 0s linear .18s,transform .18s,background .18s,color .18s,border-color .18s}
+
+.mineradio-player.fx-fab-auto-hide.fx-fab-peek #fx-fab-hide-btn{right:84px;opacity:1;visibility:visible;pointer-events:auto;transform:translateX(0) scale(1);transition:right .28s cubic-bezier(.16,1,.3,1),bottom .38s cubic-bezier(.16,1,.3,1),opacity .16s,transform .18s,background .18s,color .18s,border-color .18s}
+
+.mineradio-player.controls-visible #fx-fab-hide-btn,.mineradio-player.desktop-shell.diy-mode.controls-visible #fx-fab-hide-btn{bottom:139px}
+
+.mineradio-player.immersive-mode #fx-fab-hide-btn{opacity:0!important;visibility:hidden!important;pointer-events:none!important}
+
+.mineradio-player.desktop-shell.diy-mode #fx-panel{top:64px;bottom:132px;max-height:none}
+
+.mineradio-player.desktop-shell.diy-mode #fx-fab{bottom:24px}
+
+.mineradio-player.desktop-shell.diy-mode #fx-fab-hide-btn{bottom:37px}
+
+.mineradio-player.controls-visible #fx-fab,.mineradio-player.desktop-shell.diy-mode.controls-visible #fx-fab{bottom:126px}
+
+.mineradio-player.desktop-shell.diy-mode #bottom-bar,.mineradio-player.desktop-shell.diy-mode #bottom-bar.stage-mode{left:50%;width:min(1080px,calc(100vw - 72px))}
+
+@media (max-height:760px){
+  .mineradio-player.desktop-shell.diy-mode #fx-panel{top:56px;bottom:116px;width:min(410px,calc(100vw - 48px));padding:14px}
+
+  .mineradio-player.desktop-shell.diy-mode #fx-fab{bottom:22px}
+
+  .mineradio-player.desktop-shell.diy-mode #fx-fab-hide-btn{bottom:35px}
+
+  .mineradio-player.desktop-shell.diy-mode.controls-visible #fx-fab{bottom:112px}
+
+  .mineradio-player.desktop-shell.diy-mode.controls-visible #fx-fab-hide-btn{bottom:125px}
+
+}
+
+@media (max-width:980px){
+  .mineradio-player.desktop-shell.diy-mode #fx-panel{left:18px;right:18px;width:auto;top:62px;bottom:132px}
+
+  .mineradio-player.desktop-shell.diy-mode #fx-panel.show,.mineradio-player.desktop-shell.diy-mode #fx-panel.peek{right:18px}
+
+}
+
+@keyframes fx-panel-in{0%{opacity:0;transform:translateX(32px) translateY(18px) scale(.96);filter:blur(8px)}100%{opacity:1;transform:translateX(0) translateY(0) scale(1);filter:blur(0)}}
+
+@keyframes fx-panel-out{0%{opacity:1;transform:translateX(0) translateY(0) scale(1);filter:blur(0)}100%{opacity:0;transform:translateX(24px) translateY(12px) scale(.97);filter:blur(6px)}}
+
+.mineradio-player .fx-head{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px;padding-bottom:13px;border-bottom:1px solid rgba(255,255,255,.065)}
+
+.mineradio-player .fx-head-main{min-width:0}
+
+.mineradio-player .fx-head-actions{display:flex;align-items:center;gap:7px;margin-left:12px;flex:0 0 auto}
+
+.mineradio-player .fx-head-actions .fx-mini-btn{width:auto;min-width:58px;height:28px;padding:0 10px;flex:0 0 auto;border-radius:9px}
+
+.mineradio-player .fx-title{font-size:14px;font-weight:500;letter-spacing:.6px;color:rgba(255,255,255,.95)}
+
+.mineradio-player .fx-sub{font-size:10px;color:rgba(255,255,255,.32);margin-top:4px;letter-spacing:1px}
+
+.mineradio-player .fx-close{border:none;background:transparent;color:rgba(255,255,255,.42);font-size:22px;line-height:1;cursor:pointer;padding:0 2px}
+
+.mineradio-player .fx-close:hover{color:#fff}
+
+.mineradio-player .fx-section-label{display:flex;align-items:center;gap:8px;font-size:10px;color:rgba(0,245,212,.56);letter-spacing:1.2px;text-transform:uppercase;margin:18px 0 9px;font-weight:700}
+
+.mineradio-player .fx-section-label::after{content:'';height:1px;flex:1;background:linear-gradient(90deg,rgba(0,245,212,.16),transparent)}
+
+.mineradio-player .fx-section-label:first-of-type{margin-top:0}
+
+
+/* --- 预设卡片网格 --- */
+.mineradio-player .preset-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-bottom:10px}
+
+.mineradio-player .preset-card{position:relative;min-height:94px;border-radius:11px;border:1.5px solid rgba(255,255,255,.08);background:rgba(255,255,255,.025);cursor:pointer;overflow:hidden;transition:all .25s;display:flex;flex-direction:column;justify-content:flex-end;padding:10px}
+
+.mineradio-player .preset-card:hover{border-color:rgba(255,255,255,.2);background:rgba(255,255,255,.05)}
+
+.mineradio-player .preset-card.active{border-color:rgba(0,245,212,.54);background:rgba(0,245,212,.075);box-shadow:0 0 0 1px rgba(0,245,212,.22),0 16px 46px rgba(0,245,212,.055)}
+
+.mineradio-player .preset-card.switching::after{content:'';position:absolute;inset:-35%;background:radial-gradient(circle,rgba(244,210,138,.26),transparent 58%);animation:preset-card-pulse .72s cubic-bezier(.16,1,.3,1);pointer-events:none}
+
+.mineradio-player .preset-card .pc-icon{position:absolute;top:8px;right:8px;width:24px;height:24px;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.45)}
+
+.mineradio-player .preset-card.active .pc-icon{color:var(--fc-accent)}
+
+.mineradio-player .preset-card .pc-name{font-size:13px;font-weight:700;color:rgba(255,255,255,.92);letter-spacing:.3px}
+
+.mineradio-player .preset-card .pc-desc{font-size:10px;color:rgba(255,255,255,.44);margin-top:4px;letter-spacing:.3px;line-height:1.35}
+
+.mineradio-player .preset-card.active .pc-name{color:#fff}
+
+.mineradio-player .preset-card[data-preset="6"] .pc-name,.mineradio-player .preset-card[data-preset="6"] .pc-desc{font-family:"黑体","SimHei","Microsoft YaHei","Noto Sans SC",Arial,sans-serif;font-weight:800;letter-spacing:.4px}
+
+.mineradio-player .preset-card[data-preset="6"] .pc-name{font-size:14px}
+
+.mineradio-player .preset-card[data-preset="6"] .pc-desc{font-size:10.5px;color:rgba(255,255,255,.52);font-weight:700}
+
+.mineradio-player .preset-card[data-preset="6"] .pc-yui7w{color:#3257f7;font-family:"Microsoft Yi Baiti","SimHei","Microsoft YaHei",sans-serif;font-weight:900;font-style:italic;letter-spacing:.7px}
+
+.mineradio-player .preset-card[data-preset="6"] .pc-icon{color:#3257f7}
+
+.mineradio-player .preset-card[data-preset="6"].active .pc-icon{color:#3257f7!important;text-shadow:0 0 12px rgba(50,87,247,.44)}
+
+.mineradio-player .preset-card .pc-bg{position:absolute;inset:0;opacity:.35;pointer-events:none}
+
+@keyframes preset-card-pulse{0%{opacity:0;transform:scale(.6) rotate(0deg)}35%{opacity:1}100%{opacity:0;transform:scale(1.25) rotate(12deg)}}
+
+.mineradio-player .user-archive-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin:0 0 12px}
+
+.mineradio-player .user-archive-toolbar{grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:2px;padding:9px;border-radius:12px;border:1px dashed rgba(255,255,255,.10);background:rgba(255,255,255,.018)}
+
+.mineradio-player .user-archive-note{font-size:10.5px;line-height:1.45;color:rgba(255,255,255,.42)}
+
+.mineradio-player .user-archive-tools{display:flex;align-items:center;gap:6px;flex:0 0 auto}
+
+.mineradio-player .user-archive-tools .fx-mini-btn{flex:0 0 auto;min-width:54px;padding:0 9px}
+
+.mineradio-player .user-archive-slot{min-height:86px;border-radius:12px;border:1px solid rgba(255,255,255,.075);background:rgba(255,255,255,.028);padding:10px;display:flex;flex-direction:column;gap:9px;overflow:hidden}
+
+.mineradio-player .user-archive-slot.has-save{border-color:rgba(var(--fc-accent-rgb),.24);background:rgba(var(--fc-accent-rgb),.040)}
+
+.mineradio-player .user-archive-slot.is-new{align-items:center;justify-content:center;min-height:86px;border-style:dashed;cursor:pointer;color:rgba(255,255,255,.54)}
+
+.mineradio-player .user-archive-slot.is-new strong{font-size:12px;color:rgba(255,255,255,.82)}
+
+.mineradio-player .user-archive-slot.is-new span{display:block;margin-top:4px}
+
+.mineradio-player .user-archive-slot.is-new:hover{border-color:rgba(var(--fc-accent-rgb),.32);background:rgba(var(--fc-accent-rgb),.06);color:#fff}
+
+.mineradio-player .user-archive-grid.dragover .user-archive-toolbar,.mineradio-player .user-archive-grid.dragover .user-archive-slot.is-new{border-color:rgba(var(--fc-accent-rgb),.46);background:rgba(var(--fc-accent-rgb),.09)}
+
+.mineradio-player .user-archive-name{font-size:12px;font-weight:760;color:rgba(255,255,255,.9);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+.mineradio-player .user-archive-input{width:100%;height:27px;border-radius:8px;border:1px solid rgba(var(--fc-accent-rgb),.28);background:rgba(0,0,0,.22);color:#fff;font-family:inherit;font-size:12px;font-weight:760;line-height:1;padding:0 8px;outline:none;box-shadow:inset 0 1px 0 rgba(255,255,255,.08),0 0 0 1px rgba(var(--fc-accent-rgb),.06)}
+
+.mineradio-player .user-archive-input:focus{border-color:rgba(var(--fc-accent-rgb),.52);box-shadow:0 0 0 1px rgba(var(--fc-accent-rgb),.16),0 10px 24px rgba(0,0,0,.18)}
+
+.mineradio-player .user-archive-meta{font-size:10px;color:rgba(255,255,255,.42);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+.mineradio-player .user-archive-actions{display:grid;grid-template-columns:repeat(auto-fit,minmax(42px,1fr));gap:6px;margin-top:auto}
+
+.mineradio-player .user-archive-actions button{height:25px;min-width:0;border-radius:8px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.045);color:rgba(255,255,255,.70);font-family:inherit;font-size:10px;font-weight:700;line-height:1;cursor:pointer;transition:background .18s,border-color .18s,color .18s}
+
+.mineradio-player .user-archive-actions button:hover{background:rgba(var(--fc-accent-rgb),.10);border-color:rgba(var(--fc-accent-rgb),.24);color:#fff}
+
+.mineradio-player .user-archive-actions button:disabled{opacity:.34;cursor:default;background:rgba(255,255,255,.025);border-color:rgba(255,255,255,.05);color:rgba(255,255,255,.42)}
+
+
+/* --- 主滑块 --- */
+.mineradio-player .fx-slider{display:grid;grid-template-columns:minmax(78px,92px) minmax(0,1fr) 44px 28px;align-items:center;gap:10px;min-height:44px;margin:8px 0;padding:9px 10px;border-radius:12px;border:1px solid rgba(255,255,255,.06);background:rgba(255,255,255,.030)}
+
+.mineradio-player .fx-slider label{font-size:11.5px;color:rgba(255,255,255,.72);letter-spacing:.2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+.mineradio-player .fx-slider input[type=range]{width:100%;min-width:0;accent-color:var(--fc-accent)}
+
+.mineradio-player .fx-slider output{font-size:10.5px;color:rgba(255,255,255,.40);text-align:right;font-variant-numeric:tabular-nums}
+
+.mineradio-player .fx-reset-one{width:24px;height:24px;border:1px solid rgba(255,255,255,.09);border-radius:50%;background:rgba(255,255,255,.035);color:rgba(255,255,255,.46);cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;transition:color .2s,background .2s,border-color .2s,transform .2s}
+
+.mineradio-player .fx-reset-one:hover{color:#eafffb;background:rgba(0,245,212,.085);border-color:rgba(0,245,212,.26);transform:rotate(-18deg) scale(1.04)}
+
+.mineradio-player .fx-reset-one svg{width:13px;height:13px;display:block}
+
+.mineradio-player .lyric-color-grid{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:7px;margin:8px 0 10px;padding:9px;border-radius:12px;border:1px solid rgba(255,255,255,.055);background:rgba(255,255,255,.024)}
+
+.mineradio-player .lyric-swatch{height:30px;border-radius:8px;border:1px solid rgba(255,255,255,.12);background:var(--swatch,#a9b8c8);cursor:pointer;position:relative;box-shadow:inset 0 1px 0 rgba(255,255,255,.20),0 8px 18px rgba(0,0,0,.18);transition:transform .18s,border-color .18s,box-shadow .18s}
+
+.mineradio-player .lyric-swatch:hover{transform:translateY(-1px);border-color:rgba(255,255,255,.34)}
+
+.mineradio-player .lyric-swatch.active{border-color:rgba(244,210,138,.88);box-shadow:0 0 0 1px rgba(244,210,138,.42),0 10px 24px rgba(244,210,138,.12),inset 0 1px 0 rgba(255,255,255,.25)}
+
+.mineradio-player .lyric-swatch.auto{background:linear-gradient(135deg,rgba(143,233,255,.52),rgba(156,255,223,.36),rgba(244,210,138,.42));display:flex;align-items:center;justify-content:center;color:rgba(8,10,12,.78);font-size:9px;font-weight:800;letter-spacing:.5px}
+
+.mineradio-player .lyric-color-row{display:grid;grid-template-columns:42px 1fr 68px;align-items:center;gap:9px;margin:7px 0 9px;padding:8px 9px;border-radius:12px;border:1px solid rgba(255,255,255,.055);background:rgba(255,255,255,.026)}
+
+.mineradio-player .lyric-color-row.visual-tint-row{grid-template-columns:42px 1fr 58px 58px}
+
+.mineradio-player .lyric-color-row.image-pick-row{grid-template-columns:64px 1fr 68px}
+
+.mineradio-player .lyric-color-row.image-pick-row .fx-mini-btn{min-width:0;display:flex;align-items:center;justify-content:center;white-space:nowrap;padding:0 8px;line-height:1}
+
+.mineradio-player .lyric-color-picker{width:42px;height:32px;padding:0;border-radius:12px;border:1px solid rgba(255,255,255,.16);background:rgba(255,255,255,.045);cursor:pointer;overflow:hidden;box-shadow:inset 0 1px 0 rgba(255,255,255,.14),0 10px 22px rgba(0,0,0,.18);transition:border-color .18s,box-shadow .18s,transform .18s;pointer-events:none}
+
+.mineradio-player .lyric-color-picker:hover{border-color:rgba(var(--fc-accent-rgb),.34);box-shadow:0 0 0 1px rgba(var(--fc-accent-rgb),.12),0 10px 24px rgba(0,0,0,.22)}
+
+.mineradio-player .lyric-color-picker::-webkit-color-swatch-wrapper{padding:0}
+
+.mineradio-player .lyric-color-picker::-webkit-color-swatch{border:0;border-radius:10px}
+
+.mineradio-player .cover-color-pop{display:none;position:fixed;left:50%;top:50%;z-index:1402;width:min(390px,calc(100vw - 42px));margin:0;padding:12px;border-radius:16px;border:1px solid rgba(var(--fc-accent-rgb),.18);background:linear-gradient(145deg,rgba(12,13,18,.94),rgba(2,3,5,.90));box-shadow:0 28px 90px rgba(0,0,0,.58),0 0 0 1px rgba(255,255,255,.05),inset 0 1px 0 rgba(255,255,255,.08);backdrop-filter:blur(22px) saturate(1.14);-webkit-backdrop-filter:blur(22px) saturate(1.14);transform:translate(-50%,-50%)}
+
+.mineradio-player .cover-color-pop.show{display:block}
+
+.mineradio-player .cover-color-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:9px;color:rgba(255,255,255,.76);font-size:11px;font-weight:760;letter-spacing:.06em;text-transform:uppercase}
+
+.mineradio-player .cover-color-close{width:24px;height:24px;border:1px solid rgba(255,255,255,.08);border-radius:50%;background:rgba(255,255,255,.035);color:rgba(255,255,255,.58);cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}
+
+.mineradio-player .cover-color-body{display:grid;grid-template-columns:128px 1fr;gap:12px;align-items:stretch}
+
+.mineradio-player .cover-color-art{position:relative;min-height:128px;border-radius:13px;background:linear-gradient(135deg,rgba(255,255,255,.10),rgba(255,255,255,.03));background-size:cover;background-position:center;overflow:hidden;cursor:crosshair;border:1px solid rgba(255,255,255,.11)}
+
+.mineradio-player .cover-color-art::after{content:'';position:absolute;inset:0;background:linear-gradient(90deg,rgba(255,255,255,.045) 1px,transparent 1px),linear-gradient(0deg,rgba(255,255,255,.035) 1px,transparent 1px);background-size:16px 16px;mix-blend-mode:screen;opacity:.42;pointer-events:none}
+
+.mineradio-player .cover-color-side{min-width:0;display:flex;flex-direction:column;gap:8px}
+
+.mineradio-player .cover-color-preview{height:34px;border-radius:10px;background:var(--picked,#9db8cf);border:1px solid rgba(255,255,255,.12);box-shadow:inset 0 1px 0 rgba(255,255,255,.18)}
+
+.mineradio-player .cover-color-hint{font-size:11px;line-height:1.35;color:rgba(255,255,255,.46)}
+
+.mineradio-player .cover-color-swatches{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:6px;margin-top:auto}
+
+.mineradio-player .cover-color-swatches button{height:22px;border-radius:7px;border:1px solid rgba(255,255,255,.14);background:var(--c,#9db8cf);cursor:pointer;box-shadow:inset 0 1px 0 rgba(255,255,255,.20)}
+
+.mineradio-player .cover-color-loupe{display:none;position:fixed;z-index:1500;width:112px;height:112px;border-radius:50%;border:2px solid #050505;background:var(--loupe-bg,#111);box-shadow:0 18px 48px rgba(0,0,0,.52),0 0 0 1px rgba(255,255,255,.24),inset 0 0 0 1px rgba(255,255,255,.18);pointer-events:none;overflow:hidden}
+
+.mineradio-player .cover-color-loupe.show{display:block}
+
+.mineradio-player .cover-color-loupe::after{content:'';position:absolute;left:50%;top:50%;width:12px;height:12px;border:1px solid rgba(255,255,255,.82);border-radius:50%;transform:translate(-50%,-50%);box-shadow:0 0 0 1px rgba(0,0,0,.9)}
+
+.mineradio-player .color-lab-pop{display:none;position:fixed;left:50%;top:50%;z-index:1401;width:min(330px,calc(100vw - 42px));padding:14px;border-radius:17px;border:1px solid rgba(255,255,255,.12);background:linear-gradient(145deg,#09090b,#020203);box-shadow:0 28px 90px rgba(0,0,0,.64),0 0 0 1px rgba(var(--fc-accent-rgb),.12),inset 0 1px 0 rgba(255,255,255,.08);color:#fff;transform:translate(-50%,-50%)}
+
+.mineradio-player .color-lab-pop.show{display:block!important}
+
+.mineradio-player .color-lab-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;font-size:11px;font-weight:760;letter-spacing:.08em;text-transform:uppercase;color:rgba(255,255,255,.68)}
+
+.mineradio-player .color-lab-close{width:24px;height:24px;border-radius:50%;border:1px solid rgba(255,255,255,.10);background:rgba(255,255,255,.04);color:rgba(255,255,255,.62);cursor:pointer}
+
+.mineradio-player .color-lab-sv{position:relative;height:150px;border-radius:12px;background:linear-gradient(0deg,#000,transparent),linear-gradient(90deg,#fff,var(--lab-hue,#f00));border:1px solid rgba(255,255,255,.14);cursor:crosshair;overflow:hidden}
+
+.mineradio-player .color-lab-cursor{position:absolute;width:14px;height:14px;border:2px solid #fff;border-radius:50%;box-shadow:0 0 0 1px #000,0 2px 8px rgba(0,0,0,.55);transform:translate(-50%,-50%);left:100%;top:0}
+
+.mineradio-player .color-lab-row{display:grid;grid-template-columns:34px 1fr 48px;align-items:center;gap:8px;margin-top:10px}
+
+.mineradio-player .color-lab-preview{width:34px;height:34px;border-radius:10px;background:var(--lab-color,#f00000);border:1px solid rgba(255,255,255,.16);box-shadow:inset 0 1px 0 rgba(255,255,255,.18)}
+
+.mineradio-player .color-lab-hue{width:100%;height:12px;-webkit-appearance:none;appearance:none;border-radius:999px;background:linear-gradient(90deg,#f00,#ff0,#0f0,#0ff,#00f,#f0f,#f00);outline:none}
+
+.mineradio-player .color-lab-hue::-webkit-slider-thumb{-webkit-appearance:none;width:18px;height:18px;border-radius:50%;border:2px solid #fff;background:var(--lab-hue,#f00);box-shadow:0 2px 10px rgba(0,0,0,.5);cursor:pointer}
+
+.mineradio-player .color-lab-hex{height:32px;border-radius:9px;border:1px solid rgba(255,255,255,.10);background:rgba(255,255,255,.045);color:#fff;font:700 11px var(--font-mono);text-align:center;outline:none}
+
+.mineradio-player .color-lab-presets{display:grid;grid-template-columns:repeat(8,1fr);gap:6px;margin-top:10px}
+
+.mineradio-player .color-lab-presets button{height:24px;border-radius:8px;border:1px solid rgba(255,255,255,.13);background:var(--c,#fff);cursor:pointer;box-shadow:inset 0 1px 0 rgba(255,255,255,.20)}
+
+.mineradio-player .lyric-color-value{font-size:10.5px;color:rgba(255,255,255,.48);letter-spacing:.6px;font-variant-numeric:tabular-nums}
+
+.mineradio-player .lyric-color-row.linked{cursor:pointer}
+
+.mineradio-player .lyric-color-row.linked .lyric-color-picker{opacity:.38;filter:grayscale(1);pointer-events:none}
+
+.mineradio-player .lyric-color-row.linked .lyric-color-value{color:rgba(255,255,255,.34)}
+
+.mineradio-player .lyric-color-row.linked:hover .lyric-color-value{color:rgba(255,255,255,.52)}
+
+.mineradio-player .fx-font-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px;margin:8px 0 10px}
+
+.mineradio-player .fx-font-grid button{min-height:32px;border-radius:9px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.030);color:rgba(255,255,255,.58);font-family:inherit;font-size:11px;cursor:pointer;transition:background .18s,border-color .18s,color .18s,transform .18s}
+
+.mineradio-player .fx-font-grid.expanded{grid-template-columns:repeat(4,minmax(0,1fr))}
+
+.mineradio-player .fx-font-grid button[data-font="gothic"]{font-family:"UnifrakturCook","UnifrakturMaguntia","Old English Text MT","Blackletter","Cinzel Decorative",serif;font-size:12.5px}
+
+.mineradio-player .fx-font-grid button[data-font="stone-song"],.mineradio-player .fx-font-grid button[data-font="bold-song"]{font-family:"Source Han Serif SC","Noto Serif SC","STZhongsong","SimSun",serif;font-weight:800}
+
+.mineradio-player .fx-font-grid button:hover{background:rgba(255,255,255,.06);color:#fff;transform:translateY(-1px)}
+
+.mineradio-player .fx-font-grid button.active{border-color:rgba(var(--fc-accent-rgb),.36);background:rgba(var(--fc-accent-rgb),.09);color:#fff}
+
+.mineradio-player .fx-color-row-label{font-size:11px;color:rgba(255,255,255,.66);line-height:1.2}
+
+.mineradio-player .fx-color-row-label small{display:block;margin-top:2px;font-size:9.5px;color:rgba(255,255,255,.34);letter-spacing:.35px}
+
+
+/* --- 开关组 --- */
+.mineradio-player .fx-toggle-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}
+
+.mineradio-player .fx-toggle{min-height:39px;display:flex;align-items:center;justify-content:space-between;padding:9px 11px;border-radius:11px;border:1px solid rgba(255,255,255,.075);background:rgba(255,255,255,.028);cursor:pointer;transition:all .2s;font-size:11.5px;color:rgba(255,255,255,.72)}
+
+.mineradio-player #t-float{display:none!important}
+
+.mineradio-player .fx-toggle span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-right:8px}
+
+.mineradio-player .fx-toggle:hover{background:rgba(255,255,255,.05);border-color:rgba(255,255,255,.15)}
+
+.mineradio-player .fx-toggle.on{color:var(--fc-accent);border-color:rgba(0,245,212,.34);background:rgba(0,245,212,.07)}
+
+.mineradio-player .fx-toggle .dot{width:8px;height:8px;border-radius:50%;background:rgba(255,255,255,.18);transition:all .2s}
+
+.mineradio-player .fx-toggle.on .dot{background:var(--fc-accent);box-shadow:0 0 10px rgba(0,245,212,.45)}
+
+.mineradio-player .fx-toggle.dev-locked{cursor:not-allowed;color:rgba(255,255,255,.38);background:rgba(255,255,255,.018);border-color:rgba(255,255,255,.045)}
+
+.mineradio-player .fx-toggle.dev-locked:hover{background:rgba(255,255,255,.026);border-color:rgba(255,255,255,.07)}
+
+.mineradio-player .fx-toggle.dev-locked .dot{background:rgba(255,255,255,.10);box-shadow:none}
+
+.mineradio-player .fx-toggle.dev-locked.on{color:rgba(255,255,255,.38)!important;background:rgba(255,255,255,.018)!important;border-color:rgba(255,255,255,.045)!important}
+
+.mineradio-player .fx-dev-badge{display:inline-flex;align-items:center;margin-left:5px;padding:1px 5px;border-radius:999px;border:1px solid rgba(244,210,138,.28);background:rgba(244,210,138,.08);color:rgba(244,210,138,.76);font-style:normal;font-size:9px;font-weight:800;line-height:1.35;vertical-align:1px;letter-spacing:.05em}
+
+.mineradio-player .fx-slider.dev-locked{opacity:.48;filter:saturate(.72)}
+
+.mineradio-player .fx-slider.dev-locked input{cursor:not-allowed}
+
+
+/* --- 三态分段 --- */
+.mineradio-player .fx-seg{display:flex;border-radius:11px;border:1px solid rgba(255,255,255,.08);overflow:hidden;background:rgba(255,255,255,.026);margin-bottom:10px}
+
+.mineradio-player .fx-seg button{flex:1;padding:8px 4px;background:none;border:none;color:rgba(255,255,255,.55);cursor:pointer;font-size:11.5px;font-family:inherit;transition:all .2s;letter-spacing:.4px;border-right:1px solid rgba(255,255,255,.05)}
+
+.mineradio-player .fx-seg button:last-child{border-right:none}
+
+.mineradio-player .fx-seg button:hover{background:rgba(255,255,255,.05);color:#fff}
+
+.mineradio-player .fx-seg button.active{background:rgba(0,245,212,.10);color:var(--fc-accent)}
+
+
+/* --- 高级折叠 --- */
+.mineradio-player .fx-advanced{margin-top:16px;border:1px solid rgba(255,255,255,.055);border-radius:13px;padding:10px 12px;background:rgba(255,255,255,.022)}
+
+.mineradio-player .fx-advanced-head{display:flex;justify-content:space-between;align-items:center;cursor:pointer;font-size:11.5px;color:rgba(255,255,255,.6);letter-spacing:.4px;padding:4px 0;user-select:none}
+
+.mineradio-player .fx-advanced-head:hover{color:#fff}
+
+.mineradio-player .fx-advanced-head .arrow{transition:transform .2s;font-size:10px}
+
+.mineradio-player .fx-advanced.open .fx-advanced-head .arrow{transform:rotate(90deg)}
+
+.mineradio-player .fx-advanced-body{display:none;margin-top:8px}
+
+.mineradio-player .fx-advanced.open .fx-advanced-body{display:block}
+
+.mineradio-player .fx-advanced .fx-slider label{font-size:10.5px;color:rgba(255,255,255,.48)}
+
+.mineradio-player .fx-fold{margin-top:12px;border:1px solid rgba(255,255,255,.055);border-radius:13px;background:rgba(255,255,255,.022);overflow:hidden}
+
+.mineradio-player .fx-fold-head{display:flex;justify-content:space-between;align-items:center;gap:12px;cursor:pointer;padding:12px 12px;color:rgba(255,255,255,.70);user-select:none;transition:background .2s,color .2s}
+
+.mineradio-player .fx-fold-head:hover{background:rgba(255,255,255,.035);color:#fff}
+
+.mineradio-player .fx-fold-title{display:flex;flex-direction:column;gap:3px;min-width:0}
+
+.mineradio-player .fx-fold-title strong{font-size:12px;letter-spacing:.45px;font-weight:700;color:rgba(255,255,255,.82)}
+
+.mineradio-player .fx-fold-title small{font-size:10px;letter-spacing:.35px;color:rgba(255,255,255,.34);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+.mineradio-player .fx-fold-head .arrow{flex:0 0 auto;font-size:10px;color:rgba(0,245,212,.58);transition:transform .2s}
+
+.mineradio-player .fx-fold.open .fx-fold-head .arrow{transform:rotate(90deg)}
+
+.mineradio-player .fx-fold-body{display:none;padding:0 12px 12px}
+
+.mineradio-player .fx-fold.open .fx-fold-body{display:block}
+
+.mineradio-player .fx-fold-body .fx-section-label{margin-top:12px}
+
+.mineradio-player .fx-fold-body .fx-section-label:first-child{margin-top:4px}
+
+.mineradio-player .fx-fold .fx-slider label{font-size:10.5px;color:rgba(255,255,255,.58)}
+
+.mineradio-player .fx-actions{display:flex;gap:8px;margin-top:14px}
+
+.mineradio-player .fx-mini-btn{flex:1;height:30px;border-radius:8px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.04);color:rgba(255,255,255,.78);font-size:11.5px;cursor:pointer;font-family:inherit;letter-spacing:.3px}
+
+.mineradio-player .fx-mini-btn:hover{background:rgba(255,255,255,.1);color:#fff}
+
+.mineradio-player .fx-mini-btn.active{border-color:rgba(244,210,138,.46);background:rgba(244,210,138,.10);color:var(--champagne)}
+
+.mineradio-player .fx-mini-btn.ghost{background:transparent}
+
+.mineradio-player .fx-mini-btn.ghost.active{background:rgba(244,210,138,.10)}
+
+.mineradio-player .fx-fold{overflow:visible}
+
+.mineradio-player .fx-fold-head,.mineradio-player .fx-advanced-head{display:none}
+
+.mineradio-player .fx-fold-body,.mineradio-player .fx-fold.open .fx-fold-body,.mineradio-player .fx-advanced-body,.mineradio-player .fx-advanced.open .fx-advanced-body{display:block}
+
+.mineradio-player .fx-fold-body{padding:12px}
+
+.mineradio-player .fx-advanced-body{margin-top:0}
+
+.mineradio-player .fx-fold,.mineradio-player .fx-advanced{background:rgba(255,255,255,.024)}
+
+
+.mineradio-player .hotkey-modal{position:fixed;inset:0;z-index:1450;display:none;align-items:center;justify-content:center;padding:22px;background:rgba(0,0,0,.48);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px)}
+
+.mineradio-player .hotkey-modal.show{display:flex}
+
+.mineradio-player .hotkey-dialog{width:min(760px,calc(100vw - 36px));max-height:min(720px,calc(100vh - 44px));overflow:auto;border-radius:18px;border:1px solid rgba(255,255,255,.12);background:linear-gradient(180deg,rgba(14,15,20,.96),rgba(5,6,8,.96));box-shadow:0 32px 110px rgba(0,0,0,.62),inset 0 1px 0 rgba(255,255,255,.08);padding:18px;color:#fff}
+
+.mineradio-player .hotkey-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding-bottom:14px;border-bottom:1px solid rgba(255,255,255,.08)}
+
+.mineradio-player .hotkey-title{font-size:16px;font-weight:800;letter-spacing:.04em}
+
+.mineradio-player .hotkey-sub{margin-top:5px;font-size:11.5px;line-height:1.5;color:rgba(255,255,255,.48)}
+
+.mineradio-player .hotkey-close{width:30px;height:30px;border-radius:10px;border:1px solid rgba(255,255,255,.10);background:rgba(255,255,255,.04);color:rgba(255,255,255,.66);font-size:18px;line-height:1;cursor:pointer}
+
+.mineradio-player .hotkey-close:hover{background:rgba(255,255,255,.09);color:#fff}
+
+.mineradio-player .hotkey-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:14px 0}
+
+.mineradio-player .hotkey-tabs{display:flex;gap:8px}
+
+.mineradio-player .hotkey-tabs button{height:30px;border-radius:10px;border:1px solid rgba(255,255,255,.10);background:rgba(255,255,255,.035);color:rgba(255,255,255,.58);font:760 12px/1 var(--font-sans);cursor:pointer;padding:0 13px}
+
+.mineradio-player .hotkey-tabs button.active{border-color:rgba(var(--fc-accent-rgb),.35);background:rgba(var(--fc-accent-rgb),.12);color:#fff}
+
+.mineradio-player .hotkey-note{font-size:11px;color:rgba(255,255,255,.42);text-align:right}
+
+.mineradio-player .hotkey-section{display:none}
+
+.mineradio-player .hotkey-section.active{display:block}
+
+.mineradio-player .hotkey-group{margin-top:12px}
+
+.mineradio-player .hotkey-group-title{font-size:11px;font-weight:800;letter-spacing:.12em;text-transform:uppercase;color:rgba(var(--fc-accent-rgb),.78);margin:0 0 8px}
+
+.mineradio-player .hotkey-row{display:grid;grid-template-columns:minmax(112px,1fr) 180px 86px minmax(126px,1.15fr);gap:9px;align-items:center;min-height:46px;margin:6px 0;padding:9px;border-radius:12px;border:1px solid rgba(255,255,255,.065);background:rgba(255,255,255,.028)}
+
+.mineradio-player .hotkey-name{min-width:0;font-size:12.5px;font-weight:760;color:rgba(255,255,255,.88);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+.mineradio-player .hotkey-key{height:30px;border-radius:9px;border:1px solid rgba(255,255,255,.11);background:rgba(0,0,0,.22);color:#fff;font:760 11.5px/1 var(--font-sans);cursor:pointer;padding:0 10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+.mineradio-player .hotkey-key:hover,.mineradio-player .hotkey-key.capturing{border-color:rgba(var(--fc-accent-rgb),.42);background:rgba(var(--fc-accent-rgb),.10)}
+
+.mineradio-player .hotkey-reset{height:30px;border-radius:9px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.035);color:rgba(255,255,255,.55);font:700 11px/1 var(--font-sans);cursor:pointer}
+
+.mineradio-player .hotkey-reset:hover{background:rgba(255,255,255,.08);color:#fff}
+
+.mineradio-player .hotkey-status{min-width:0;font-size:11px;color:rgba(255,255,255,.46);display:flex;align-items:center;gap:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+.mineradio-player .hotkey-status.ok{color:rgba(126,226,168,.78)}
+
+.mineradio-player .hotkey-status.conflict{color:rgba(255,206,112,.86)}
+
+.mineradio-player .hotkey-status .source-icon{width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center;border-radius:50%;background:rgba(255,206,112,.12);color:#ffce70;font-size:11px;flex:0 0 auto}
+
+.mineradio-player .hotkey-capture-tip{display:none;margin-top:10px;padding:9px 11px;border-radius:12px;border:1px solid rgba(var(--fc-accent-rgb),.22);background:rgba(var(--fc-accent-rgb),.075);font-size:12px;color:rgba(255,255,255,.74)}
+
+.mineradio-player .hotkey-modal.capturing .hotkey-capture-tip{display:block}
+
+@media (max-width:720px){
+  .mineradio-player .hotkey-row{grid-template-columns:1fr;gap:7px}
+
+  .mineradio-player .hotkey-toolbar{align-items:flex-start;flex-direction:column}
+
+  .mineradio-player .hotkey-note{text-align:left}
+
+}
+
+
+/* ===== [mineradio css:responsive] source lines 1834-1842 ===== */
+@media (max-width:720px){
+  .mineradio-player #fx-panel,.mineradio-player #playlist-panel{right:12px;left:12px;width:auto;top:76px;bottom:auto}
+
+  .mineradio-player #top-right{right:12px}
+
+}
+
+@media (max-width:520px){
+  .mineradio-player .preset-grid,.mineradio-player .fx-toggle-grid{grid-template-columns:1fr}
+
+  .mineradio-player .fx-slider{grid-template-columns:74px minmax(0,1fr) 40px 28px;gap:8px;padding:8px}
+
+  .mineradio-player .lyric-color-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
+
+}
+
+/* ===== [sollin 补充] 覆盖层专用控件 ===== */
+.mineradio-player .mr-close-btn{position:fixed;z-index:30;top:18px;left:18px;width:40px;height:40px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(255,255,255,.10);border-radius:50%;background:rgba(8,10,12,.44);color:rgba(232,236,239,.85);cursor:pointer;backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);transition:background .2s,color .2s,transform .2s}
+.mineradio-player .mr-close-btn:hover{background:rgba(255,255,255,.12);color:#fff;transform:translateY(-1px)}
+.mineradio-player .mr-close-btn svg{width:22px;height:22px}
+.mineradio-player.immersive-mode .mr-close-btn{opacity:0;pointer-events:none}
+.mineradio-player .ctrl-btn .mini-spin{width:16px;height:16px;border:2px solid rgba(255,255,255,.25);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite;display:inline-block}
+.mineradio-player #heart-btn.liked{color:#ff5364}
+.mineradio-player .mini-queue-remove svg{width:13px;height:13px}
