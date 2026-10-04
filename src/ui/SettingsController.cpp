@@ -87,6 +87,18 @@ SettingsController::SettingsController(LibraryController *library, QObject *pare
         QStringLiteral("general"), QStringLiteral("embedCover"), true).toBool();
     m_embedLyrics = DocumentStore::instance()->readSync(
         QStringLiteral("general"), QStringLiteral("embedLyrics"), true).toBool();
+
+    // 缓存大小定期刷：新缓存（下载音频 / 封面）加了要马上更新显示，
+    // 别等下次进设置页才刷。只在值变了才 emit，避免无谓的 QML 重求值。
+    m_cacheTimer.setInterval(3000);
+    connect(&m_cacheTimer, &QTimer::timeout, this, [this]() {
+        const qint64 s = songCacheSize(), o = otherCacheSize();
+        bool ch = false;
+        if (s != m_lastSongCacheSize) { m_lastSongCacheSize = s; ch = true; }
+        if (o != m_lastOtherCacheSize) { m_lastOtherCacheSize = o; ch = true; }
+        if (ch) { emit songCacheSizeChanged(); emit otherCacheSizeChanged(); }
+    });
+    m_cacheTimer.start();
 }
 
 void SettingsController::setEmbedCover(bool v)
@@ -212,40 +224,93 @@ qint64 dirSize(const QString &path, int depth = 4)
     return total;
 }
 
-/// 应用真正的磁盘缓存位置（"cache" 目录 + 播放临时音频 + 舞台封面缓存）
-QStringList cacheDirs()
+/// 递归统计"真能删掉"的大小：每个文件试开 RW，打不开（被占用）就不算。
+/// clearCache 的 QFile::remove 同样会失败跳过 → 两边口径一致。
+qint64 deletableSize(const QString &path, int depth = 4)
 {
+    QDir dir(path);
+    if (!dir.exists() || depth <= 0) return 0;
+    qint64 total = 0;
+    for (const auto &fi : dir.entryInfoList(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot)) {
+        if (fi.isDir()) { total += deletableSize(fi.absoluteFilePath(), depth - 1); continue; }
+        QFile f(fi.absoluteFilePath());
+        if (f.open(QIODevice::ReadWrite)) { f.close(); total += fi.size(); }
+    }
+    return total;
+}
+
+/// 字节 → 人读大小（"缓存占用" / "已清除" 两处共用）
+QString friendlySize(qint64 bytes)
+{
+    if (bytes <= 0) return QStringLiteral("0 B");
+    const char *u[] = {"B", "KB", "MB", "GB"};
+    int i = 0;
+    double v = bytes;
+    while (v >= 1024 && i < 3) { v /= 1024; ++i; }
+    return (i == 0 ? QStringLiteral("%1 B").arg(qint64(v))
+                   : QStringLiteral("%1 %2").arg(v, 0, 'f', 1).arg(QLatin1String(u[i])));
+}
+QStringList songCacheDirs()
+{
+    // 歌曲音频缓存（大头）：在线歌下载到 %TEMP%/muyun-audio/
+    return { QDir::tempPath() + QStringLiteral("/muyun-audio") };
+}
+
+QStringList otherCacheDirs()
+{
+    // 非歌曲缓存：封面（~/.muyun/cache + 舞台 web/covers）
     return {
         DocumentStore::instance()->cacheDir(),
-        QDir::tempPath() + QStringLiteral("/muyun-audio"),
         QCoreApplication::applicationDirPath() + QStringLiteral("/stage/web/covers"),
     };
 }
 } // namespace
 
-qint64 SettingsController::cacheSize() const
+qint64 SettingsController::songCacheSize() const
 {
-    // 真实磁盘缓存：播放临时音频（大头）、舞台封面缓存、~/.muyun/cache。
-    // 注意：正在播放的临时文件删不掉（Windows 文件锁），clearCache 会自动跳过。
+    // 只统计"真能删掉"的：每个文件试开 RW，打不开（被占用）就不算。
+    // QFile::remove 同样需要写权限 → 两边口径一致。
     qint64 total = 0;
-    for (const auto &d : cacheDirs())
-        total += dirSize(d);
+    for (const auto &d : songCacheDirs())
+        total += deletableSize(d);
     return total;
 }
 
-void SettingsController::clearCache()
+qint64 SettingsController::otherCacheSize() const
+{
+    qint64 total = 0;
+    for (const auto &d : otherCacheDirs())
+        total += deletableSize(d);
+    return total;
+}
+
+void SettingsController::clearSongCache()
+{
+    clearCacheInternal(songCacheDirs(), QStringLiteral("歌曲缓存"));
+}
+
+void SettingsController::clearOtherCache()
+{
+    clearCacheInternal(otherCacheDirs(), QStringLiteral("缓存"));
+}
+
+void SettingsController::clearCacheInternal(const QStringList &dirs, const QString &label)
 {
     int removed = 0;
-    for (const auto &path : cacheDirs()) {
+    qint64 freed = 0;
+    for (const auto &path : dirs) {
         QDir d(path);
         if (!d.exists()) continue;
         for (const auto &fi : d.entryInfoList(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot)) {
             const bool ok = fi.isDir() ? QDir(fi.absoluteFilePath()).removeRecursively()
                                        : QFile::remove(fi.absoluteFilePath());
-            if (ok) ++removed;
+            if (ok) { ++removed; freed += fi.size(); }
         }
     }
-    emit message(QStringLiteral("缓存已清除（%1 项，正在使用的文件已跳过）").arg(removed));
+    emit message(QStringLiteral("%1已清除（%2 项 / %3，正在使用的文件已跳过）")
+                     .arg(label).arg(removed).arg(friendlySize(freed)));
+    emit songCacheSizeChanged();
+    emit otherCacheSizeChanged();
 }
 
 // ===========================================================================

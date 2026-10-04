@@ -151,6 +151,17 @@ private:
     int m_nudgeCount = 0;
     QString m_currentLocalPath;
 
+    // 「播完却停在原曲」/「播放卡死」兜底（QMediaPlayer 路径专用）：
+    // 1) 有些文件 FFmpeg 后端播到末尾只发 StoppedState、不发 EndOfMedia（尾部异常数据、
+    //    被截断的播放缓存都会这样）→ 上层永远收不到 endOfMedia，UI 就钉在这一首歌上；
+    // 2) 解码卡住 / 下载残文件时状态是 Playing 但位置永远不动 → 同样钉在原地。
+    // 500ms 巡检一次：停在末尾就补发 endOfMedia；连续 6s 位置不前进就报 errorOccurred，
+    // 让上层走"降档重试 / 自动跳下一首"。音效管线不用这个（EffectPlayer 自己报 endOfMedia）。
+    QTimer m_watchTimer;
+    bool m_watchArmed = false;   ///< 本曲进入 QMediaPlayer 路径且在自启动播放（stop/收尾会清）
+    int m_stallTicks = 0;        ///< 位置连续不前进的巡检次数
+    qint64 m_lastWatchPos = -1;  ///< 上次巡检的位置（ms）
+
     qreal m_volume = 0.8;
     qreal m_rate = 1.0;              ///< 期望倍速：音效管线不支持变速，非 1.0 时交回普通内核
     bool m_muted = false;

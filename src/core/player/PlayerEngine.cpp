@@ -52,7 +52,50 @@ PlayerEngine::PlayerEngine(QObject *parent) : QObject(parent)
         m_player->setPosition(target);
     });
 
-    // 音效管线后端（常驻，仅音效开启 + MP3 时被委派）。
+    // 末尾 / 卡死兜底巡检（只在 QMediaPlayer 路径且真在自播时武装，见 m_watchArmed）
+    // 常驻开着：未武装时首次判断就返回，500ms 一次空转开销可忽略（位置巡检本来就有）
+    m_watchTimer.setInterval(500);
+    connect(&m_watchTimer, &QTimer::timeout, this, [this]() {
+        if (!m_watchArmed || m_useEffect || !m_player) { m_watchTimer.stop(); return; }
+        const QMediaPlayer::PlaybackState st = m_player->playbackState();
+        const qint64 pos = m_player->position();
+        const qint64 dur = m_player->duration();
+        if (st == QMediaPlayer::StoppedState) {
+            // 播到末尾却只收到 StoppedState（EndOfMedia 丢了）→ 位置已贴到末尾就补发一次
+            if (dur > 0 && pos >= dur - 1500) {
+                m_watchArmed = false;
+                m_stallTicks = 0;
+                m_lastWatchPos = -1;
+                m_playing = false;
+                m_loading = false;
+                m_positionTimer.stop();
+                emit endOfMedia();
+            }
+            return;
+        }
+        if (st == QMediaPlayer::PlayingState && dur > 0) {
+            if (m_lastWatchPos >= 0 && pos <= m_lastWatchPos) {
+                if (++m_stallTicks >= 12) {   // 连续 6s 位置不前进 = 卡死
+                    m_watchArmed = false;
+                    m_stallTicks = 0;
+                    m_lastWatchPos = -1;
+                    m_playing = false;
+                    m_loading = false;
+                    m_positionTimer.stop();
+                    emit errorOccurred(QStringLiteral("播放卡住，尝试其它音源"));
+                    return;
+                }
+            } else {
+                m_stallTicks = 0;
+            }
+        } else {
+            m_stallTicks = 0;
+        }
+        // 每次巡检都更新基准（回退 seek 后位置会变小，基准必须跟上，否则会误判卡死）
+        m_lastWatchPos = pos;
+    });
+    m_watchTimer.start();
+
     // 装载是异步的：loadFinished 回来才真正起播/回退，主线程全程不阻塞。
     m_effect = new EffectPlayer(m_effects, this);
     connect(m_effect, &EffectPlayer::positionChanged, this, &PlayerEngine::positionChanged);
@@ -238,6 +281,9 @@ QMediaPlayer *PlayerEngine::ensurePlayer()
                 if (s == QMediaPlayer::EndOfMedia) {
                     m_playing = false;
                     m_positionTimer.stop();
+                    // 真 EndOfMedia 已到手 → 解除末尾巡检，否则会跟着补发第二遍
+                    m_watchArmed = false;
+                    m_watchTimer.stop();
                     emit endOfMedia();
                 } else if (s == QMediaPlayer::LoadedMedia || s == QMediaPlayer::BufferedMedia) {
                     m_loading = false;
@@ -325,6 +371,8 @@ void PlayerEngine::startViaEffect(const QString &localPath, qint64 fromMs, bool 
         m_player->stop();
         m_player->setSource(QUrl());
     }
+    m_watchTimer.stop();      // 音效内核自己报 endOfMedia，末尾/卡死兜底交给它
+    m_watchArmed = false;
     m_positionTimer.stop();
 
     m_useEffect = true;
@@ -351,6 +399,10 @@ void PlayerEngine::startViaPlayer(const QString &localPath, qint64 fromMs, bool 
     m_wantPlay = autoplay;
     m_playing = false;
     m_loading = autoplay;
+    // 末尾/卡死兜底：新曲从头播放、且是自启动 → 武装巡检
+    m_watchArmed = autoplay;
+    m_stallTicks = 0;
+    m_lastWatchPos = -1;
     m_player->setSource(QUrl::fromLocalFile(localPath));
     if (fromMs > 0) {              // 复用"媒体就绪后择机跳回"机制（未就绪时 setPosition 会被吞）
         m_resumeAfterSwitch = true;
@@ -435,6 +487,8 @@ void PlayerEngine::stop()
 {
     m_positionTimer.stop();
     m_nudgeTimer.stop();
+    m_watchTimer.stop();      // 主动停止：解除末尾/卡死兜底，别在收尾时误报
+    m_watchArmed = false;
     m_nudgeCount = 0;
     m_wantPlay = false;
     m_resumeAfterSwitch = false;   // 主动停止后不得再"跳回"旧位置

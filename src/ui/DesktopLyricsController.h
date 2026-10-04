@@ -56,6 +56,10 @@ public:
     QPoint centerGlobalForTest() const;
     /// 自检用：「取消置顶」按钮的几何中心（Qt 全局逻辑坐标）；找不到返回无效点
     QPointF unpinButtonGlobalForTest() const;
+    /// 自检用：置顶态"放开穿透"的命中区域（Win32 物理像素）；按钮找不到时返回空矩形
+    QRect unpinButtonHitRectForTest() const;
+    /// 自检用：当前是否置顶态点击穿透（无句柄/非 Win 返回 nullopt）
+    bool clickThroughForTest() const;
     /// 把桌面歌词窗抬到前台（自检用：模拟"焦点被自家另一个窗叼走"，#19 断言①）
     Q_INVOKABLE void requestActivate();
     /// 按当前字号算出能同时放下"原文 + 译文"的窗高
@@ -76,6 +80,8 @@ private:
     void pollHover();
     /// 直管 Win32 的 WS_EX_TRANSPARENT（点击穿透），只改扩展样式、不重建原生窗口
     void applyClickThrough(bool through);
+    /// 置顶态"放开穿透"的判据区域（Win32 物理像素）= 「取消置顶」按钮本身 + 一点余量
+    QRect pinnedHitRectPhysical() const;
 
     PlayerController *m_player = nullptr;
     QQmlEngine *m_engine = nullptr;

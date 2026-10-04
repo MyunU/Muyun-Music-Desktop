@@ -4,6 +4,7 @@
 
 
 #include <QObject>
+#include <QTimer>
 #include <QVariantList>
 #include <QStringList>
 
@@ -39,6 +40,8 @@ class SettingsController : public QObject
     Q_PROPERTY(int tagPriority READ tagPriority WRITE setTagPriority NOTIFY tagPriorityChanged)
 
     Q_PROPERTY(QVariantList lxSources READ lxSources NOTIFY lxSourcesChanged)
+    Q_PROPERTY(qint64 songCacheSize READ songCacheSize NOTIFY songCacheSizeChanged)
+    Q_PROPERTY(qint64 otherCacheSize READ otherCacheSize NOTIFY otherCacheSizeChanged)
     Q_PROPERTY(QString activeLxSourceId READ activeLxSourceId NOTIFY lxSourcesChanged)
     Q_PROPERTY(QVariantMap lxUpdateAlert READ lxUpdateAlert NOTIFY lxUpdateAlertChanged)
     /// 是否允许显示更新提醒（用户可在设置里关闭）
@@ -67,8 +70,10 @@ public:
     Q_INVOKABLE void rescan();
     Q_INVOKABLE QString dataPath() const;
     Q_INVOKABLE QString cachePath() const;
-    Q_INVOKABLE qint64 cacheSize() const;
-    Q_INVOKABLE void clearCache();
+    qint64 songCacheSize() const;
+    qint64 otherCacheSize() const;
+    Q_INVOKABLE void clearSongCache();
+    Q_INVOKABLE void clearOtherCache();
 
     // ---- 在线音源（LX 脚本）----
     QVariantList lxSources() const;
@@ -115,6 +120,8 @@ signals:
     void localStatsChanged();
     void tagPriorityChanged();
     void lxSourcesChanged();
+    void songCacheSizeChanged();
+    void otherCacheSizeChanged();
     void message(const QString &text);
     void importFailed(const QString &reason);
     void lxUpdateAlertChanged();
@@ -141,6 +148,9 @@ private:
     QString m_playerStyle = QStringLiteral("amll");
     bool m_embedCover = true;
     bool m_embedLyrics = true;
+    QTimer m_cacheTimer;
+    qint64 m_lastSongCacheSize = -1, m_lastOtherCacheSize = -1;
+    void clearCacheInternal(const QStringList &dirs, const QString &label);
 };
 
 } // namespace Muyun

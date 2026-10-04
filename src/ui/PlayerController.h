@@ -74,6 +74,8 @@ public:
     Song currentSong() const { return m_currentSong; }
     bool isPlaying() const;
     bool isLoading() const { return m_loading; }
+    /// 单首取音频看门狗是否在计时（自检用：验证"选歌武装 / 出声或停止解除"）
+    bool songWatchdogActive() const;
     qint64 position() const;
     qint64 duration() const;
     qreal volume() const;
@@ -261,6 +263,22 @@ private:
     QString m_measuredBitrate;
     QHash<QString, QString> m_songPlatform;   // identityKey → 取源平台（仅用户手动改过的）
     int m_songPlatformVersion = 0;
+    // 单首取音频的总时限（跨所有降档重试）。在线歌取不到链接时，旧代码会沿音质降级链
+    // 逐档真请求（每档 HttpClient 20s 超时，6 档最坏 2 分钟），这段时间 UI 钉在这首歌上——
+    // 用户报「随机模式下老是一首歌播完以后还是这首歌」。到点仍没出声就按失败跳下一首。
+    // ⚠ 只在"用户换歌/选歌"时重置，advanceOnPlayFailure 里**不重置**：
+    //   否则整队列都挂时，每跳一首都续命 30s，永远退不出、也没熔断意义。
+    QTimer m_songWatchdog;
+    /// 为本曲重新武装单首时限
+    void armSongWatchdog();
+    /// 真播起来了 / 主动停下 → 解除看门狗
+    void disarmSongWatchdog();
+    /// 看门狗到点：本曲始终没出声 → 按失败处理，前进到下一首（不准停在本曲）
+    void onSongWatchdogTimeout();
+    /// playIndex 的内部实现。arm=false 供"失败自动前进"用：不续命单首时限，
+    /// 整队列都挂时限时预算耗尽即停，不会永远跳下去
+    void startAt(int index, bool armWatchdog);
+
     QTimer m_positionTimer;
 };
 

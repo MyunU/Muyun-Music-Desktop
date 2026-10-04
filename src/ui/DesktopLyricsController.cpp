@@ -179,7 +179,31 @@ void DesktopLyricsController::setPinned(bool on)
     emit pinnedChanged();
 }
 
-// 置顶窗点击穿透、收不到 Qt 鼠标事件 → 用全局光标位置判断"鼠标是否落在歌词窗矩形内"。
+// 置顶态"放开穿透"的判据区域 = **「取消置顶」按钮本身**（加一点余量）。
+// ⚠ 用户 2026-10-04 二次澄清：进歌词带要**显钮**（命中区=整窗，见 pollHover 的 showBtn），
+//   但**只有钮那一小块需要能点**——其余区域必须继续穿透，否则挡住桌面。
+// 所以"显钮"和"放开穿透"是两个区域：整窗 vs 按钮。
+// ⚠ 全程在 Win32 物理坐标域算：QQuickItem::mapToGlobal 是 Qt 逻辑坐标，必须乘
+//   devicePixelRatio 再和 GetCursorPos 比（dpr≠1 时错域 = 恒假或恒真，已咬过两次）。
+QRect DesktopLyricsController::pinnedHitRectPhysical() const
+{
+    if (!m_view) return QRect();
+    QQuickItem *root = m_view->rootObject();
+    if (!root) return QRect();
+    QQuickItem *btn = root->findChild<QQuickItem*>(QStringLiteral("unpinBtnObj"));
+    if (!btn) return QRect();   // QML 未解析完：调用方回退整窗判据
+    const QScreen *scr = m_view->screen() ? m_view->screen()
+                                          : QGuiApplication::primaryScreen();
+    const qreal dpr = scr ? scr->devicePixelRatio() : 1.0;
+    const qreal pad = 6.0;   // 逻辑像素余量，别让命中区只剩半个像素
+    const QPointF tl = btn->mapToGlobal(QPointF(-pad, -pad));
+    const QPointF br = btn->mapToGlobal(QPointF(btn->width() + pad, btn->height() + pad));
+    const QRect r(QPoint(qRound(tl.x() * dpr), qRound(tl.y() * dpr)),
+                  QPoint(qRound(br.x() * dpr), qRound(br.y() * dpr)));
+    return r.isEmpty() ? QRect() : r.normalized();
+}
+
+// 置顶窗点击穿透、收不到 Qt 鼠标事件 → 用全局光标位置判断"鼠标是否落在可点区域"。
 // 命中即让 QML 显出「取消置顶」钮（见 DesktopLyricsView.qml：pinned && pinnedHover）。
 // ⚠ 关键：穿透状态下连 HoverHandler 都收不到事件，所以"让这一小块能点"必须由这里主动切——
 //   命中→临时去 WS_EX_TRANSPARENT（可点）；离开→恢复穿透。全程只动扩展样式，不重建窗口。
@@ -203,22 +227,30 @@ void DesktopLyricsController::pollHover()
     // 结论：判据别压在 Qt 的坐标换算上，问系统要物理矩形最稳。
     const HWND hwnd = reinterpret_cast<HWND>(m_view->winId());
     POINT cur{};
-    RECT rc{};
-    if (!hwnd || !GetCursorPos(&cur) || !GetWindowRect(hwnd, &rc)) return;
-    const bool inside = cur.x >= rc.left && cur.x < rc.right
-                     && cur.y >= rc.top  && cur.y < rc.bottom;
-    if (inside != m_pinnedHover) {
-        m_pinnedHover = inside;
-        setInteractiveForUnpin(inside);   // 命中才放开穿透，移开立刻恢复
+    if (!hwnd || !GetCursorPos(&cur)) return;
+    // ① 显钮区 = 整窗：进歌词带就让 QML 显出「取消置顶」钮（钮本身"悬停才出现"，
+    //    命中区要是按钮的话用户根本不知道该往哪移才能看到它）。
+    RECT wrc{};
+    if (!GetWindowRect(hwnd, &wrc)) return;
+    const QRect winRect(QPoint(wrc.left, wrc.top), QPoint(wrc.right - 1, wrc.bottom - 1));
+    const bool showBtn = winRect.contains(QPoint(cur.x, cur.y));
+    // ② 可点区 = 按钮本身：只有鼠标压到那一小块才摘 WS_EX_TRANSPARENT，
+    //    其余区域继续穿透（否则挡住桌面）。
+    const QRect btnRect = pinnedHitRectPhysical();
+    const bool interact = !btnRect.isNull() && btnRect.contains(QPoint(cur.x, cur.y));
+    if (showBtn != m_pinnedHover) {
+        m_pinnedHover = showBtn;
         emit pinnedHoverChanged();
     }
+    setInteractiveForUnpin(interact);   // 钮上才放开穿透，移开立刻恢复
 #else
+    // 非 Windows 没有 WS_EX_TRANSPARENT 这套，用整窗几何比光标（逻辑坐标同域）
     const QPoint g = QCursor::pos();
     const QPoint tl = m_view->mapToGlobal(QPoint(0, 0));
-    const bool inside = QRect(tl, m_view->size()).contains(g);
-    if (inside != m_pinnedHover) {
-        m_pinnedHover = inside;
-        setInteractiveForUnpin(inside);
+    const bool showBtn = QRectF(tl, m_view->size()).contains(g);
+    if (showBtn != m_pinnedHover) {
+        m_pinnedHover = showBtn;
+        setInteractiveForUnpin(showBtn);
         emit pinnedHoverChanged();
     }
 #endif
@@ -255,6 +287,23 @@ QPointF DesktopLyricsController::unpinButtonGlobalForTest() const
     if (QQuickItem *btn = root->findChild<QQuickItem*>(QStringLiteral("unpinBtnObj")))
         return btn->mapToGlobal(btn->boundingRect().center());
     return QPointF();
+}
+
+QRect DesktopLyricsController::unpinButtonHitRectForTest() const
+{
+    return pinnedHitRectPhysical();
+}
+
+bool DesktopLyricsController::clickThroughForTest() const
+{
+#ifdef Q_OS_WIN
+    if (!m_view) return false;
+    const HWND hwnd = reinterpret_cast<HWND>(m_view->winId());
+    if (!hwnd) return false;
+    return (GetWindowLongPtr(hwnd, GWL_EXSTYLE) & WS_EX_TRANSPARENT) != 0;
+#else
+    return false;
+#endif
 }
 
 void DesktopLyricsController::setColor(const QString &c)

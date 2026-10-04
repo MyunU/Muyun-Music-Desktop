@@ -1714,6 +1714,11 @@ int main(int argc, char *argv[])
                 (QDir::tempPath() + QStringLiteral("/muyun-queuetest")).toLocal8Bit());
 #endif // MUYUN_SELFTES
 #ifdef MUYUN_SELFTES
+    if (args.contains(QStringLiteral("--test-advance")))
+        qputenv("MUYUN_STORE_ROOT",
+                (QDir::tempPath() + QStringLiteral("/muyun-advancetest")).toLocal8Bit());
+#endif // MUYUN_SELFTES
+#ifdef MUYUN_SELFTES
     if (args.contains(QStringLiteral("--test-update")))
         qputenv("MUYUN_STORE_ROOT",
                 (QDir::tempPath() + QStringLiteral("/muyun-updatetest")).toLocal8Bit());
@@ -3629,6 +3634,140 @@ int main(int argc, char *argv[])
     }
 #endif // MUYUN_SELFTES
 
+    // 在线歌失败后"前进式跳歌 + 单首时限"自检（用户 2026-10-04 报：随机模式下
+    // 一首歌播完还是这一首、下一首卡住就不动）。覆盖：
+    //   1) 随机模式整队列取不到音频 → 前进式跳歌，不重放当前曲、不回弹；
+    //   2) 快速失败不误触单首时限（看门狗不误报）；
+    //   3) 选歌武装 / 主动停止解除看门狗；
+    //   4) 不变式：正在出声时看门狗不得计时（真出声 = 已解武装）。
+    // 用法：MuyunMusic.exe --test-advance
+#ifdef MUYUN_SELFTES
+    if (args.contains(QStringLiteral("--test-advance"))) {
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        printf("=== 失败前进 / 单首时限自检 ===\n");
+        qputenv("MUYUN_SONG_WATCH_MS", "800");   // 压短看门狗，自检不必等 30s
+
+        auto waitMs = [](int ms) {
+            QElapsedTimer t; t.start();
+            while (t.elapsed() < ms) { QCoreApplication::processEvents(QEventLoop::AllEvents, 30); QThread::msleep(10); }
+        };
+        auto makeWav = [](const QString &path) {   // 1s 8kHz 16bit 静音 WAV
+            QFile w(path);
+            if (!w.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
+            const quint32 rate = 8000, dataBytes = rate * 2;
+            auto u32 = [](quint32 v) {
+                QByteArray b(4, 0);
+                b[0] = char(v & 0xFF); b[1] = char((v >> 8) & 0xFF);
+                b[2] = char((v >> 16) & 0xFF); b[3] = char((v >> 24) & 0xFF);
+                return b;
+            };
+            auto u16 = [](quint16 v) {
+                QByteArray b(2, 0);
+                b[0] = char(v & 0xFF); b[1] = char((v >> 8) & 0xFF);
+                return b;
+            };
+            w.write("RIFF" + u32(36 + dataBytes) + "WAVEfmt " + u32(16) + u16(1) + u16(1)
+                    + u32(rate) + u32(rate * 2) + u16(2) + u16(16) + "data" + u32(dataBytes));
+            w.write(QByteArray(int(dataBytes), '\0'));
+            w.close();
+            return true;
+        };
+        auto localSong = [&](const QString &tag) {
+            const QString p = QDir::tempPath() + QStringLiteral("/muyun-adv-%1.wav").arg(tag);
+            makeWav(p);
+            QVariantMap m;
+            m[QStringLiteral("id")] = p;
+            m[QStringLiteral("name")] = QStringLiteral("L-") + tag;
+            m[QStringLiteral("artist")] = QStringLiteral("test");
+            m[QStringLiteral("duration")] = 1.0;
+            m[QStringLiteral("platform")] = QStringLiteral("local");
+            m[QStringLiteral("localPath")] = p;
+            return m;
+        };
+        // 不存在的音源 → resolveUrl 秒回空，全程不联网
+        auto badSong = [](const QString &tag) {
+            QVariantMap m;
+            m[QStringLiteral("id")] = QStringLiteral("adv-") + tag;
+            m[QStringLiteral("name")] = QStringLiteral("B-") + tag;
+            m[QStringLiteral("artist")] = QStringLiteral("test");
+            m[QStringLiteral("duration")] = 100.0;
+            m[QStringLiteral("platform")] = QStringLiteral("netease");
+            QVariantMap lx;
+            lx[QStringLiteral("source")] = QStringLiteral("lxtest");
+            m[QStringLiteral("lx")] = lx;
+            return m;
+        };
+
+        QStringList failMsgs, failSeq;
+        QObject::connect(player, &PlayerController::playFailed,
+                         [&failMsgs, &failSeq, player](const QString &s) {
+                             failMsgs << s;
+                             failSeq << player->currentSong().name;
+                         });
+
+        // -- 1) 随机模式：整队列取不到音频 → 前进式跳歌，不重放、不回弹 --
+        const QStringList advTags = { QStringLiteral("a"), QStringLiteral("b"),
+                                       QStringLiteral("c"), QStringLiteral("d") };
+        QVariantList badList;
+        for (const QString &t : advTags) badList.append(badSong(t));
+        player->setPlayModeId(QStringLiteral("shuffle"));
+        failMsgs.clear();
+        failSeq.clear();
+        const QString first = badSong(QStringLiteral("a")).value(QStringLiteral("name")).toString();
+        player->playSong(badSong(QStringLiteral("a")), badList);
+        {
+            QElapsedTimer t; t.start();
+            int lastN = -1;
+            while (t.elapsed() < 20000) {
+                waitMs(200);
+                if (failSeq.size() == lastN) break;   // 连续一拍没有新失败 → 已收敛
+                lastN = failSeq.size();
+            }
+        }
+        bool backtrack = false;
+        for (int i = 1; i < failSeq.size(); ++i)
+            if (failSeq.at(i) == failSeq.at(i - 1)) backtrack = true;
+        const bool movedOn = player->currentSong().name != first;
+        const bool autoSkip = !failMsgs.filter(QStringLiteral("已自动播放下一首")).isEmpty();
+        const bool advanceOk = movedOn && !backtrack && autoSkip
+                               && !player->isPlaying() && failSeq.size() >= 3;
+        printf("[%s] 1) 随机模式失败前进式跳歌（首次=%s 结束=%s 序列=%s 不回弹=%d）\n",
+               advanceOk ? "PASS" : "FAIL", qPrintable(first),
+               qPrintable(player->currentSong().name),
+               qPrintable(failSeq.join(QLatin1String(">"))), int(!backtrack));
+
+        // -- 2) 看门狗不误报：上面是"秒回空"的快速失败，不该出现"迟迟取不到音频" --
+        const bool noFalsePositive = failMsgs.filter(QStringLiteral("迟迟取不到音频")).isEmpty();
+        printf("[%s] 2) 快速失败不误触单首时限\n", noFalsePositive ? "PASS" : "FAIL");
+
+        // -- 3) 选歌即武装；主动停止一定解除 --
+        player->setPlayModeId(QStringLiteral("sequence"));
+        player->playSong(localSong(QStringLiteral("a")), { localSong(QStringLiteral("a")) });
+        const bool armedNow = player->songWatchdogActive();
+        player->stop();
+        const bool wdStopOk = armedNow && !player->songWatchdogActive();
+        printf("[%s] 3) 选歌武装 / 停止解除（武装=%d 停止后=%d）\n",
+               wdStopOk ? "PASS" : "FAIL", int(armedNow), int(player->songWatchdogActive()));
+
+        // -- 4) 不变式：正在出声时看门狗不得计时（真出声 = 已解武装）--
+        player->playSong(localSong(QStringLiteral("a")), { localSong(QStringLiteral("a")) });
+        waitMs(1500);
+        const bool playing = player->isPlaying();
+        const bool armedWhilePlaying = player->songWatchdogActive();
+        const bool invariantOk = !(playing && armedWhilePlaying);
+        printf("[%s] 4) 出声时不误计时（播放中=%d 计时中=%d）\n",
+               invariantOk ? "PASS" : "FAIL", int(playing), int(armedWhilePlaying));
+
+        for (const QString &tag : advTags)
+            QFile::remove(QDir::tempPath() + QStringLiteral("/muyun-adv-%1.wav").arg(tag));
+        QFile::remove(QDir::tempPath() + QStringLiteral("/muyun-adv-a.wav"));
+        player->stop();
+        qunsetenv("MUYUN_SONG_WATCH_MS");
+        const int rc = (advanceOk && noFalsePositive && wdStopOk && invariantOk) ? 0 : 4;
+        printf("=== 失败前进自检 %s ===\n", rc == 0 ? "PASS" : "FAIL");
+        return finishSelfTest(rc);
+    }
+#endif // MUYUN_SELFTES
     // fx 视觉控制台自检：拉起舞台 → 打开面板 → 验证 fx 状态回显
     // 用法：MuyunMusic.exe --test-fx [保持秒数，默认20]
 #ifdef MUYUN_SELFTES
@@ -4997,22 +5136,45 @@ int main(int argc, char *argv[])
             if (!h) return false;
             return (GetWindowLongPtr(h, GWL_EXSTYLE) & WS_EX_TRANSPARENT) != 0;
         };
-        check("置顶且光标不在窗内 → 保持穿透（WS_EX_TRANSPARENT=1）", transparentNow());
+        check("置顶且光标不在命中区内 → 保持穿透（WS_EX_TRANSPARENT=1）", transparentNow());
 
-        // 光标移到歌词窗中心 → 悬停命中 → 应放开穿透
+        // 光标移到歌词窗中心 → 必须放开穿透、显示取消置顶钮。
+        // 这是用户 2026-10-04 二次反馈的核心诉求：鼠标一进入歌词带就要显钮，
+        // 不必非要压到那小块按钮上（按钮本身"悬停才出现"，用户根本不知道该往哪移）。
         const QPoint c = deskLyrics->centerGlobalForTest();
-        QCursor::setPos(c);   // Qt 逻辑坐标，与 pollHover 读的 QCursor::pos() 同域（别用 SetCursorPos 物理坐标）
-        pumpMs(350);   // >100ms 轮询周期
-        check("光标移入窗内 → pinnedHover=1", deskLyrics->pinnedHover(),
-              QStringLiteral("hover=%1").arg(int(deskLyrics->pinnedHover())));
-        check("悬停时临时解除穿透（钮可点）", !transparentNow());
-
-        // 光标移到远处 → 离开 → 应恢复穿透
-        QCursor::setPos(20, 20);
+        QCursor::setPos(c);
         pumpMs(350);
-        check("光标移出 → pinnedHover=0", !deskLyrics->pinnedHover(),
-              QStringLiteral("hover=%1").arg(int(deskLyrics->pinnedHover())));
-        check("离开后恢复穿透", transparentNow());
+        check("光标压在歌词带中间 → 显取消置顶钮（pinnedHover=1）",
+              deskLyrics->pinnedHover(),
+              QStringLiteral("带中 hover=%1").arg(int(deskLyrics->pinnedHover())));
+        check("光标压在歌词带中间 → 仍穿透（WS_EX_TRANSPARENT=1，只有钮那块可点）",
+              transparentNow());
+        // 光标移到「取消置顶」钮上 → 悬停命中 → 放开穿透
+        const QPointF btn = deskLyrics->unpinButtonGlobalForTest();
+        check("能取到取消置顶钮坐标", !btn.isNull());
+        if (!btn.isNull()) {
+            QCursor::setPos(btn.toPoint());   // Qt 逻辑坐标，Qt 自己换算成物理坐标
+            pumpMs(350);
+            check("光标移到钮上 → pinnedHover=1", deskLyrics->pinnedHover(),
+                  QStringLiteral("hover=%1").arg(int(deskLyrics->pinnedHover())));
+            check("悬停时临时解除穿透（钮可点）", !transparentNow());
+
+            // 放开穿透的区域 = 整窗（用户 2026-10-04 二次反馈：必须"进歌词带就显钮"）
+            const QRect hitRect = deskLyrics->unpinButtonHitRectForTest();
+            RECT wrc{};
+            const bool gotWin = hwndDl() && GetWindowRect(hwndDl(), &wrc);
+            const int winW = gotWin ? (int)(wrc.right - wrc.left) : 0;
+            check("放开穿透的命中区 ≈ 按钮大小（< 半窗宽）",
+                  !hitRect.isNull() && gotWin && hitRect.width() < winW * 3 / 4,
+                  QStringLiteral("命中区宽=%1 整窗宽=%2").arg(hitRect.width()).arg(winW));
+
+            // 光标移到远处 → 离开命中区 → 应恢复穿透
+            QCursor::setPos(20, 20);
+            pumpMs(350);
+            check("光标移出命中区 → pinnedHover=0", !deskLyrics->pinnedHover(),
+                  QStringLiteral("hover=%1").arg(int(deskLyrics->pinnedHover())));
+            check("离开后恢复穿透", transparentNow());
+        }
 
         deskLyrics->hide();
         printf("%s 桌面歌词置顶悬停自检（%d 项失败）\n", fail == 0 ? "[PASS]" : "[FAIL]", fail);
@@ -5078,6 +5240,28 @@ int main(int argc, char *argv[])
                 .arg((e & WS_EX_TOOLWINDOW) != 0 ? 1 : 0);
         };
         printf("    置顶初态 %s\n", qPrintable(exStyleTxt()));
+
+        // ---- 反向穿透：光标**不在**歌词带内时，整窗必须保持穿透（WS_EX_TRANSPARENT=1）
+        //   → WindowFromPoint 打在窗中心不应命中本窗，点击漏给下层。
+        //   这是"不挡住桌面"的护栏：hover 区之外必须穿透，别整窗永久吃掉桌面点击。
+        if (h) {
+            RECT rc{}; GetWindowRect(h, &rc);
+            const POINT centerPix = { LONG(rc.left + (rc.right - rc.left) / 2),
+                                      LONG(rc.top + (rc.bottom - rc.top) / 2) };
+            const HWND hitCenter = WindowFromPoint(centerPix);
+            check("光标不在歌词带内 → 点击漏给下层（不落在本窗）",
+                  hitCenter != h,
+                  QStringLiteral("WindowFromPoint=%1 本窗=%2 像素点=%3,%4")
+                      .arg(reinterpret_cast<quintptr>(hitCenter), 0, 16)
+                      .arg(reinterpret_cast<quintptr>(h), 0, 16)
+                      .arg(centerPix.x).arg(centerPix.y));
+            const QRect hitRect = deskLyrics->unpinButtonHitRectForTest();
+            check("放开穿透的命中区 ≈ 按钮大小（< 半窗宽）",
+                  !hitRect.isNull() && hitRect.width() < (rc.right - rc.left) * 3 / 4,
+                  QStringLiteral("命中区=%d×%d 整窗=%d×%d")
+                      .arg(hitRect.width()).arg(hitRect.height())
+                      .arg(rc.right - rc.left).arg(rc.bottom - rc.top));
+        }
 
         // ---- 坐标空间全量诊断：dpr≠1 时 Qt 逻辑坐标与 Win32 物理坐标可能不同域 ----
         // 先不挪光标、不假设任何 Qt 坐标是对的，只看三件事：

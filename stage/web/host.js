@@ -164,6 +164,11 @@ const ICON = {
   heart: '<svg class="heart-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/></svg>',
 }
 const MODE_ICONS = { sequence: ICON.order, loop: ICON.repeat, single: ICON.repeat1, shuffle: ICON.shuffle }
+// 播放模式名（与主程序 playModeName 逐字一致）：按钮 tooltip 必须写出当前模式，
+// 不能只显示「播放模式」四个字（用户 2026-10-04 报：全屏歌词页悬停只看到"播放模式"，
+// 看不出到底切到哪档）。与图标同理，早先 setModeIcon 只改 innerHTML 与 data-mode，
+// HTML 里写死的 title 一直没被更新过。
+const MODE_NAMES = { sequence: '顺序播放', loop: '列表循环', single: '单曲循环', shuffle: '随机播放' }
 
 // ---------- DOM ----------
 const $ = (id) => document.getElementById(id)
@@ -198,6 +203,8 @@ window.__muyunUi = {
   wakeUi,
   immersive: () => immersive,
   idleHidden: () => el.root.classList.contains('ui-idle-hidden'),
+  modeId: () => el.mode.dataset.mode,
+  modeTitle: () => el.mode.title,
 }
 
 function safeState () {
@@ -260,9 +267,12 @@ function fmt (sec) {
 }
 function setPlayIcon (playing) { el.play.innerHTML = playing ? ICON.pause : ICON.play }
 function setModeIcon (id) {
-  el.mode.innerHTML = MODE_ICONS[id] || ICON.repeat
+  // 未知/空 id 统一落到 sequence，别让「图标是列表循环、名称是顺序播放、data-mode 空着」三件对不上
+  const k = MODE_ICONS[id] ? id : 'sequence'
+  el.mode.innerHTML = MODE_ICONS[k]
+  el.mode.title = '播放模式：' + MODE_NAMES[k]
   // 驱动 CSS 高亮（mineradio.css 的 [data-mode=...] 规则此前因没人设 data-mode 从未生效）
-  el.mode.dataset.mode = id
+  el.mode.dataset.mode = k
 }
 function setVolIcon (v) { el.volBtn.innerHTML = v <= 0.001 ? ICON.mute : ICON.volume }
 
@@ -493,6 +503,15 @@ function handleCmd (msg) {
       break
     }
     case 'pmode': setModeIcon(String(msg.id || 'sequence')); break
+    case 'pmodeprobe': {
+      // 自检回报：把播放模式按钮的 data-mode 与 tooltip 一起回传，
+      // 让 C++ 侧断言「四种模式的图标与名称都对」而不是只测没崩
+      post({ e: 'pmodeinfo',
+             mode: String(el.mode.dataset.mode || ''),
+             title: String(el.mode.title || ''),
+             iconLen: (el.mode.innerHTML || '').length })
+      break
+    }
     case 'vol': applyVolume(msg.v); break
     case 'domprobe': {
       // 调试：枚举视口分数矩形内可见元素（定位"黑块"真身）

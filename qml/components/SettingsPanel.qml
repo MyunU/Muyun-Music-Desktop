@@ -717,19 +717,28 @@ Popup {
                 Text { text: "暮云音乐"; color: theme.textColor; font.pixelSize: 16; font.bold: true }
                 Text { text: "版本 v" + appVersion; color: theme.subTextColor; font.pixelSize: 12 }
                 Text { text: "数据目录：" + settings.dataPath(); color: theme.subTextColor; font.pixelSize: 11; wrapMode: Text.Wrap; Layout.fillWidth: true }
-                Text { text: "缓存占用：" + panel.fmtSize(settings.cacheSize()); color: theme.subTextColor; font.pixelSize: 12 }
-
-                Rectangle {
-                    width: 76; height: 30; radius: 15
-                    color: ccHover.containsMouse ? theme.hoverColor : theme.cardColor
-                    border.color: theme.borderColor
-                    border.width: 1
-                    Text { anchors.centerIn: parent; text: "清除缓存"; color: theme.textColor; font.pixelSize: 12 }
-                    MouseArea {
-                        id: ccHover
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        onClicked: settings.clearCache()
+                RowLayout {
+                    spacing: 8
+                    Text { text: "缓存（不含歌曲）：" + panel.fmtSize(settings.otherCacheSize); color: theme.subTextColor; font.pixelSize: 12 }
+                    Rectangle {
+                        width: 72; height: 26; radius: 13
+                        color: ocHover.containsMouse ? theme.hoverColor : theme.cardColor
+                        border.color: theme.borderColor; border.width: 1
+                        Text { anchors.centerIn: parent; text: "清除"; color: theme.textColor; font.pixelSize: 11 }
+                        MouseArea { id: ocHover; anchors.fill: parent; hoverEnabled: true
+                                     onClicked: settings.clearOtherCache() }
+                    }
+                }
+                RowLayout {
+                    spacing: 8
+                    Text { text: "歌曲缓存：" + panel.fmtSize(settings.songCacheSize); color: theme.subTextColor; font.pixelSize: 12 }
+                    Rectangle {
+                        width: 72; height: 26; radius: 13
+                        color: scHover.containsMouse ? theme.hoverColor : theme.cardColor
+                        border.color: theme.borderColor; border.width: 1
+                        Text { anchors.centerIn: parent; text: "清除歌曲缓存"; color: theme.textColor; font.pixelSize: 11 }
+                        MouseArea { id: scHover; anchors.fill: parent; hoverEnabled: true
+                                     onClicked: settings.clearSongCache() }
                     }
                 }
 

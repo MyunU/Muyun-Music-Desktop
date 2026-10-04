@@ -18,6 +18,17 @@
 
 namespace Muyun {
 
+// 单首取音频的总时限（ms）。MUYUN_SONG_WATCH_MS 可覆盖（自检压到几百毫秒，不必真等 30s）
+static int songWatchdogMs()
+{
+    const QByteArray e = qgetenv("MUYUN_SONG_WATCH_MS");
+    if (!e.isEmpty()) {
+        const int v = e.toInt();
+        if (v > 0) return v;
+    }
+    return 30000;
+}
+
 PlayerController::PlayerController(QObject *parent) : QObject(parent)
 {
     m_engine = new PlayerEngine(this);
@@ -40,8 +51,10 @@ PlayerController::PlayerController(QObject *parent) : QObject(parent)
             });
     connect(m_engine, &PlayerEngine::playbackStateChanged, this,
             [this]() {
-                if (m_engine->state() == PlayerEngine::State::Playing)
-                    m_failStreak = 0;   // 真播起来了：失败熔断计数清零
+                if (m_engine->state() == PlayerEngine::State::Playing) {
+                    m_failStreak = 0;    // 真播起来了：失败熔断计数清零
+                    disarmSongWatchdog(); // 出声了：单首时限解武装
+                }
                 emit isPlayingChanged();
             });
     connect(m_engine, &PlayerEngine::endOfMedia, this, &PlayerController::onEndOfMedia);
@@ -49,6 +62,11 @@ PlayerController::PlayerController(QObject *parent) : QObject(parent)
     // 音效管线接管/回退 → 通知 UI（入口高亮、面板状态行）
     connect(m_engine, &PlayerEngine::effectsRuntimeChanged, this,
             [this]() { emit effectsRuntimeChanged(); emit isPlayingChanged(); });
+
+    // 单首取音频总时限：到点仍没出声就按失败前进（见 m_songWatchdog 注释）
+    m_songWatchdog.setSingleShot(true);
+    connect(&m_songWatchdog, &QTimer::timeout, this,
+            &PlayerController::onSongWatchdogTimeout);
 
     restoreState();
 }
@@ -413,10 +431,16 @@ void PlayerController::playSong(const QVariantMap &song, const QVariantList &lis
     loadLyric();
     resolveAndPlay();
     maybeResolveCover();
+    armSongWatchdog();   // 用户点歌 → 重新武装单首时限
     saveState();
 }
 
 void PlayerController::playIndex(int index)
+{
+    startAt(index, true);
+}
+
+void PlayerController::startAt(int index, bool armWatchdog)
 {
     if (index < 0 || index >= m_playlist.size()) return;
     m_currentIndex = index;
@@ -426,6 +450,7 @@ void PlayerController::playIndex(int index)
     loadLyric();
     resolveAndPlay();
     maybeResolveCover();
+    if (armWatchdog) armSongWatchdog();   // 用户换歌/播完接续 → 重新武装单首时限
     saveState();
 }
 
@@ -475,9 +500,9 @@ void PlayerController::togglePlay()
     else if (!m_playlist.isEmpty()) playIndex(0);
 }
 
-void PlayerController::pause() { m_engine->pause(); emit isPlayingChanged(); }
+void PlayerController::pause() { m_engine->pause(); disarmSongWatchdog(); emit isPlayingChanged(); }
 void PlayerController::resume() { m_engine->resume(); emit isPlayingChanged(); }
-void PlayerController::stop() { m_engine->stop(); emit isPlayingChanged(); }
+void PlayerController::stop() { m_engine->stop(); disarmSongWatchdog(); emit isPlayingChanged(); }
 
 void PlayerController::seek(qint64 ms) { m_engine->seek(ms); emit positionChanged(); }
 
@@ -629,6 +654,46 @@ void PlayerController::resolveAndPlay()
     }
     m_playRetry = 0;
     resolveAndPlayAt(m_quality);
+}
+
+// ---------------------------------------------------------------------------
+// 单首取音频总时限（30s，跨所有降档重试）
+// ---------------------------------------------------------------------------
+// 背景：在线歌取不到链接时会沿音质降级链逐档真请求，每档 HttpClient 20s 超时，
+// 6 档最坏要等 2 分钟。这段时间 UI 钉在这首歌上（loading 转圈），用户体验就是
+// 「一首歌播完以后还是这一首歌」。到点仍没出声 → 按失败处理、前进到下一首，
+// 而不是无限等下去。只在"用户选歌/换歌/恢复状态"时重新武装；
+// advanceOnPlayFailure 故意不武装（见头文件注释）。
+void PlayerController::armSongWatchdog()
+{
+    m_songWatchdog.start(songWatchdogMs());
+}
+
+bool PlayerController::songWatchdogActive() const
+{
+    return m_songWatchdog.isActive();
+}
+
+void PlayerController::disarmSongWatchdog()
+{
+    m_songWatchdog.stop();
+}
+
+void PlayerController::onSongWatchdogTimeout()
+{
+    // 已经出声、或压根没在加载 → 无需处理（防误报：失败降档链走完后 m_loading 已清）
+    if (m_engine->state() == PlayerEngine::State::Playing || !m_loading)
+        return;
+    m_loading = false;
+    emit isLoadingChanged();
+    emit playFailed(QStringLiteral("这首歌迟迟取不到音频，已跳过"));
+    if (m_playlist.size() <= 1) { emit isPlayingChanged(); return; }  // 只有这一首：跳无可跳，停下
+    // 前进到下一首（随机模式牌堆天然不回弹；顺序播放到末尾才停）
+    int idx = nextIndexByMode(false);
+    if (idx < 0) { emit isPlayingChanged(); return; }
+    if (idx == m_currentIndex && m_playlist.size() > 1)
+        idx = (m_currentIndex + 1) % m_playlist.size();
+    if (idx >= 0 && idx < m_playlist.size()) startAt(idx, false);
 }
 
 void PlayerController::resolveAndPlayAt(AudioQuality startQ)
@@ -849,17 +914,20 @@ void PlayerController::onEngineError(const QString &message)
 // 在线歌彻底失败（降档重试都用了）→ 直接播下一首而不是停在原地等用户点。
 // 连败熔断：整队列都拉不到时跳了 N 首仍失败 → 止损报错，不死循环。
 // 本地歌失败不跳（多半是文件没了，跳了也没意义）。
+// 熔断后不清零 m_failStreak 之外的状态，但**重置熔断计数**：
+//   否则用户稍后手动换歌会一直被"上一轮的连败"挡着。
 void PlayerController::advanceOnPlayFailure(const QString &reason)
 {
-    if (!m_currentSong.isLocal() && m_playlist.size() > 1 &&
-        m_failStreak < qMax(6, m_playlist.size())) {
+    const int limit = qMax(6, m_playlist.size());
+    if (!m_currentSong.isLocal() && m_playlist.size() > 1 && m_failStreak < limit) {
         ++m_failStreak;
         int idx = nextIndexByMode(false);
         if (idx == m_currentIndex)                    // 单曲循环：强制前进一格，别卡在同一首
             idx = (m_currentIndex + 1) % m_playlist.size();
         if (idx >= 0 && idx < m_playlist.size()) {
             emit playFailed(reason + QStringLiteral("，已自动播放下一首"));
-            playIndex(idx);
+            // arm=false：整队列都挂时不续命单首时限（限时预算耗尽即停）
+            startAt(idx, false);
             return;
         }
         // idx<0：顺序播放已到队尾 → 按常规停下
