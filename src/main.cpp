@@ -1210,6 +1210,21 @@ static int runHomeSelfTest()
 
 static const char *u8(const QString &s);   // 定义在下方自检工具区（UTF-8 输出）
 
+/// 把版本号的最后一段 +1（1.1.0 → 1.1.1，1.1.99 → 1.2.0）。
+/// 更新自检的夹具版本必须用它在"本程序当前版本"上推导：写死具体版本号在升版后会连锁变红。
+static QString bumpLast(const QString &v)
+{
+    QStringList parts = v.split(QLatin1Char('.'));
+    for (int i = parts.size() - 1; i >= 0; --i) {
+        if (parts.at(i).toInt() < 99) {
+            parts[i] = QString::number(parts.at(i).toInt() + 1);
+            break;
+        }
+        parts[i] = QStringLiteral("0");
+    }
+    return parts.join(QLatin1Char('.'));
+}
+
 /// 更新提示自检（全离线，不碰网络）：
 ///   ① 纯逻辑：版本规范化 / 数值段比较 / 忽略规则 / 两种清单格式 / 垃圾输入；
 ///   ② 真链路：本地清单文件 → 工作线程读取 → 回主线程落地 → 发 updateFound；
@@ -1255,29 +1270,37 @@ static int runUpdateSelfTest()
     check("比已忽略版本更新的仍要提醒", UpdateChecker::shouldNotify(
               QStringLiteral("1.0.2"), QStringLiteral("1.0.0"), QStringLiteral("1.0.1")));
 
+    // 夹具版本号一律由"本程序当前版本"推导，不能写死：以前写死 "1.1.0"，等程序真的升到
+    // 1.1.0 时，shouldNotify 拿它跟本地一比判成同版本 → 不提醒 → 这条及其后 6 项连锁全红
+    // （2026-10-04 发版 v1.1.0 时就是这样暴露的）。
+    const QString curVer    = UpdateChecker::normalizeVersion(QStringLiteral(MUYUN_VERSION));
+    const QString newerVer  = bumpLast(curVer);    // 比当前版本新 → 该提醒
+    const QString newestVer = bumpLast(newerVer);  // 比"已忽略版本"还新 → 该重新提醒
+
     // version.json 形态（开源仓库根目录放的文件）
-    const QByteArray feedV = R"({"version":"1.1.0","notes":"①修A\n②修B",
-        "pageUrl":"https://github.com/x/y/releases/tag/v1.1.0",
-        "downloadUrl":"https://github.com/x/y/releases/download/v1.1.0/setup.exe",
-        "pubDate":"2026-10-10"})";
+    const QByteArray feedV = QStringLiteral(
+        R"({"version":"%1","notes":"①修A\n②修B","pageUrl":"https://github.com/x/y/releases/tag/v%1",
+            "downloadUrl":"https://github.com/x/y/releases/download/v%1/setup.exe","pubDate":"2026-10-10"})")
+        .arg(newerVer).toUtf8();
     UpdateInfo i1; QString e1;
     const bool ok1 = UpdateChecker::parseFeedJson(feedV, &i1, &e1);
     check("version.json 解析（版本/说明/直链）",
-          ok1 && i1.version == QStringLiteral("1.1.0") && i1.notes.contains(QStringLiteral("修B"))
+          ok1 && i1.version == newerVer && i1.notes.contains(QStringLiteral("修B"))
               && i1.downloadUrl.endsWith(QStringLiteral("setup.exe")),
           e1);
 
     // GitHub Releases API 形态（raw 拿不到时的兜底）
-    const QByteArray feedApi = R"({"tag_name":"v1.2.0","body":"说明",
-        "html_url":"https://github.com/x/y/releases/tag/v1.2.0",
-        "assets":[{"name":"checksums.txt","browser_download_url":"https://x/c.txt"},
-                  {"name":"MuyunMusic-1.2.0-win64-setup.exe","browser_download_url":"https://x/setup.exe"}]})";
+    const QByteArray feedApi = QStringLiteral(
+        R"({"tag_name":"v%1","body":"说明","html_url":"https://github.com/x/y/releases/tag/v%1",
+            "assets":[{"name":"checksums.txt","browser_download_url":"https://x/c.txt"},
+                      {"name":"MuyunMusic-%1-win64-setup.exe","browser_download_url":"https://x/setup.exe"}]})")
+        .arg(newestVer).toUtf8();
     UpdateInfo i2; QString e2;
     const bool ok2 = UpdateChecker::parseFeedJson(feedApi, &i2, &e2);
     check("Releases API 解析（tag_name/body/assets 自动挑安装器）",
-          ok2 && i2.version == QStringLiteral("1.2.0")
+          ok2 && i2.version == newestVer
               && i2.downloadUrl == QStringLiteral("https://x/setup.exe")
-              && i2.pageUrl == QStringLiteral("https://github.com/x/y/releases/tag/v1.2.0"),
+              && i2.pageUrl == QStringLiteral("https://github.com/x/y/releases/tag/v") + newestVer,
           e2);
 
     UpdateInfo i3; QString e3;
@@ -1331,8 +1354,8 @@ static int runUpdateSelfTest()
     });
     checker->autoCheck();
     waitIdle(checker, 4000);
-    check("每次启动自动检查：拉到 1.1.0 并发 updateFound",
-          found == 1 && foundVer == QStringLiteral("1.1.0")
+    check("每次启动自动检查：拉到更新版本并发 updateFound",
+          found == 1 && foundVer == newerVer
               && checker->status() == QStringLiteral("available"),
           QStringLiteral("found=%1 ver=%2 status=%3").arg(found).arg(foundVer, checker->status()));
 
@@ -1369,7 +1392,7 @@ static int runUpdateSelfTest()
         c4->autoCheck();
         waitIdle(c4, 4000);
         check("不再提醒：版本号落盘且自动检查不再弹窗",
-              saved == QStringLiteral("1.1.0") && f4 == 0
+              saved == newerVer && f4 == 0
                   && c4->status() == QStringLiteral("ignored"),
               QStringLiteral("存档=%1 status=%2").arg(saved, c4->status()));
         delete c4;
@@ -1379,7 +1402,7 @@ static int runUpdateSelfTest()
     checker->checkForUpdates();
     waitIdle(checker, 4000);
     check("手动检查不受「不再提醒」影响",
-          found == 2 && foundVer == QStringLiteral("1.1.0")
+          found == 2 && foundVer == newerVer
               && checker->status() == QStringLiteral("available"),
           QStringLiteral("found=%1 status=%2").arg(found).arg(checker->status()));
 
@@ -1392,8 +1415,8 @@ static int runUpdateSelfTest()
                          [&f6, &v6](const QString &v, const QString &) { ++f6; v6 = v; });
         c6->autoCheck();
         waitIdle(c6, 4000);
-        check("远端出现 1.2.0（比忽略的 1.1.0 新）→ 自动检查重新提醒",
-              f6 == 1 && v6 == QStringLiteral("1.2.0")
+        check("远端出现更新版本（比已忽略版本新）→ 自动检查重新提醒",
+              f6 == 1 && v6 == newestVer
                   && c6->status() == QStringLiteral("available"),
               QStringLiteral("found=%1 ver=%2").arg(f6).arg(v6));
         delete c6;
@@ -1424,8 +1447,8 @@ static int runUpdateSelfTest()
         delete c7;
     }
 
-    // ⑧ 远端与本地同版本 → 已是最新
-    writeFeed(R"({"version":"1.0.0","notes":""})");
+    // ⑧ 远端与本地同版本 → 已是最新（写"当前版本"而不是写死 1.0.0）
+    writeFeed(QStringLiteral(R"({"version":"%1","notes":""})").arg(curVer).toUtf8());
     checker->checkForUpdates();
     waitIdle(checker, 4000);
     check("远端与本地同版本 → uptodate 且不弹窗",
@@ -5699,12 +5722,19 @@ int main(int argc, char *argv[])
             bool ignoreSaved = false, closedAfterIgnore = false, noReopen = false;
             bool newerReopens = false, laterKeepsIgnored = false, switchBound = false;
             QString ignored, statusText, shotDlg, shotSettings;
+            QString newer, newest;   // 由"本程序当前版本"推导（见下）
         } u;
         feedPath = QDir::tempPath() + QStringLiteral("/muyun_probe/update_feed_ui.json");
         QDir().mkpath(QFileInfo(feedPath).absolutePath());
-        writeUpdateFeedFile(feedPath, R"({"version":"1.2.0","notes":"①音效全格式\n②本地时长修复",
-            "pageUrl":"https://github.com/x/y/releases/tag/v1.2.0",
-            "downloadUrl":"https://github.com/x/y/releases/download/v1.2.0/setup.exe"})");
+        // 夹具版本号从"本程序当前版本"推导，不写死 1.2.0：写死的话等程序升到 1.2.0 时
+        // 这条会判成同版本不弹窗，连带后面 4 项一起红（同 --test-update，v1.1.0 时已踩过）。
+        u.newer  = bumpLast(UpdateChecker::normalizeVersion(QStringLiteral(MUYUN_VERSION)));
+        u.newest = bumpLast(u.newer);
+        writeUpdateFeedFile(feedPath, QStringLiteral(
+            R"({"version":"%1","notes":"①音效全格式\n②本地时长修复",
+                "pageUrl":"https://github.com/x/y/releases/tag/v%1",
+                "downloadUrl":"https://github.com/x/y/releases/download/v%1/setup.exe"})")
+            .arg(u.newer).toUtf8());
         qputenv("MUYUN_UPDATE_FEED_FILE", feedPath.toLocal8Bit());
 
         // ⚠ 所有步骤回调都在本 if 块退出之后才跑：块内一律不用"按引用捕获的局部 lambda/局部量"，
@@ -5744,7 +5774,7 @@ int main(int argc, char *argv[])
             QObject *notes = findUiItem(mainWin, QStringLiteral("updateNotesText"));
             const QString titleText = title ? title->property("text").toString() : QString();
             const QString notesText = notes ? notes->property("text").toString() : QString();
-            u.textsOk = titleText.contains(QStringLiteral("1.2.0"))
+            u.textsOk = titleText.contains(u.newer)
                         && notesText.contains(QStringLiteral("音效全格式"));
             if (mainWin) {
                 u.shotDlg = QDir::tempPath() + QStringLiteral("/update_dialog.png");
@@ -5757,7 +5787,7 @@ int main(int argc, char *argv[])
 
             clickMouseAreaObj(findUiItem(mainWin, QStringLiteral("updateIgnoreBtn")));
             u.ignored = updater->ignoredVersion();
-            u.ignoreSaved = (u.ignored == QStringLiteral("1.2.0"));
+            u.ignoreSaved = (u.ignored == u.newer);
             u.closedAfterIgnore = dlg && !dlg->property("visible").toBool();
             printf("[%s] 点「不再提醒」：存档=%s 弹窗已关=%d\n",
                    (u.ignoreSaved && u.closedAfterIgnore) ? "PASS" : "FAIL",
@@ -5781,8 +5811,9 @@ int main(int argc, char *argv[])
 
         // ---------- 步骤 4：出更新版本 → 手动检查仍弹；点「稍后」不写忽略 ----------
         steps->push_back({400, [mainWin, updater]() {
-            writeUpdateFeedFile(feedPath, R"({"version":"1.3.0","notes":"新版本说明",
-                "pageUrl":"https://github.com/x/y/releases/tag/v1.3.0"})");
+            writeUpdateFeedFile(feedPath, QStringLiteral(
+                R"({"version":"%1","notes":"新版本说明","pageUrl":"https://github.com/x/y/releases/tag/v%1"})")
+                .arg(u.newest).toUtf8());
             updater->checkForUpdates();
             waitCheckIdle(updater, 5000);
             auto *dlg = mainWin ? mainWin->findChild<QObject *>(QStringLiteral("appUpdateDialog"))
@@ -5790,14 +5821,14 @@ int main(int argc, char *argv[])
             QObject *title = findUiItem(mainWin, QStringLiteral("updateTitleText"));
             const QString titleText = title ? title->property("text").toString() : QString();
             u.newerReopens = dlg && dlg->property("visible").toBool()
-                             && titleText.contains(QStringLiteral("1.3.0"));
-            printf("[%s] 出现 1.3.0 → 手动检查弹窗：可见=%d 标题=\"%s\"\n",
-                   u.newerReopens ? "PASS" : "FAIL",
+                             && titleText.contains(u.newest);
+            printf("[%s] 出现 %s → 手动检查弹窗：可见=%d 标题=\"%s\"\n",
+                   u.newerReopens ? "PASS" : "FAIL", u8(u.newest),
                    dlg ? int(dlg->property("visible").toBool()) : -1, u8(titleText));
 
             clickMouseAreaObj(findUiItem(mainWin, QStringLiteral("updateLaterBtn")));
             u.laterKeepsIgnored = dlg && !dlg->property("visible").toBool()
-                                  && updater->ignoredVersion() == QStringLiteral("1.2.0");
+                                  && updater->ignoredVersion() == u.newer;
             printf("[%s] 点「稍后」：弹窗关闭且不写忽略（仍=%s）\n",
                    u.laterKeepsIgnored ? "PASS" : "FAIL", u8(updater->ignoredVersion()));
         }});
@@ -5810,7 +5841,7 @@ int main(int argc, char *argv[])
             u.entry = findUiItem(mainWin, QStringLiteral("updateCheckBtn")) != nullptr;
             QObject *st = findUiItem(mainWin, QStringLiteral("updateStatusText"));
             u.statusText = st ? st->property("text").toString() : QString();
-            u.statusOk = u.statusText.contains(QStringLiteral("1.3.0"));
+            u.statusOk = u.statusText.contains(u.newest);
             u.shotSettings = QDir::tempPath() + QStringLiteral("/update_settings.png");
             if (mainWin && !mainWin->grabWindow().save(u.shotSettings)) u.shotSettings.clear();
             printf("[%s] 设置·关于：入口=%d 状态行=\"%s\" 截图=%s\n",
