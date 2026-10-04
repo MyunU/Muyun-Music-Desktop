@@ -73,6 +73,12 @@ Window {
             return
         }
         if (maximized) {
+            // ⚠ 必须先清标志、再赋几何。清标志触发 onMaximizedChanged → setMaximizedStyle(false)
+            // 摘掉 WS_MAXIMIZE 位；位还在时 Windows 会直接拒绝改窗口大小（stderr: "Unable to set
+            // geometry ... Resulting geometry: <原样>"），几何赋值就被吞掉 → 点「还原」没反应、
+            // 窗口钉在工作区大小。v1.1.0 出厂时顺序正好反了（先赋几何 L76、后清标志 L83），
+            // --test-maximize 稳定 3/3 复现，2026-10-04 修复（见 HANDOFF 待办 #23）。
+            maximized = false
             if (_saved) { root.x = _rx; root.y = _ry; root.width = _rw; root.height = _rh }
             else {      // 没存到还原目标（启动即最大化等）→ 回默认尺寸，别让按钮空转
                 root.width = Math.round(Screen.width * 0.84)
@@ -80,7 +86,6 @@ Window {
                 root.x = Math.round((Screen.width - root.width) / 2)
                 root.y = Math.round((Screen.height - root.height) / 2)
             }
-            maximized = false
         } else {
             // 只有"确实比工作区小"的几何才配当还原目标
             if (root.width < Screen.desktopAvailableWidth - 8 || root.height < Screen.desktopAvailableHeight - 8) {
