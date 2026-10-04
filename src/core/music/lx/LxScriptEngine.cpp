@@ -1358,11 +1358,11 @@ bool LxScriptEngine::loadScript(const QString &path, QString *error)
 }
 
 // ===========================================================================
-// 请求播放链接
+// 请求脚本动作（musicUrl / lyric / pic，协议统一入口 requestString）
 // ===========================================================================
 
-QString LxScriptEngine::musicUrl(const QString &source, const QVariantMap &musicInfo,
-                                 const QString &quality, QString *error)
+QString LxScriptEngine::requestString(const QString &source, const QString &action,
+                                      const QVariantMap &infoMap, QString *error)
 {
     QMutexLocker locker(&m_mutex);
 
@@ -1375,16 +1375,13 @@ QString LxScriptEngine::musicUrl(const QString &source, const QVariantMap &music
     // 注意：JS_SetPropertyStr 是「接管所有权」语义，传入的值由属性持有，
     // 不能再 JS_FreeValue，否则双重释放。
     const QByteArray sourceUtf8 = source.toUtf8();
-    const QByteArray qualityUtf8 = quality.toUtf8();
+    const QByteArray actionUtf8 = action.toUtf8();
     JSValue data = JS_NewObject(m_ctx);
     JS_SetPropertyStr(m_ctx, data, "source",
         JS_NewStringLen(m_ctx, sourceUtf8.constData(), static_cast<size_t>(sourceUtf8.size())));
-    JS_SetPropertyStr(m_ctx, data, "action", JS_NewStringLen(m_ctx, "musicUrl", 8));
-    JSValue info = JS_NewObject(m_ctx);
-    JS_SetPropertyStr(m_ctx, info, "musicInfo", variantToJs(m_ctx, musicInfo));
-    JS_SetPropertyStr(m_ctx, info, "type",
-        JS_NewStringLen(m_ctx, qualityUtf8.constData(), static_cast<size_t>(qualityUtf8.size())));
-    JS_SetPropertyStr(m_ctx, data, "info", info);
+    JS_SetPropertyStr(m_ctx, data, "action",
+        JS_NewStringLen(m_ctx, actionUtf8.constData(), static_cast<size_t>(actionUtf8.size())));
+    JS_SetPropertyStr(m_ctx, data, "info", variantToJs(m_ctx, infoMap));
 
     JSValueConst args[1] = { data };
     JSValue result = JS_Call(m_ctx, m_handler, JS_UNDEFINED, 1, args);
@@ -1405,12 +1402,13 @@ QString LxScriptEngine::musicUrl(const QString &source, const QVariantMap &music
         JS_FreeValue(m_ctx, result);
     } else {
         // Promise 路径：挂 .then，settle 后写入 m_lastResult / m_done
-        // fail 时用 'ERR:' 前缀透传错误信息
+        // fail 时用 'ERR:' 前缀透传错误信息；lyric 的 { lrc } 对象一并解出
         static const char *waitCode =
             "(function(p, cb){"
             "  function ok(v){"
             "    if (typeof v === 'string') cb(v);"
             "    else if (v && typeof v === 'object' && typeof v.url === 'string') cb(v.url);"
+            "    else if (v && typeof v === 'object' && typeof v.lrc === 'string') cb(v.lrc);"
             "    else cb(v == null ? '' : String(v));"
             "  }"
             "  function fail(e){ cb('ERR:' + (e && e.message ? e.message : String(e))); }"
@@ -1451,8 +1449,32 @@ QString LxScriptEngine::musicUrl(const QString &source, const QVariantMap &music
     JS_FreeValue(m_ctx, data);
 
     if (out.isEmpty() && error && error->isEmpty())
-        *error = QStringLiteral("脚本未返回播放链接");
+        *error = QStringLiteral("脚本未返回结果");
     return out;
+}
+
+QString LxScriptEngine::musicUrl(const QString &source, const QVariantMap &musicInfo,
+                                 const QString &quality, QString *error)
+{
+    // 协议：musicUrl 的 info = { musicInfo, type }
+    QVariantMap info;
+    info[QStringLiteral("musicInfo")] = musicInfo;
+    info[QStringLiteral("type")] = quality;
+    return requestString(source, QStringLiteral("musicUrl"), info, error);
+}
+
+QString LxScriptEngine::lyric(const QString &source, const QVariantMap &musicInfo,
+                              QString *error)
+{
+    // 协议：lyric 的 info = 歌曲信息对象；脚本返回 rawLrc 文本或 { lrc }
+    return requestString(source, QStringLiteral("lyric"), musicInfo, error);
+}
+
+QString LxScriptEngine::pic(const QString &source, const QVariantMap &musicInfo,
+                            QString *error)
+{
+    // 协议：pic 的 info = 歌曲信息对象；脚本返回封面图 URL
+    return requestString(source, QStringLiteral("pic"), musicInfo, error);
 }
 
 } // namespace Muyun

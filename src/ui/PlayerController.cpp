@@ -5,6 +5,7 @@
 #include "core/localmusic/TagReader.h"
 #include "core/storage/DocumentStore.h"
 #include "core/utils/Format.h"
+#include "core/network/HttpClient.h"
 
 #include <QtConcurrent>
 #include <QFutureWatcher>
@@ -70,7 +71,8 @@ QString PlayerController::qualityId() const { return Muyun::qualityId(m_quality)
 QString PlayerController::currentQualityLabel() const
 {
     if (m_currentSong.isLocal()) return QStringLiteral("本地文件");
-    if (!m_actualQualityKnown) return QStringLiteral("获取中");
+    // #12：别再一直"获取中"——还没实际播放时显示用户选的音质（播放后自动换成实测档）
+    if (!m_actualQualityKnown) return Muyun::qualityName(m_quality);
     return Muyun::qualityName(m_actualQuality);
 }
 
@@ -93,6 +95,27 @@ void PlayerController::updateMeasuredBitrate()
         m_measuredBitrate = label;
         emit measuredBitrateChanged();
     }
+}
+
+// 封面懒加载（待办 #9）：LX local 源的 pic action。搜索/榜单给的都是内置五源的封面，
+// 只有"脚本解析出的歌、又没带封面"时才值得跑一次网络（脚本给不出就静默保持空）。
+void PlayerController::maybeResolveCover()
+{
+    if (!m_currentSong.cover.isEmpty() || m_currentSong.isLocal() || !m_currentSong.hasLx)
+        return;
+    const Song song = m_currentSong;
+    auto *watcher = new QFutureWatcher<QString>(this);
+    connect(watcher, &QFutureWatcher<QString>::finished, this, [this, watcher, song]() {
+        const QString cover = watcher->result();
+        watcher->deleteLater();
+        if (cover.isEmpty()) return;
+        if (m_currentSong.identityKey() != song.identityKey()) return;   // 已切歌
+        if (!m_currentSong.cover.isEmpty()) return;
+        m_currentSong.cover = cover;
+        emit currentSongChanged();
+    });
+    MusicSdk *sdk = MusicSdk::instance();
+    watcher->setFuture(QtConcurrent::run([sdk, song]() { return sdk->resolveCover(song); }));
 }
 
 QVariantList PlayerController::playlist() const
@@ -163,6 +186,7 @@ void PlayerController::setQualityId(const QString &id)
     if (!ok) return;
     m_quality = q;
     emit qualityChanged();
+    emit currentQualityChanged();   // #12：音质标签随选择即时刷新（不再等播放）
     saveState();
     // 切换音质后重新解析当前歌曲
     if (!m_currentSong.id.isEmpty() && !m_currentSong.isLocal()) resolveAndPlay();
@@ -388,6 +412,7 @@ void PlayerController::playSong(const QVariantMap &song, const QVariantList &lis
 
     loadLyric();
     resolveAndPlay();
+    maybeResolveCover();
     saveState();
 }
 
@@ -400,6 +425,7 @@ void PlayerController::playIndex(int index)
     emit currentSongChanged();
     loadLyric();
     resolveAndPlay();
+    maybeResolveCover();
     saveState();
 }
 
@@ -712,8 +738,7 @@ int PlayerController::nextIndexByMode(bool userTriggered)
     case PlayMode::Single:
         return m_currentIndex;
     case PlayMode::Shuffle:
-        if (n <= 1) return 0;
-        return static_cast<int>(QRandomGenerator::global()->bounded(n));
+        return nextShuffleIndex();
     case PlayMode::Loop:
         return (m_currentIndex + 1) % n;
     case PlayMode::Sequence:
@@ -721,6 +746,63 @@ int PlayerController::nextIndexByMode(bool userTriggered)
         if (m_currentIndex + 1 >= n) return -1; // 顺序播放到末尾停止
         return m_currentIndex + 1;
     }
+}
+
+// ---------------------------------------------------------------------------
+// 随机播放：不重复牌堆
+// ---------------------------------------------------------------------------
+// 旧实现是"每次独立均匀随机"——同一首歌在短时间内被再抽中的概率极高
+// （歌单小的时候尤其明显，用户反馈"随机容易重复播放"）。改为：
+//   - 维护一张"本轮播放顺序"牌堆（播放列表索引的洗牌序列），下一曲按序取下一张
+//     → 一轮之内绝不重复、每首必播；
+//   - 一轮播完（牌堆走完）→ 重洗开新一轮继续（随机播放不因一轮结束而停）；
+//   - 当前曲永远放在牌堆首：随机从"现在"继续，而不是跳到队列另一头；
+//   - 上一首 = 本轮牌堆的前一张（真正"回到上一首"），比旧版"再随机一次"自然得多。
+
+void PlayerController::rebuildShuffleDeck()
+{
+    m_shuffleDeck.clear();
+    const int n = m_playlist.size();
+    if (n <= 0) return;
+    for (int i = 0; i < n; ++i) m_shuffleDeck.append(i);
+    auto *rng = QRandomGenerator::global();
+    for (int i = n - 1; i > 0; --i)
+        m_shuffleDeck.swapItemsAt(i, static_cast<int>(rng->bounded(i + 1)));
+    // 当前曲放到牌堆首
+    if (m_currentIndex >= 0) {
+        const int cur = m_shuffleDeck.indexOf(m_currentIndex);
+        if (cur > 0) m_shuffleDeck.move(cur, 0);
+    }
+}
+
+int PlayerController::nextShuffleIndex()
+{
+    const int n = m_playlist.size();
+    if (n <= 1) return 0;
+    // 队列增删/换列表后大小对不上 → 牌堆作废重建
+    if (m_shuffleDeck.size() != n) rebuildShuffleDeck();
+    // 当前曲可能不在牌堆里（手动点歌/重启恢复）→ 重建（当前曲会到队首）
+    int pos = m_shuffleDeck.indexOf(m_currentIndex);
+    if (pos < 0) {
+        rebuildShuffleDeck();
+        pos = m_shuffleDeck.indexOf(m_currentIndex);
+    }
+    if (pos < 0)   // 极端兜底（理论上到不了）：退化成纯随机
+        return static_cast<int>(QRandomGenerator::global()->bounded(n));
+    if (pos + 1 < m_shuffleDeck.size()) return m_shuffleDeck.at(pos + 1);
+    // 一轮播完 → 重洗开新一轮；当前曲在新牌堆首，下一曲取第 2 张（必非当前曲）
+    rebuildShuffleDeck();
+    return m_shuffleDeck.size() > 1 ? m_shuffleDeck.at(1) : m_shuffleDeck.at(0);
+}
+
+int PlayerController::prevShuffleIndex()
+{
+    const int n = m_playlist.size();
+    if (n <= 1) return 0;
+    if (m_shuffleDeck.size() != n) rebuildShuffleDeck();
+    const int pos = m_shuffleDeck.indexOf(m_currentIndex);
+    if (pos > 0) return m_shuffleDeck.at(pos - 1);   // 本轮内"上一首"就是牌堆前一张
+    return m_currentIndex;                            // 已在牌堆首：留在当前曲（重新开始）
 }
 
 void PlayerController::next()
@@ -736,7 +818,7 @@ void PlayerController::previous()
     // 播放超过 3 秒时，上一首先回到开头
     if (m_engine->position() > 3000) { seek(0); return; }
     const int idx = m_playMode == PlayMode::Shuffle
-                        ? static_cast<int>(QRandomGenerator::global()->bounded(m_playlist.size()))
+                        ? prevShuffleIndex()
                         : qMax(0, m_currentIndex - 1);
     playIndex(idx);
 }
@@ -835,7 +917,7 @@ void PlayerController::loadLyric()
         }
         // 歌词接口偶发失败（实测 rawLen=0 概率出现），按"解析后无行"判定，最多重试 3 次
         SongLyric rawFinal;
-        for (int attempt = 0; attempt < 3; ++attempt) {
+        for (int attempt = 0; attempt < 3 && !HttpClient::shuttingDown(); ++attempt) {
             rawFinal = sdk->resolveLyric(song);
             if (!rawFinal.rawLrc.isEmpty()) {
                 // 确认能解析出至少一行歌词才算成功

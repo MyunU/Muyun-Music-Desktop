@@ -3,6 +3,7 @@
 #include "core/utils/Crypto.h"
 #include "core/utils/Format.h"
 #include "core/storage/DocumentStore.h"
+#include "core/network/HttpClient.h"
 
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -880,7 +881,9 @@ SearchResult WySource::getToplist(const QString &id, int page, int limit)
     // （网页兜底稳定且快，避免首页冷启动被重试退避拖慢）。
     const int maxAttempts = want <= 10 ? 2 : 5;
     static const int kDelaysMs[5] = {0, 400, 700, 1100, 1600};
-    for (int attempt = 0; attempt < maxAttempts; ++attempt) {
+    // 退出中就不再重试（也不 sleep）：否则 killer 只能杀掉"当前这一个"请求，
+    // 循环紧接着又发下一个，退出收尾会被重试链拖到几分钟（见 HANDOFF --test-ui）。
+    for (int attempt = 0; attempt < maxAttempts && !HttpClient::shuttingDown(); ++attempt) {
         if (attempt > 0) {
             const int jitter = QRandomGenerator::global()->bounded(201) - 100;
             QThread::msleep(kDelaysMs[attempt] + jitter);
@@ -911,8 +914,8 @@ SearchResult WySource::getToplist(const QString &id, int page, int limit)
             result.songs.append(toWySong(item.toMap()));
         break;
     }
-    // weapi 多次仍空 → 网页兜底（抓 discover/toplist 内嵌 JSON）
-    if (result.songs.isEmpty()) {
+    // weapi 多次仍空 → 网页兜底（抓 discover/toplist 内嵌 JSON）；退出中直接收工
+    if (result.songs.isEmpty() && !HttpClient::shuttingDown()) {
         const QVector<Song> web = fetchToplistFromWeb(id, want);
         if (kDiag && qEnvironmentVariableIsSet("MUYUN_DEBUG_HOME"))
             printf("[WY-TOPLIST] id=%s WEB-FALLBACK songs=%d\n", qPrintable(id), web.size());
@@ -937,7 +940,7 @@ Playlist WySource::getPlaylistDetail(const QString &id)
 
     // eapi 该端点已被风控全量拦死，走 weapi；风控抖动时重试 3 次
     HttpResponse resp;
-    for (int attempt = 0; attempt < 3; ++attempt) {
+    for (int attempt = 0; attempt < 3 && !HttpClient::shuttingDown(); ++attempt) {
         resp = weapiRequest(QStringLiteral("/api/v3/playlist/detail"), req);
         if (resp.ok && !resp.body.isEmpty()) break;
         if (attempt < 2) QThread::msleep(500);
@@ -1020,13 +1023,15 @@ QVector<PlaylistSummary> WySource::explorePlaylists(const QString &cat,
     // 2026-10 实测：weapi /api/playlist/list 已被网易下线（恒空 body，探针对照），
     // 同路径 **eapi** 变体返回完整数据 → eapi 优先，weapi 仅作历史兜底。
     HttpResponse resp;
-    for (int attempt = 0; attempt < 3 && resp.body.isEmpty(); ++attempt) {
+    for (int attempt = 0; attempt < 3 && resp.body.isEmpty()
+         && !HttpClient::shuttingDown(); ++attempt) {
         resp = eapiRequest(QStringLiteral("/api/playlist/list"), data);
         if (resp.ok && !resp.body.isEmpty()) break;
         QThread::msleep(150 + QRandomGenerator::global()->bounded(250) * (attempt + 1));
     }
     if (resp.body.isEmpty()) {
-        for (int attempt = 0; attempt < 2 && resp.body.isEmpty(); ++attempt) {
+        for (int attempt = 0; attempt < 2 && resp.body.isEmpty()
+             && !HttpClient::shuttingDown(); ++attempt) {
             resp = weapiRequest(QStringLiteral("/api/playlist/list"), data);
             if (resp.ok && !resp.body.isEmpty()) break;
             QThread::msleep(150 + QRandomGenerator::global()->bounded(200));

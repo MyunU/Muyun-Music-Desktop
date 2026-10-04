@@ -264,10 +264,18 @@ void DownloadController::probeSizes(const QVariantMap &songMap)
 {
     const Song song = Song::fromMap(songMap);
     if (song.id.isEmpty() && song.identityKey().isEmpty()) return;
+    const QString key = song.identityKey();
+    // #12：缓存命中直接同步发结果（弹窗/菜单打开不再转圈），不打网络
+    const auto it = m_sizeCache.constFind(key);
+    if (it != m_sizeCache.constEnd()) {
+        for (auto i = it.value().constBegin(); i != it.value().constEnd(); ++i)
+            emit qualitySizeReady(key, i.key(), i.value());
+        return;
+    }
     const quint64 token = ++m_probeToken;
     auto *self = this;
     const QList<AudioQuality> quals = allQualitiesDesc();
-    QtConcurrent::run([self, song, quals, token]() {
+    QtConcurrent::run([self, song, quals, token, key]() {
         MusicSdk *sdk = MusicSdk::instance();
         for (const AudioQuality q : quals) {
             if (token != self->m_probeToken) return;   // 已被更新的探测作废
@@ -283,10 +291,58 @@ void DownloadController::probeSizes(const QVariantMap &songMap)
                 if (h.ok && okLen && cl > 0) bytes = cl;
             }
             const QString qid = qualityId(q);
-            QMetaObject::invokeMethod(self, [self, qid, bytes, token]() {
+            QMetaObject::invokeMethod(self, [self, qid, bytes, token, key]() {
                 if (token != self->m_probeToken) return;
-                emit self->qualitySizeReady(qid, bytes);
+                if (bytes >= 0) self->m_sizeCache[key].insert(qid, bytes);
+                emit self->qualitySizeReady(key, qid, bytes);
             }, Qt::QueuedConnection);
+        }
+    });
+}
+
+void DownloadController::prefetchSizes(const QVariantList &songMaps)
+{
+    // #12：预取当前曲/可见列表的音质大小。只对"在线歌 + 没缓存过"发请求；
+    // 整批共用一个代际：用户此刻打开菜单/弹窗（probeSizes 抬代际）→ 本批自动作废，
+    // 不会把别的歌的尺寸灌进正在看的弹窗。每批最多 cap 首，串行问档，失败静默。
+    QVector<Song> todo;
+    for (const auto &v : songMaps) {
+        const Song s = Song::fromMap(v.toMap());
+        if (s.id.isEmpty() || s.isLocal()) continue;
+        if (m_sizeCache.contains(s.identityKey())) continue;
+        todo.append(s);
+    }
+    if (todo.isEmpty()) return;
+    const quint64 token = ++m_probeToken;
+    auto *self = this;
+    const int cap = qMin(6, todo.size());
+    const QList<AudioQuality> quals = allQualitiesDesc();
+    QtConcurrent::run([self, todo, quals, token, cap]() {
+        MusicSdk *sdk = MusicSdk::instance();
+        for (int i = 0; i < cap; ++i) {
+            if (token != self->m_probeToken) return;   // 用户开了弹窗/新预取 → 本批作废
+            const Song &song = todo.at(i);
+            const QString key = song.identityKey();
+            for (const AudioQuality q : quals) {
+                if (token != self->m_probeToken) return;
+                const QString url = sdk->resolveUrlAtQuality(song, q);
+                qint64 bytes = -1;
+                if (!url.isEmpty()) {
+                    HttpOptions o;
+                    o.referer = refererForAudioUrl(url);
+                    o.timeoutMs = 8000;
+                    const HttpResponse h = HttpClient::instance()->head(url, o);
+                    bool okLen = false;
+                    const qint64 cl = h.header(QStringLiteral("content-length")).toLongLong(&okLen);
+                    if (h.ok && okLen && cl > 0) bytes = cl;
+                }
+                const QString qid = qualityId(q);
+                QMetaObject::invokeMethod(self, [self, qid, bytes, token, key]() {
+                    if (token != self->m_probeToken) return;
+                    if (bytes >= 0) self->m_sizeCache[key].insert(qid, bytes);
+                    emit self->qualitySizeReady(key, qid, bytes);
+                }, Qt::QueuedConnection);
+            }
         }
     });
 }

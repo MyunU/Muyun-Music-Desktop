@@ -92,7 +92,8 @@ public:
     Q_INVOKABLE void setAutoCheckEnabled(bool on);
 
     // ---- 动作 ----
-    /// 启动时调用：受"每天最多一次"节流 + autoCheckEnabled 开关约束；失败静默
+    /// 启动时调用：每次进程启动查一次（不再有"每天最多一次"节流），
+    /// 受 autoCheckEnabled 开关约束；同一进程内只查一次；失败静默
     Q_INVOKABLE void autoCheck();
     /// 手动检查（无视节流；发现新版一定弹窗，哪怕用户曾忽略过该版本——是用户主动问的）
     Q_INVOKABLE void checkForUpdates();
@@ -102,6 +103,8 @@ public:
     Q_INVOKABLE void ignoreLatestVersion();
     /// 清掉"不再提醒"记录（设置页恢复提醒用）
     Q_INVOKABLE void clearIgnoredVersion();
+    /// 弹窗"稍后"：本会话不再自动提醒当前版本（不落盘；下次启动/出新版本/手动检查会再弹）
+    Q_INVOKABLE void snoozeLatestVersion();
 
     /// 拿到一段清单文本后的统一落地路径（网络/本地文件/自检共用）
     void applyFeedBody(const QByteArray &body, bool manual);
@@ -132,8 +135,10 @@ private:
     QString m_status = QStringLiteral("idle");
     QString m_failReason;
     QString m_ignored;
+    QString m_snoozedVersion;   ///< "稍后"的版本：本会话内不再自动弹（不落盘）
     UpdateInfo m_latest;
     bool m_checking = false;
+    bool m_sessionChecked = false;   ///< 本次进程已查过（每次启动只查一次）
     bool m_autoCheck = true;
     /// 自带 NAM（不复用全局 HttpClient）：只给"更新检查"这一条按系统代理走
     QNetworkAccessManager *m_nam = nullptr;

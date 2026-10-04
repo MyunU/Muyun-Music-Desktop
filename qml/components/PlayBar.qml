@@ -18,21 +18,44 @@ Rectangle {
     }
 
     // 从当前歌曲的 LX 元信息里取指定音质的文件大小（无则空串）；
-    // lx.types 没带大小的平台，回退到 downloads.probeSizes 的 HEAD 探测结果
-    property var probedSizes: ({})   // qualityId → bytes
+    // lx.types 没带大小的平台，回退到 downloads.probeSizes 的 HEAD 探测结果。
+    // ⚠ 缓存按"歌曲身份"隔离（songKey = platform:id / local:path），换曲即空——
+    //   否则上一首探测到的大小会残留显示成新曲的（用户反馈：切歌未加载完显示上一首大小）。
+    property string curSongKey: ""
+    property var probedSizes: ({})   // songKey → { qualityId → bytes }
+    function songKeyOf(song) {
+        if (!song || !song.name) return ""
+        if (song.platform === "local") return "local:" + (song.localPath || "")
+        var src = (song.lx && song.lx.source) ? song.lx.source : song.platform
+        return src + ":" + song.id
+    }
     Connections {
         target: downloads
-        function onQualitySizeReady(qid, bytes) {
-            if (bytes > 0) { var s = bar.probedSizes; s[qid] = bytes; bar.probedSizes = s }
+        function onQualitySizeReady(songKey, qid, bytes) {
+            if (bytes <= 0) return
+            if (songKey !== bar.curSongKey) return   // 已切歌，旧探测结果丢弃
+            var outer = bar.probedSizes
+            var s = outer[songKey] || {}
+            s[qid] = bytes
+            outer[songKey] = s
+            bar.probedSizes = outer
         }
     }
+    Connections {
+        target: player
+        function onCurrentSongChanged() {
+            bar.curSongKey = bar.songKeyOf(player.currentSong)
+        }
+    }
+    Component.onCompleted: bar.curSongKey = bar.songKeyOf(player.currentSong)
     function qualitySize(qid) {
         var lx = player.currentSong.lx
         if (lx && lx.types) {
             for (var i = 0; i < lx.types.length; i++)
                 if (lx.types[i].type === qid) return lx.types[i].size
         }
-        var p = bar.probedSizes[qid]
+        var bySong = bar.probedSizes[bar.curSongKey]
+        var p = bySong ? bySong[qid] : undefined
         return p ? downloads.formatBytes(p) : ""
     }
 
@@ -139,14 +162,15 @@ Rectangle {
                 spacing: 2
 
                 Text {
-                    Layout.maximumWidth: 170
+                    // #13：歌词位腾空后歌曲信息加宽
+                    Layout.maximumWidth: 220
                     text: player.currentSong.name || "未在播放"
                     color: theme.textColor
                     font.pixelSize: 13
                     elide: Text.ElideRight
                 }
                 Text {
-                    Layout.maximumWidth: 170
+                    Layout.maximumWidth: 220
                     text: player.currentSong.artist || "搜索歌曲开始播放"
                     color: theme.subTextColor
                     font.pixelSize: 11
@@ -265,72 +289,29 @@ Rectangle {
                         }
                     }
                 }
-                // 实测码率（文件大小反推）：音源虚标时（标 Master 实际 128k）与上方标签形成对比
+                // 当前音质文件大小（用户反馈：直接写大小，别显示"实测 320k"那种码率字样）。
+                // ⚠ 切歌时上一首的探测结果已按 songKey 隔离清空 → 新曲未就绪显「加载中」，
+                //   绝不串成上一首的大小；本地歌不探测（无此信息）→ 隐藏。
                 Text {
-                    visible: player.measuredBitrateLabel.length > 0 && player.currentSong.name
-                    text: player.measuredBitrateLabel
+                    property bool isLocal: player.currentSong.platform === "local"
+                    property string sizeText: {
+                        bar.curSongKey   // 触发换曲重算
+                        var q = player.quality
+                        return bar.qualitySize(q).replace(" ", "")
+                    }
+                    visible: player.currentSong.name.length > 0 && !isLocal
+                    text: sizeText.length > 0 ? sizeText : "加载中"
                     color: theme.subTextColor
                     font.pixelSize: 9
                 }
             }
         }
 
-        // ================= 实时歌词（紧跟歌名，吃满剩余宽度） =================
-        Item {
-            id: lyricsArea
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            Layout.minimumWidth: 180    // 与右侧 fillWidth 区竞争空间时保证最小宽度
-            Layout.preferredWidth: 320
-            visible: player.currentSong.name.length > 0
-
-            // 点击歌词区：单独重新获取歌词（音乐继续播放）
-            MouseArea {
-                anchors.fill: parent
-                cursorShape: Qt.PointingHandCursor
-                onClicked: player.reloadLyric()
-            }
-
-            // 歌词加载中：文字提示（居中于歌词区）
-            Text {
-                anchors.verticalCenter: parent.verticalCenter
-                anchors.horizontalCenter: parent.horizontalCenter
-                text: "歌词加载中…"
-                color: theme.subTextColor
-                font.pixelSize: 12
-                visible: player.lyricLoading && player.currentLyricText.length === 0
-            }
-
-            // 当前歌词行（主行 + 翻译副行，左对齐紧贴歌名）
-            ColumnLayout {
-                anchors.verticalCenter: parent.verticalCenter
-                anchors.left: parent.left
-                width: parent.width
-                spacing: 1
-                visible: player.currentLyricText.length > 0
-
-                Text {
-                    Layout.fillWidth: true
-                    horizontalAlignment: Text.AlignLeft
-                    text: player.currentLyricText
-                    color: theme.textColor
-                    font.pixelSize: 12
-                    elide: Text.ElideRight
-                }
-                Text {
-                    Layout.fillWidth: true
-                    horizontalAlignment: Text.AlignLeft
-                    text: player.currentLyricTranslation
-                    color: theme.subTextColor
-                    font.pixelSize: 10
-                    elide: Text.ElideRight
-                    visible: player.currentLyricTranslation.length > 0
-                }
-            }
-        }
+        // ================= 实时歌词（#13：已搬到顶栏搜索框右侧，此处腾空） =================
+        // （无内容：按钮组占位保留，避免右侧区延伸到控制组正下方）
 
         // 按钮组占位：控制组是居中浮层，布局需要为其左半预留宽度，
-        // 否则歌词区会延伸到按钮组正下方（加载提示/歌词与按钮重叠）
+        // 否则右侧区会延伸到按钮组正下方（与按钮重叠）
         Item {
             Layout.preferredWidth: controlsRow.implicitWidth / 2 + 10
         }
@@ -363,8 +344,10 @@ Rectangle {
                 Slider {
                     id: volSlider
                     Layout.fillWidth: true
-                    Layout.maximumWidth: 84
-                    Layout.minimumWidth: 36
+                    // #13：音量条加长（原来 84px 太短不好拖）；腾出的宽度主要给音量，
+                    // 其余给歌曲信息（歌名/歌手宽度也在左侧同步加宽）
+                    Layout.maximumWidth: 150
+                    Layout.minimumWidth: 60
                     from: 0; to: 1
                     value: player.volume
                     onMoved: player.volume = value
@@ -391,20 +374,6 @@ Rectangle {
                 }
             }
 
-            IconButton {
-                name: "timer"
-                iconSize: 18
-                tip: "定时停止"
-                visible: bar.width > 940
-                onClicked: root.notify("定时停止开发中")
-            }
-            IconButton {
-                name: "speed"
-                iconSize: 18
-                tip: "播放倍速"
-                visible: bar.width > 940
-                onClicked: root.notify("倍速调节开发中")
-            }
             // 音效入口：推子图标 + 文字。
             // 以前这里是一颗"三个点"，没人知道点下去是音效面板（用户反馈），
             // 换成"图标+音效"文字，并且开启时整颗胶囊高亮，一眼看出状态。

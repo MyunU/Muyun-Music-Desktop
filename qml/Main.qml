@@ -52,6 +52,13 @@ Window {
     // 最大化：不依赖 Qt showMaximized()/visibility()（frameless+原生缩放 hack 下二者会误报，
     // 导致按钮"无效"）。直接手动设置窗口几何到工作区，还原时回到之前尺寸——纯赋值必定生效。
     property bool maximized: false
+    // #11：手动最大化同步 WS_MAXIMIZE 样式位（TranslucentTB 等第三方任务栏工具靠
+    // IsZoomed() 认"最大化"；我们手动改几何从不带这个位 → 工具认不出）。
+    // 全屏(F11)不算最大化：走 showFullScreen，不设该位。
+    onMaximizedChanged: {
+        if (typeof frameless !== "undefined")
+            frameless.setMaximizedStyle(root.maximized)
+    }
     property real _rx: 0
     property real _ry: 0
     property real _rw: 0
@@ -620,6 +627,48 @@ Window {
                         }
                     }
 
+                    // 顶栏歌词显示（#13：从播放条搬到搜索框右侧）
+                    // ⚠ 只要有歌就常驻可点（用户反馈：没歌词时这块是空的、点不动没法重载歌词）；
+                    //   有歌词显当前行，没歌词显「点击加载歌词」占位引导。点击 = 重新获取歌词（音乐不停）。
+                    Item {
+                        id: topLyricBox
+                        Layout.preferredWidth: 360
+                        Layout.maximumWidth: 360
+                        Layout.preferredHeight: 40
+                        visible: player.currentSong.name.length > 0
+                        clip: true
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: player.reloadLyric()
+                        }
+                        ColumnLayout {
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            spacing: 1
+                            Text {
+                                Layout.fillWidth: true
+                                text: player.currentLyricText.length > 0
+                                      ? player.currentLyricText
+                                      : (player.lyricLoading ? "歌词加载中…" : "点击加载歌词")
+                                color: player.currentLyricText.length > 0
+                                       ? theme.textColor : theme.subTextColor
+                                font.pixelSize: 15
+                                font.bold: player.currentLyricText.length > 0
+                                elide: Text.ElideRight
+                            }
+                            Text {
+                                Layout.fillWidth: true
+                                text: player.currentLyricTranslation
+                                color: theme.subTextColor
+                                font.pixelSize: 12
+                                elide: Text.ElideRight
+                                visible: player.currentLyricTranslation.length > 0
+                            }
+                        }
+                    }
+
                     Item { Layout.fillWidth: true }
 
                     // 右侧功能图标
@@ -1076,6 +1125,9 @@ Window {
         property bool rememberChecked: false
         modal: true
         dim: true
+        // #19：必须 focus:true——否则弹层不上焦点，CloseOnEscape 永不触发，
+        // 用户按 Esc 想关确认框却"没反应"（HANDOFF #19 候选病因③）
+        focus: true
         width: 380
         padding: 20
         x: (root.width - width) / 2
@@ -2265,7 +2317,13 @@ Window {
         target: player
         function onPlayFailed(message) { toast.show(message) }
         // 点任何列表行切歌时收起联想/热搜下拉（下拉 z:999 悬在内容区上会吞点击）
-        function onCurrentSongChanged() { searchInput.focus = false }
+        function onCurrentSongChanged() {
+            searchInput.focus = false
+            // #12：当前曲音质/体积预取（不再等打开弹窗/菜单才拉，播放条与下载弹窗打开即有条目）
+            if (typeof downloads !== "undefined" && player.currentSong
+                && player.currentSong.platform !== "local" && player.currentSong.name)
+                downloads.prefetchSizes([player.currentSong])
+        }
     }
 
     Connections {
@@ -2389,6 +2447,8 @@ Window {
     }
     // Esc 的"让路"判据：有弹层/输入框在场时，这一键归它们，阶梯不许动。
     // 已知弹层逐个点名（它们不一定抢焦点）+ 通用焦点兜底（委托里的换源菜单等没法点名）。
+    // 注意 searchInput.activeFocus：搜索框聚焦时按 Esc 是"让输入框自己处理"（无动作），
+    // 不是关窗——这是设计行为，别把"搜索时 Esc 没反应"当 bug 报。
     readonly property bool escClaimed: settingsPanel.visible || effectsPanel.visible
         || queueDrawer.visible || sourceDrawer.visible || downloadDrawer.visible
         || newPlaylistDialog.visible || deletePlaylistDialog.visible
@@ -2400,12 +2460,15 @@ Window {
         enabled: !root.escClaimed
         onActivated: root.runEscLadder()
     }
-    // Esc 系统热键的接管窗口期（QML 是唯一写入者）：播放页开着 / 舞台开着 /
-    // 窗口全屏 / **窗口最大化**（阶梯第④步要它，否则最大化时前台常在别处就丢键）。
-    // 有弹层/输入框在场时让开，不抢它们的 Esc。C++ 侧还会再按"前台是不是我们的窗"复查才真注册。
-    readonly property bool escGuardWanted: lyricsPage.visible
-        || (typeof stage !== "undefined" && stage.active)
-        || ((root.fullScreenOn || root.maximized) && !root.escClaimed)
+    // Esc 系统热键的接管窗口期（HANDOFF #19 修"有时 Esc 关不掉主窗口"）：
+    // 旧版只覆盖"播放页/舞台/全屏/最大化"——普通窗口态 + 焦点被自家另一个窗
+    // （桌面歌词独立窗、舞台壳等）叼走时，QML Shortcut 收不到键、系统热键又没注册，
+    // 两头都断 → Esc 没反应（最符合用户"有时"的观察）。
+    // 现在**只要没有弹层/输入框占用就接管**：系统热键与前台归属无关地全局生效，
+    // 焦点在自家哪个窗都不影响 Esc 送达 runEscLadder；弹层/输入框在场时让开，
+    // 把 Esc 还给它们（点名清单 + Overlay 焦点链兜底）。C++ 侧还会再按
+    // "前台是不是我们的窗"复查才真注册（切到别的应用立即让出）。
+    readonly property bool escGuardWanted: !root.escClaimed
     onEscGuardWantedChanged: root.syncEscGuard()
     function syncEscGuard() {
         if (typeof hotkey !== "undefined") hotkey.setEscGuard(root.escGuardWanted)
@@ -2497,5 +2560,9 @@ Window {
         root.requestActivate()
         root.syncEscGuard()      // Esc 系统热键接管窗口期（播放页/舞台开着时）
         home.loadHome("wy")
+        // #12：启动即预取当前曲（重启恢复的歌）的音质/体积
+        if (typeof downloads !== "undefined" && player.currentSong
+            && player.currentSong.platform !== "local" && player.currentSong.name)
+            downloads.prefetchSizes([player.currentSong])
     }
 }

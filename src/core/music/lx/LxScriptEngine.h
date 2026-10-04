@@ -54,6 +54,13 @@ public:
     QString musicUrl(const QString &source, const QVariantMap &musicInfo,
                      const QString &quality, QString *error = nullptr);
 
+    /// 请求歌词（local 源 lyric action，协议 info = 歌曲信息对象；返回 rawLrc 文本或空）
+    QString lyric(const QString &source, const QVariantMap &musicInfo,
+                  QString *error = nullptr);
+    /// 请求封面图（local 源 pic action，返回图片 URL 或空）
+    QString pic(const QString &source, const QVariantMap &musicInfo,
+                QString *error = nullptr);
+
     /// 脚本元信息（send('inited') 时填充；sources 已按协议过滤）
     QVariantMap scriptInfo() const { return m_scriptInfo; }
 
@@ -134,6 +141,11 @@ private:
 
     /// 从 JSContext 取回引擎实例（存于 context opaque，避免静态全局）
     static LxScriptEngine *selfOf(JSContext *ctx);
+
+    /// 通用 action 请求：构造 { source, action, info } → 触发 handler → 驱动微任务/
+    /// 定时器直到 Promise settle → 返回字符串结果（lyric 的 {lrc} 对象也会被解出来）
+    QString requestString(const QString &source, const QString &action,
+                          const QVariantMap &infoMap, QString *error);
 
     JSRuntime *m_rt = nullptr;
     JSContext *m_ctx = nullptr;

@@ -345,6 +345,11 @@ void SettingsController::setAllowUpdateAlert(bool v)
 void SettingsController::loadLxSources()
 {
     auto *store = DocumentStore::instance();
+    // 顺手清理历史遗留的临时导入文件（#10：旧版失败分支不删，_tmp_*.js 越积越多；
+    // 现在导入已改走 %TEMP%，这里清一次用户机器上已有的残留）
+    const QDir srcDir(sourcesDir());
+    for (const auto &fi : srcDir.entryInfoList({QStringLiteral("_tmp_*.js")}, QDir::Files))
+        QFile::remove(fi.absoluteFilePath());
     const QVariantMap doc = store->readAll(QStringLiteral("lx-sources"));
     m_sources.clear();
     for (const auto &item : doc.value(QStringLiteral("list")).toList()) {
@@ -469,14 +474,16 @@ bool SettingsController::importLxSourceFile(const QString &filePath)
 
 void SettingsController::importLxSourceUrl(const QString &url)
 {
-    const QString savePath = sourcesDir() + QStringLiteral("/_tmp_") +
+    // 临时文件写到系统临时目录而不是音源目录（#10：旧版失败分支不删，音源目录积了一堆
+    // _tmp_*.js 垃圾；且"取目录里第一个 js"的自检可能挑中空文件报误导性失败）
+    const QString savePath = QDir::tempPath() + QStringLiteral("/muyun_lx_import_") +
                              Crypto::randomHex(4) + QStringLiteral(".js");
-    QDir().mkpath(sourcesDir());
     auto *self = this;
     HttpClient::instance()->downloadFile(url, savePath, HttpOptions(), nullptr,
         [self, savePath](bool ok, const QString &err) {
             QMetaObject::invokeMethod(self, [self, savePath, ok, err]() {
                 if (!ok) {
+                    QFile::remove(savePath);   // 下载失败也删（旧版漏了这行）
                     emit self->importFailed(err.isEmpty() ? QStringLiteral("下载失败") : err);
                     return;
                 }

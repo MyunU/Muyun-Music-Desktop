@@ -5,6 +5,7 @@
 
 #include <QObject>
 #include <QHash>
+#include <QMutex>
 #include <functional>
 
 namespace Muyun {
@@ -57,6 +58,8 @@ public:
     QString resolveUrlAtQuality(const Song &song, AudioQuality quality);
     /// 解析歌词
     SongLyric resolveLyric(const Song &song);
+    /// 解析封面：本地有 cover 直接用；为空且带 LX 元信息时问脚本（local 源 pic action）
+    QString resolveCover(const Song &song);
 
     /// 获取推荐歌单（首页）
     QVector<PlaylistSummary> getRecommendPlaylists(const QString &code, int limit = 6);
@@ -115,9 +118,17 @@ private:
     static QString sortSingers(const QString &singer);
     static double parseInterval(const QString &interval);
 
+    // #10 性能：音源解析失败记忆——同一源同一档 60 秒内不再重复打网络
+    // （源挂了时，旧实现沿降级链每档真请求一次，切歌/重播都要重吃一遍）
+    bool recentlyFailed(const QString &key) const;
+    void rememberFailure(const QString &key);
+    static constexpr qint64 kFailRememberMs = 60LL * 1000;
+
     QHash<QString, MusicSource *> m_sources;
     QStringList m_platformOrder;
     LxScriptEngine *m_lxEngine = nullptr;
+    mutable QHash<QString, qint64> m_failedAt;   ///< key → 最近失败时刻（worker 多线程读）
+    mutable QMutex m_failMutex;
 };
 
 } // namespace Muyun

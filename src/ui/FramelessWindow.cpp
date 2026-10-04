@@ -37,6 +37,29 @@ void FramelessWindow::attach(QWindow *window)
 #endif
 }
 
+void FramelessWindow::bindMaxWindow(QWindow *window)
+{
+    m_maxWindow = window;
+}
+
+void FramelessWindow::setMaximizedStyle(bool on)
+{
+#ifdef Q_OS_WIN
+    if (!m_maxWindow) return;
+    HWND hwnd = reinterpret_cast<HWND>(m_maxWindow->winId());
+    if (!hwnd) return;
+    const LONG_PTR style = GetWindowLongPtr(hwnd, GWL_STYLE);
+    const LONG_PTR next = on ? (style | WS_MAXIMIZE) : (style & ~WS_MAXIMIZE);
+    if (next == style) return;
+    SetWindowLongPtr(hwnd, GWL_STYLE, next);
+    // 只刷样式不移动/缩放：手动最大化几何已是工作区大小，别让 DWM 再排一遍
+    SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+                 SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+#else
+    Q_UNUSED(on)
+#endif
+}
+
 bool FramelessWindow::nativeEventFilter(const QByteArray &eventType, void *message, qintptr *result)
 {
 #ifdef Q_OS_WIN

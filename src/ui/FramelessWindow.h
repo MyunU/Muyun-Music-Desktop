@@ -30,10 +30,19 @@ public:
 
     void attach(QWindow *window);
 
+    /// 绑定"样式位同步"用的窗口句柄（HANDOFF #11）。刻意与 attach 分开：
+    /// attach 会补 WS_THICKFRAME 并激活 WM_NCCALCSIZE/WM_NCHITTEST（原生缩放会抖动，
+    /// GUI 主路径已弃用），而 setMaximizedStyle 只想动 WS_MAXIMIZE 一个位。
+    void bindMaxWindow(QWindow *window);
+    /// 手动最大化时把 WS_MAXIMIZE 样式位补上/摘掉（第三方任务栏工具如 TranslucentTB
+    /// 靠 IsZoomed() 认"最大化"；我们手动改几何从不带这个位 → 工具认不出）
+    Q_INVOKABLE void setMaximizedStyle(bool on);
+
     bool nativeEventFilter(const QByteArray &eventType, void *message, qintptr *result) override;
 
 private:
-    QWindow *m_window = nullptr;
+    QWindow *m_window = nullptr;      ///< 原生过滤器用（GUI 未 attach，保持 null）
+    QWindow *m_maxWindow = nullptr;   ///< 手动最大化样式位用
 };
 
 } // namespace Muyun

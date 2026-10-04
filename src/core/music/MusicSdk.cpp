@@ -6,10 +6,12 @@
 #include "core/music/kg/KgSource.h"
 #include "core/music/mg/MgSource.h"
 #include "core/music/lx/LxScriptEngine.h"
+#include "core/lyrics/LyricParser.h"
 #include "core/utils/Format.h"
 
 #include <QRegularExpression>
 #include <QSet>
+#include <QDateTime>
 #include <algorithm>
 #include <QCoreApplication>
 #include <QDebug>
@@ -116,6 +118,22 @@ SearchResult MusicSdk::searchAll(const QString &keyword, int page, int limit)
     return merged;
 }
 
+bool MusicSdk::recentlyFailed(const QString &key) const
+{
+    QMutexLocker lk(&m_failMutex);
+    const auto it = m_failedAt.constFind(key);
+    if (it == m_failedAt.constEnd()) return false;
+    return QDateTime::currentMSecsSinceEpoch() - it.value() < kFailRememberMs;
+}
+
+void MusicSdk::rememberFailure(const QString &key)
+{
+    QMutexLocker lk(&m_failMutex);
+    // 只记最近 200 条，防异常源把表撑爆
+    if (m_failedAt.size() > 200) m_failedAt.clear();
+    m_failedAt.insert(key, QDateTime::currentMSecsSinceEpoch());
+}
+
 QString MusicSdk::resolveUrl(const Song &song, AudioQuality quality, AudioQuality *actualQuality)
 {
     // 1) 优先用 LX 自定义音源脚本解析（当已加载脚本且歌曲带 lx 元信息）
@@ -128,6 +146,9 @@ QString MusicSdk::resolveUrl(const Song &song, AudioQuality quality, AudioQualit
         for (auto q : chain) {
             const QString reqId = LxScriptEngine::protocolQualityId(qualityId(q));
             if (!declared.isEmpty() && !declared.contains(reqId)) continue;
+            // #10：这档刚失败过（60s 内）→ 跳过，别再打一次网络
+            const QString fkey = song.lx.source + QLatin1Char('@') + reqId;
+            if (recentlyFailed(fkey)) continue;
             const QString url = m_lxEngine->musicUrl(song.lx.source, song.lx.toMap(), reqId);
             if (!url.isEmpty()) {
                 if (actualQuality) {
@@ -137,6 +158,7 @@ QString MusicSdk::resolveUrl(const Song &song, AudioQuality quality, AudioQualit
                 }
                 return url;
             }
+            rememberFailure(fkey);
         }
     }
 
@@ -145,14 +167,17 @@ QString MusicSdk::resolveUrl(const Song &song, AudioQuality quality, AudioQualit
     auto *src = source(code);
     if (!src) return QString();
 
-    // 沿音质降级链逐级尝试
+    // 沿音质降级链逐级尝试（#10：同一档刚失败过就跳过，不重复打网络）
     const auto chain = qualityFallbackChain(quality);
     for (auto q : chain) {
+        const QString fkey = code + QLatin1Char('@') + qualityId(q);
+        if (recentlyFailed(fkey)) continue;
         const QString url = src->getMusicUrl(song, q);
         if (!url.isEmpty()) {
             if (actualQuality) *actualQuality = q;
             return url;
         }
+        rememberFailure(fkey);
     }
 
     // 兜底（智能换源）：本音源拿不到链接时，跨平台找同名歌曲借用其它音源的链接
@@ -200,6 +225,20 @@ QString MusicSdk::resolveUrlAtQuality(const Song &song, AudioQuality quality)
 
 SongLyric MusicSdk::resolveLyric(const Song &song)
 {
+    // LX 脚本优先：歌曲带 lx 元信息时先问脚本要歌词（local 源 lyric action，
+    // HANDOFF 待办 #9 已接）。脚本没给/给的不是合法歌词就走内置五源。
+    if (hasLxScript() && song.hasLx && m_lxEngine) {
+        QString lxErr;
+        const QString raw = m_lxEngine->lyric(song.lx.source, song.lx.toMap(), &lxErr);
+        if (!raw.isEmpty()) {
+            const SongLyric probe = LyricParser::parseLrc(raw);
+            if (!probe.lines.isEmpty()) {
+                SongLyric l;
+                l.rawLrc = raw;
+                return l;
+            }
+        }
+    }
     const QString code = song.lx.source.isEmpty() ? platformSourceCode(song.platform)
                                                   : song.lx.source;
     auto *src = source(code);
@@ -228,6 +267,18 @@ SongLyric MusicSdk::resolveLyric(const Song &song)
         if (!otherLyric.rawLrc.isEmpty()) return otherLyric;
     }
     return lyric;
+}
+
+QString MusicSdk::resolveCover(const Song &song)
+{
+    // 歌曲自带封面直接用；为空且带 LX 元信息时，问脚本要封面（local 源 pic action）
+    if (!song.cover.isEmpty()) return song.cover;
+    if (hasLxScript() && song.hasLx && m_lxEngine) {
+        QString lxErr;
+        const QString url = m_lxEngine->pic(song.lx.source, song.lx.toMap(), &lxErr);
+        if (!url.isEmpty()) return url;
+    }
+    return song.cover;
 }
 
 // ===========================================================================

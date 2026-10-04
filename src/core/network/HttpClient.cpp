@@ -14,7 +14,10 @@
 #include <QDir>
 #include <QStringDecoder>
 #include <QCoreApplication>
+#include <QElapsedTimer>
 #include <QDebug>
+
+#include "core/Types.h"   // kDiag：发布构建（未定义 MUYUN_SELFTES）为 false → 诊断 printf 死代码消除
 
 namespace Muyun {
 
@@ -54,6 +57,10 @@ QByteArray serializeForm(const QVariantMap &form)
 // ---------------------------------------------------------------------------
 
 static HttpClient *s_instance = nullptr;
+std::atomic<bool> HttpClient::s_shuttingDown{false};
+
+void HttpClient::beginShutdown() { s_shuttingDown.store(true); }
+bool HttpClient::shuttingDown() { return s_shuttingDown.load(); }
 
 HttpClient::HttpClient(QObject *parent) : QObject(parent)
 {
@@ -122,12 +129,36 @@ HttpResponse HttpClient::execOp(QNetworkAccessManager *nam, const QString &url,
     QTimer timer;
     timer.setSingleShot(true);
     bool timedOut = false;
+    // 仅诊断用（MUYUN_DEBUG_NET=1）：看请求耗时与退出时 killer 有没有真的触发。
+    // 注意 kDiag 不能写成局部 bool（会遮蔽全局开关、发布版死代码消除失效），
+    // 必须复用全局 Muyun::kDiag（发布构建为 false → 整段 printf 被编掉）。
+    const bool kNetDiag = kDiag && qEnvironmentVariableIsSet("MUYUN_DEBUG_NET");
+    QElapsedTimer tExec; tExec.start();
+    if (kNetDiag) printf("[http-exec] start t=%lldms %s\n",
+                         static_cast<long long>(QDateTime::currentMSecsSinceEpoch() % 100000),
+                         qPrintable(url.left(56)));
 
     QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
     QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
     QObject::connect(&timer, &QTimer::timeout, reply, [&]() { timedOut = true; });
     timer.start(opt.timeoutMs);
+    // 退出收尾：应用在退出时置 shuttingDown → 在途请求最多再等 200ms 就被中止。
+    // 否则 main 退出处的 QThreadPool::waitForDone() 会干等本请求的网络超时
+    // （播放中托盘退出"未响应"的根因，见 HANDOFF 新问题②）。
+    QTimer killer;
+    killer.setInterval(200);
+    QObject::connect(&killer, &QTimer::timeout, &loop, [&]() {
+        if (s_shuttingDown.load()) {
+            timedOut = true; reply->abort(); loop.quit();
+            if (kNetDiag) printf("[http-exec] KILLER 触发（退出中止）\n");
+        }
+    });
+    killer.start();
     loop.exec();
+    killer.stop();
+    if (kNetDiag) printf("[http-exec] end   %s 耗时=%lldms 超时=%d\n",
+                         qPrintable(url.left(56)), static_cast<long long>(tExec.elapsed()),
+                         int(timedOut));
 
     if (timedOut) {
         reply->abort();
@@ -282,7 +313,15 @@ public:
         QObject::connect(&timer, &QTimer::timeout, reply, &QNetworkReply::abort);
         timer.start(opt.timeoutMs > 0 ? opt.timeoutMs : 60000);
 
+        // 退出收尾：应用退出时中止进行中的下载（同 execOp 的 killer，防 waitForDone 干等）
+        QTimer killer;
+        killer.setInterval(200);
+        QObject::connect(&killer, &QTimer::timeout, &loop, [&]() {
+            if (HttpClient::shuttingDown()) reply->abort();
+        });
+        killer.start();
         if (!finished) loop.exec();
+        killer.stop();
         out.write(reply->readAll());
         out.close();
 

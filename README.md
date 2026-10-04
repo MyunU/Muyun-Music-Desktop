@@ -11,7 +11,7 @@ full-format audio effects (EQ / reverb / 3D surround / loudness), LX Music scrip
 > 实际播放与下载 100% 依赖**你自己导入的 LX 音源脚本**（设置 → 在线音源 → 导入）。
 > 请自行确认所在地法律与平台条款，仅用于学习与个人使用。
 
-**当前版本：v1.0.1** ｜ [下载](#下载) ｜ [已知问题](#已知问题) ｜ [从源码构建](#从源码构建) ｜ [许可](#许可)
+**当前版本：v1.1.0** ｜ [下载](#下载) ｜ [从源码构建](#从源码构建) ｜ [许可](#许可)
 
 ---
 
@@ -19,14 +19,16 @@ full-format audio effects (EQ / reverb / 3D surround / loudness), LX Music scrip
 
 ### 播放与队列
 
-- 播放 / 暂停 / 上一首 / 下一首 / 进度拖拽 / 音量 / 静音，四种播放模式（顺序、列表循环、单曲循环、随机）
+- 播放 / 暂停 / 上一首 / 下一首 / 进度拖拽 / 音量 / 静音，四种播放模式（顺序、列表循环、单曲循环、随机——
+  随机**一轮内不重复**，播完一轮自动重洗）
+- 底部播放条：歌曲信息 / 当前行歌词（顶栏同步显示，点击可重载）/ 音质与文件大小（启动即预取）
 - 播放队列抽屉、下一首播放、失败自动跳过、设备切换续播
 - 在线音频缓存（key = 歌曲身份 + 音质），启动自动清理 3 天前缓存
 
 ### 歌词
 
 - 逐字歌词、翻译 / 罗马音合并显示、全屏播放页三种样式（经典 / Apple Music 风 / Mineradio 舞台）
-- 独立桌面歌词窗：工具条 + 设置窗，字号与高度自适应
+- 独立桌面歌词窗：工具条 + 设置窗，字号与高度自适应；置顶态悬停只保留「取消置顶」入口
 
 ### 音效（全格式）
 
@@ -45,29 +47,17 @@ full-format audio effects (EQ / reverb / 3D surround / loudness), LX Music scrip
 - 搜索 + 联想（跨平台聚合）、榜单、推荐歌单、歌单广场（分类 + 分页，带列表缓存与并行预热）
 - LX 音源脚本按官方协议实现 `globalThis.lx` 全套宿主 API：`request`（含取消函数）、`utils.buffer`、
   `utils.crypto`（`md5` / `aesEncrypt` / `randomBytes` / `rsaEncrypt`）、`utils.zlib`、
-  `currentScriptInfo`、`setTimeout` / `clearTimeout`，并按 `inited.sources` 声明的音质取链接
+  `currentScriptInfo`、`setTimeout` / `clearTimeout`；播放取链接、歌词（`lyric`）、封面（`pic`）三个 action
+  都会派发，并按 `inited.sources` 声明的音质跳过不支持的档位
 - 局域网同步：暮云 ↔ 暮云，并兼容洛雪移动版协议（配对码 / AES+RSA 握手 / WS / 三方合并）
 
 ### 其它
 
 - 无边框窗口（原生边缘缩放、最大化 / 全屏 / ESC 阶梯：舞台沉浸 → 全屏播放页 → 窗口全屏 →
-  退出最大化 → 关闭主窗口，弹层在场时让位给弹层）、深浅色主题、系统托盘
+  退出最大化 → 关闭主窗口，弹层在场时让位给弹层；最大化会补 `WS_MAXIMIZE` 状态位，
+  TranslucentTB 一类任务栏美化 / 透明工具能正常识别）、深浅色主题、系统托盘
 - 单实例守护：重复启动唤起已有窗口；权限不一致（管理员 ↔ 普通）时也**不双开**，会明确提示
-- 启动静默检查更新（GitHub 版本清单），支持"不再提醒此版本"
-
-## 已知问题
-
-1. **最大化对第三方任务栏美化 / 透明工具"不可见"**：我们的最大化是**手动改窗口几何**（不走系统
-   `ShowWindow(SW_MAXIMIZE)`），窗口因此没有 `WS_MAXIMIZE` 状态位、`IsZoomed()` 为假——
-   靠"检测到最大化窗口就把任务栏从全透明切成毛玻璃 / 其他材质"的工具（TranslucentTB 一类）认不出来。
-   用 **F11 全屏**（真全屏）不受影响。
-2. **已运行的实例若是管理员权限**，用普通权限再启动时只能弹提示、**无法把它的窗口唤到前台**
-   （Windows 完整性级别限制，不是我们的 bug）。
-3. **启动时偶发 1~2 条 Qt 跨线程警告**（`Cannot create children for a parent that is in a different thread`），
-   不影响功能，仍在排查。
-4. **升级安装前请先退出正在运行的暮云音乐**：当前安装器不会自动关闭正在跑的实例，
-   程序开着时装新版会因文件被占用而失败，且失败回滚可能把你已有的安装弄成半新半旧。
-   托盘里也请右键退出（`⚙ 设置 → 关闭主窗口时` 选"最小化到托盘"时，程序其实还在运行）。
+- 启动静默检查更新（GitHub 版本清单，每次启动查一次；支持"稍后（本会话不再提醒）"与"不再提醒此版本"）
 
 > 说明：**音源脚本只支持新版 `globalThis.lx` 格式**。旧版 `userApi` / `registerSource` 不支持，
 > 导入时会明确提示——这是刻意的取舍，不是缺陷。
@@ -79,7 +69,7 @@ full-format audio effects (EQ / reverb / 3D surround / loudness), LX Music scrip
 - `MuyunMusic-<版本>.exe` —— 安装版（Windows 10/11 x64，无需另装 Qt）
 - `MuyunMusic-<版本>.zip` —— 便携版（解压后直接运行 `MuyunMusic.exe`）
 
-> 从旧版升级：**先退出正在运行的暮云音乐**（含托盘里的实例），再运行新版安装包。详见[已知问题](#已知问题)第 4 条。
+> 从旧版升级：直接运行新版安装包即可——安装器会先自动关闭正在运行的暮云音乐（含托盘里的实例），再覆盖安装。
 
 ## 从源码构建
 
@@ -111,7 +101,7 @@ cmake --build build --target MuyunMusic --parallel 4
 
 - `-DMUYUN_CONSOLE=ON`：编译成控制台程序（跑 `--test-*` 自检、看运行日志用）
 - `-DMUYUN_SELFTES=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXE_LINKER_FLAGS=-s`：发布构建
-  （编译级剔除全部自检与调试输出，体积 4.6MB → 3.2MB）
+  （编译级剔除全部自检与调试输出，体积 4.9MB → 3.3MB）
 - `-DMUYUN_STAGE=OFF`：不编译舞台（纯 Win32 + WebView2 的独立进程 `MuyunStage.exe`）
 
 ### 打包（可选）
@@ -126,7 +116,8 @@ cmake --build build --target MuyunMusic --parallel 4
 
 ## 自检
 
-开发版（`-DMUYUN_SELFTES=ON`）内置 29 项端到端自检，例如：
+开发版（`-DMUYUN_SELFTES=ON`）内置 50 个 `--test-*` 端到端自检（覆盖 DSP、音效管线真实出声、歌词配对、
+LX 协议一致性、ESC 阶梯、输入法守护、单实例、更新提示、批量操作、桌面歌词置顶真点击等），例如：
 
 ```powershell
 $env:MUYUN_STORE_ROOT = "$env:TEMP\muyun-test"   # 隔离数据目录（会写数据的自检必须设，否则拒绝运行）

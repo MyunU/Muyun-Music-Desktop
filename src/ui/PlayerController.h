@@ -8,6 +8,7 @@
 #include <QVariantMap>
 #include <QHash>
 #include <QStringList>
+#include <QVector>
 #include <QTimer>
 
 namespace Muyun {
@@ -217,12 +218,21 @@ private:
     void resolveAndPlay();
     /// 下一曲索引（非 const：会消费"下一首播放"覆写队列）
     int nextIndexByMode(bool userTriggered);
+    /// 随机播放"不重复牌堆"：下一曲 = 牌堆当前曲的后一张；一轮播完重洗再续。
+    /// 替代旧的"每次独立均匀随机"（歌单小时同曲短时间内重复率极高，用户反馈）
+    int nextShuffleIndex();
+    /// 随机播放"上一首"：回到本轮牌堆的前一张（已播过、且不重复）
+    int prevShuffleIndex();
+    /// （重新）洗牌生成不重复牌堆：当前曲放到队首，保证随机从"现在"继续
+    void rebuildShuffleDeck();
     void loadLyric();
     void updateCurrentLyric();
     void saveState();
     void restoreState();
     /// 按实际音频文件大小/时长算实测码率，识别音源虚标（如标 Master 实际几 MB）
     void updateMeasuredBitrate();
+    /// 当前歌封面为空且带 LX 元信息时，后台向脚本要封面（local 源 pic action，待办 #9）
+    void maybeResolveCover();
 
     PlayerEngine *m_engine = nullptr;
     QVector<Song> m_playlist;
@@ -241,6 +251,7 @@ private:
     /// 播放彻底失败（在线歌降档用尽/取不到链接）→ 自动切下一首而非停在原地；连败过多则止损
     void advanceOnPlayFailure(const QString &reason);
     QStringList m_pendingNext;   // “下一首播放”插入的歌 identityKey 队列：切歌时优先消费，无视播放模式
+    QVector<int> m_shuffleDeck;  ///< 随机播放"不重复牌堆"：本轮内的播放顺序（播放列表索引），轮尽重洗
     int m_failStreak = 0;        // 连续自动跳歌失败计数（真正开播成功即清零，防整队列拉胯死循环）
     bool m_loading = false;
     SongLyric m_lyric;

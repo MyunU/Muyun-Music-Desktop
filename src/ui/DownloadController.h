@@ -107,7 +107,12 @@ public:
 
     /// 探测各音质文件大小（解析URL + HEAD Content-Length），逐个经 qualitySizeReady 回报。
     /// 再次调用会作废上一次未完成的探测（换歌/重开弹窗）。bytes=-1 表示该档不可得。
+    /// 命中 m_sizeCache 时同步发结果、不再打网络（#12）。
     Q_INVOKABLE void probeSizes(const QVariantMap &songMap);
+    /// 预取若干歌曲的音质文件大小（#12：启动/换曲/列表渲染时后台拉，弹窗打开不再空转）。
+    /// 只处理在线歌、只对没缓存过的发请求；整批共用一个代际（用户打开菜单即作废本批），
+    /// 每批最多 cap 首串行，失败静默。
+    Q_INVOKABLE void prefetchSizes(const QVariantList &songMaps);
 
 signals:
     void itemsChanged();
@@ -115,7 +120,9 @@ signals:
     void downloadQualityChanged();
     void rescanRequested();
     void message(const QString &text);
-    void qualitySizeReady(const QString &qualityId, qint64 bytes);
+    /// 音质大小回报：songKey = "platform:id"（本地为 "local:path"），供 UI 按歌曲隔离缓存，
+    /// 避免切歌时把上一首的大小显示成新曲的（未就绪应显"加载中"）。bytes=-1 表示该档不可得。
+    void qualitySizeReady(const QString &songKey, const QString &qualityId, qint64 bytes);
 
 private slots:
     void flushProgress();
@@ -161,6 +168,8 @@ private:
     QString m_downloadQualityId;
     int     m_maxConcurrent = 2;
     quint64 m_probeToken = 0;   // 音质大小探测代际（换歌/重发作废旧探测）
+    /// 音质大小缓存（identityKey → qualityId → bytes）：打开弹窗/菜单不再重复 HEAD
+    QHash<QString, QHash<QString, qint64>> m_sizeCache;
 };
 
 } // namespace Muyun

@@ -105,6 +105,12 @@ public:
     /// 取消某 URL 的所有进行中请求
     void cancelAll();
 
+    /// 应用退出收尾：置"正在退出"标志。worker 线程里的同步/下载请求
+    /// 会在 ≤200ms 内被中止（否则 main 退出时 QThreadPool::waitForDone()
+    /// 会干等网络超时，播放中退出表现为"未响应"——见 HANDOFF 待办新问题②）。
+    static void beginShutdown();
+    static bool shuttingDown();
+
     /// 设置全局代理（空表示不使用代理）
     void setProxy(const QString &host, int port,
                   const QString &user = QString(),
@@ -113,6 +119,7 @@ public:
 
 private:
     QNetworkAccessManager *m_nam = nullptr;
+    static std::atomic<bool> s_shuttingDown;
 };
 
 /// URL 参数编码（与 JS encodeURIComponent 行为一致）

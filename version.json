@@ -1,8 +1,8 @@
 {
   "_comment": "更新提示用的版本清单。发新版：改 version/notes 与下面两个 url，并把同版本号的安装包传到 Releases。版本号规则：修 bug 末位 +1、加功能中间 +1、项目大改动首位 +1。",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "pubDate": "2026-10-04",
-  "notes": "1.0.1 修复与改进\n\n· 输入法：焦点不在输入框时也能切中英文\n· Esc 阶梯补齐：最大化 → 退出最大化 → 关闭主窗口\n· 单实例：权限不一致时不再双开，会明确提示\n· LX 音源脚本协议补齐（aesEncrypt / randomBytes / zlib / 定时器 / 脚本信息），更多第三方脚本可直接导入使用\n· 修复音源脚本里数字被当成字符串，导致部分音源初始化失败\n\n⚠ 升级前请先退出正在运行的暮云音乐（包括托盘里的实例）再安装。",
-  "pageUrl": "https://github.com/MyunU/Muyun-Music-Desktop/releases/tag/v1.0.1",
-  "downloadUrl": "https://github.com/MyunU/Muyun-Music-Desktop/releases/download/v1.0.1/MuyunMusic-1.0.1.exe"
+  "notes": "1.1.0 更新\n\n· 随机播放不再重复：同一轮内每首歌必播且不重复，播完一轮自动重洗\n· 修复：播放音乐时从托盘退出容易未响应（退出时先中止在途网络请求）\n· 修复：全屏歌词页（舞台）播放模式图标与实际情况不符，顺序/循环图标不再撞脸\n· Esc 更稳：焦点在桌面歌词等自家窗口时也能关掉主窗；退出确认框可用 Esc 关闭\n· 播放条排版：歌词移到顶栏搜索框旁，音量条加长，移除倍速/定时占位按钮\n· 修复：桌面歌词置顶后「取消置顶」点了没反应；置顶态悬停只显示这一个入口\n· 音质/体积信息启动即预取，播放条与下载弹窗不再空转\n· 更新检查改为每次启动检查一次；「稍后」= 本会话不再提醒，下次启动仍会提醒\n· 安装新版自动先关闭正在运行的暮云（含托盘/下载任务，稍后自动续传）\n· 顺手：启动跨线程警告修复、LX 脚本歌词/封面 action 接入、音源失败记忆提速、最大化对任务栏美化工具可见",
+  "pageUrl": "https://github.com/MyunU/Muyun-Music-Desktop/releases/tag/v1.1.0",
+  "downloadUrl": "https://github.com/MyunU/Muyun-Music-Desktop/releases/download/v1.1.0/MuyunMusic-1.1.0.exe"
 }

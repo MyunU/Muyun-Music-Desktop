@@ -3,6 +3,7 @@
 #include "core/storage/DocumentStore.h"
 
 #include <QQuickView>
+#include <QQuickItem>
 #include <QQmlEngine>
 #include <QScreen>
 #include <QGuiApplication>
@@ -10,7 +11,14 @@
 #include <QUrl>
 #include <QRect>
 #include <QPoint>
+#include <QPointF>
 #include <QSurfaceFormat>
+#include <QTimer>
+#include <QCursor>
+
+#ifdef Q_OS_WIN
+#include <windows.h>
+#endif
 
 namespace Muyun {
 
@@ -19,6 +27,11 @@ DesktopLyricsController::DesktopLyricsController(PlayerController *player,
     : QObject(parent), m_player(player), m_engine(engine)
 {
     loadStyle();
+    // 置顶窗是"点击穿透"的，收不到任何 Qt 鼠标事件 → 悬停判断只能靠全局光标轮询。
+    // 100ms 足够跟手又不费；仅在"窗口可见且置顶"时才真正计算。
+    m_hoverTimer = new QTimer(this);
+    m_hoverTimer->setInterval(100);
+    connect(m_hoverTimer, &QTimer::timeout, this, [this]() { pollHover(); });
 }
 
 void DesktopLyricsController::loadStyle()
@@ -34,9 +47,32 @@ void DesktopLyricsController::loadStyle()
 
 Qt::WindowFlags DesktopLyricsController::windowFlags() const
 {
-    Qt::WindowFlags flags = Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | Qt::Tool;
-    if (m_pinned) flags |= Qt::WindowTransparentForInput;   // 点击穿透
-    return flags;
+    // 置顶态**不**用 Qt::WindowTransparentForInput：那个是 Qt 的"窗口行为开关"，Qt 平台层
+    // 会自己按它拦鼠标事件。一旦设了，就算之后手动把 Win32 的 WS_EX_TRANSPARENT 摘掉、
+    // WindowFromPoint 也真的命中我们窗口，点击仍然到不了 QML（实测"取消置顶"钮点了没反应
+    // 的真因）。所以穿透改由本类直接用 WS_EX_TRANSPARENT 管，Qt 的 flags 始终不声明透明。
+    return Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | Qt::Tool;
+}
+
+// 直接管 Win32 的 WS_EX_TRANSPARENT（点击穿透）：
+//   设 → OS 命中测试把鼠标漏给下层窗口；摘 → 鼠标回到本窗。
+// 只改扩展样式，不 setFlags()（setFlags 会重建原生窗口，连带位置/可见性/置顶全丢）。
+void DesktopLyricsController::applyClickThrough(bool through)
+{
+#ifdef Q_OS_WIN
+    if (!m_view) return;
+    const HWND hwnd = reinterpret_cast<HWND>(m_view->winId());
+    if (!hwnd) return;
+    const LONG_PTR ex = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
+    const LONG_PTR want = through ? (ex | static_cast<LONG_PTR>(WS_EX_TRANSPARENT))
+                                  : (ex & ~static_cast<LONG_PTR>(WS_EX_TRANSPARENT));
+    if (want != ex) {
+        SetWindowLongPtr(hwnd, GWL_EXSTYLE, want);
+        // 通知 DWM 按新扩展样式重排，避免窗口边缘残留旧状态
+        SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+                     SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER);
+    }
+#endif
 }
 
 void DesktopLyricsController::ensureView()
@@ -64,6 +100,7 @@ void DesktopLyricsController::ensureView()
     }
     connect(m_view, &QWindow::visibleChanged, this,
             &DesktopLyricsController::visibleChanged);
+    applyClickThrough(m_pinned);   // 初态按置顶态同步一次穿透（通常 false）
 }
 
 // 两行（原文 + 译文）都要放得下：窗高按字号算，
@@ -86,6 +123,7 @@ void DesktopLyricsController::show()
     ensureView();
     m_view->show();
     m_view->raise();
+    if (!m_hoverTimer->isActive()) m_hoverTimer->start();
     emit visibleChanged();
 }
 
@@ -93,6 +131,8 @@ void DesktopLyricsController::hide()
 {
     if (m_view) {
         m_view->hide();
+        if (m_pinnedHover) { m_pinnedHover = false; emit pinnedHoverChanged(); }
+        m_hoverTimer->stop();
         emit visibleChanged();
     }
 }
@@ -109,18 +149,112 @@ void DesktopLyricsController::toggle()
     }
 }
 
+void DesktopLyricsController::requestActivate()
+{
+    ensureView();
+    if (!m_view) return;
+    m_view->show();
+    m_view->raise();
+    m_view->requestActivate();
+#ifdef Q_OS_WIN
+    if (HWND h = reinterpret_cast<HWND>(m_view->winId())) {
+        SetForegroundWindow(h);
+        SetWindowPos(h, HWND_TOP, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    }
+#endif
+}
+
 void DesktopLyricsController::setPinned(bool on)
 {
     if (m_pinned == on) return;
     m_pinned = on;
     if (m_view) {
-        // 保留位置（改 flags 可能重建平台窗口）
-        const QPoint pos = m_view->position();
-        m_view->setFlags(windowFlags());
-        m_view->setPosition(pos);
+        // 不 setFlags()：那会重建原生窗口，位置/可见性/置顶都会丢（老代码还要额外存位置补回来）
+        applyClickThrough(on);
         if (on) m_view->raise();
     }
+    // 取消置顶时清掉悬停态（编辑态靠 QML 自己的 hoverLayer，不走这条）
+    if (!on && m_pinnedHover) { m_pinnedHover = false; emit pinnedHoverChanged(); }
     emit pinnedChanged();
+}
+
+// 置顶窗点击穿透、收不到 Qt 鼠标事件 → 用全局光标位置判断"鼠标是否落在歌词窗矩形内"。
+// 命中即让 QML 显出「取消置顶」钮（见 DesktopLyricsView.qml：pinned && pinnedHover）。
+// ⚠ 关键：穿透状态下连 HoverHandler 都收不到事件，所以"让这一小块能点"必须由这里主动切——
+//   命中→临时去 WS_EX_TRANSPARENT（可点）；离开→恢复穿透。全程只动扩展样式，不重建窗口。
+void DesktopLyricsController::pollHover()
+{
+    // ⚠ 判据刻意**不看 m_view->isVisible()**：置顶窗是 Qt::Tool + 逐像素透明，Qt 的内部可见性
+    //   标志在这种窗上会失真（实测 isVisible 谎报 false），一旦拿来早退，pollHover 永远不算、
+    //   pinnedHover 永远 0（就是"取消置顶钮不显示"的真因）。窗的真实显隐由 QML 侧负责；
+    //   这里只要"已置顶且 view 存在"就照常算。
+    if (!m_pinned || !m_view) {
+        if (m_pinnedHover) { m_pinnedHover = false; emit pinnedHoverChanged(); }
+        return;
+    }
+#ifdef Q_OS_WIN
+    // 命中判据只用 Win32 物理坐标：GetCursorPos 与 GetWindowRect 天然同域，dpr≠1 时也不变。
+    // Qt 那套（mapToGlobal + QCursor::pos）要靠 Qt 自己做逻辑↔物理换算，换算一有偏差
+    // contains 就恒假 → pinnedHover 恒 0 → 取消置顶钮不显示 / 点不动复发。这类问题已咬过两次：
+    //   ① position() 与 QCursor::pos() 不同域（改用 mapToGlobal 修过）；
+    //   ② 实测 dpr=1.25 下 GetWindowRect=(485,820)-(1435,945) 而 mapToGlobal=(388,656)，
+    //      同一个左上角差一个 1.25 倍，自检 5 次里跑出 1 次 hover 恒 0。
+    // 结论：判据别压在 Qt 的坐标换算上，问系统要物理矩形最稳。
+    const HWND hwnd = reinterpret_cast<HWND>(m_view->winId());
+    POINT cur{};
+    RECT rc{};
+    if (!hwnd || !GetCursorPos(&cur) || !GetWindowRect(hwnd, &rc)) return;
+    const bool inside = cur.x >= rc.left && cur.x < rc.right
+                     && cur.y >= rc.top  && cur.y < rc.bottom;
+    if (inside != m_pinnedHover) {
+        m_pinnedHover = inside;
+        setInteractiveForUnpin(inside);   // 命中才放开穿透，移开立刻恢复
+        emit pinnedHoverChanged();
+    }
+#else
+    const QPoint g = QCursor::pos();
+    const QPoint tl = m_view->mapToGlobal(QPoint(0, 0));
+    const bool inside = QRect(tl, m_view->size()).contains(g);
+    if (inside != m_pinnedHover) {
+        m_pinnedHover = inside;
+        setInteractiveForUnpin(inside);
+        emit pinnedHoverChanged();
+    }
+#endif
+}
+
+void DesktopLyricsController::setInteractiveForUnpin(bool on)
+{
+#ifdef Q_OS_WIN
+    applyClickThrough(!on);   // 悬停可点=true → 摘掉穿透
+#else
+    Q_UNUSED(on)
+#endif
+}
+
+quintptr DesktopLyricsController::winIdForTest() const
+{
+    return m_view ? reinterpret_cast<quintptr>(m_view->winId()) : quintptr(0);
+}
+
+QPoint DesktopLyricsController::centerGlobalForTest() const
+{
+    if (!m_view) return QPoint(0, 0);
+    const QPoint p = m_view->mapToGlobal(QPoint(0, 0));   // 与 pollHover 同用 mapToGlobal（逻辑坐标）
+    const QSize s = m_view->size();
+    return QPoint(p.x() + s.width() / 2, p.y() + s.height() / 2);
+}
+
+QPointF DesktopLyricsController::unpinButtonGlobalForTest() const
+{
+    if (!m_view) return QPointF();
+    QQuickItem *root = m_view->rootObject();
+    if (!root) return QPointF();
+    // 按钮只有"置顶+悬停"时才可见，但布局不受 visible 影响 → 坐标始终取得到
+    if (QQuickItem *btn = root->findChild<QQuickItem*>(QStringLiteral("unpinBtnObj")))
+        return btn->mapToGlobal(btn->boundingRect().center());
+    return QPointF();
 }
 
 void DesktopLyricsController::setColor(const QString &c)

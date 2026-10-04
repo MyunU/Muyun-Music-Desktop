@@ -212,7 +212,11 @@ Popup {
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: dlg.close()
+                        onClicked: {
+                            // 稍后 = 本会话不再自动弹（不落盘）：下次启动/出新版本/手动检查会再弹
+                            updater.snoozeLatestVersion()
+                            dlg.close()
+                        }
                     }
                 }
 

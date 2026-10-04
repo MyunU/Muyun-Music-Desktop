@@ -1,4 +1,5 @@
 #include <QApplication>
+#include <QCursor>
 #include <QScreen>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
@@ -575,8 +576,22 @@ static int finishSelfTest(int code)
 {
     fflush(stdout);
     fflush(stderr);
+    QElapsedTimer tAll; tAll.start();
     Muyun::DocumentStore::instance()->flushAll();
-    QThreadPool::globalInstance()->waitForDone(5000);
+    // ⚠ 等线程池之前必须先中止在途网络请求：首页预热/歌词解析/音源解析等任务卡在网络
+    // 超时上不会自己回来，waitForDone 每次都白等满 5 秒——这就是 --test-ui"最后一条 PASS
+    // 后长时间不退出"的真因（第 1、2 次 grabWindow 实测各 126/118ms，全程 5 秒全花在
+    // waitForDone 上）。顺序与产品退出处一致：置"正在退出" → cancelAll → 再等。
+    QElapsedTimer tWait; tWait.start();
+    Muyun::HttpClient::beginShutdown();
+    Muyun::HttpClient::instance()->cancelAll();
+    const bool poolDone = QThreadPool::globalInstance()->waitForDone(5000);
+    printf("[selftest-exit] code=%d waitForDone=%s(%lldms, 剩活跃线程=%d) 合计=%lldms\n",
+           code, poolDone ? "完成" : "超时(有任务卡住)",
+           static_cast<long long>(tWait.elapsed()),
+           QThreadPool::globalInstance()->activeThreadCount(),
+           static_cast<long long>(tAll.elapsed()));
+    fflush(stdout);
     std::_Exit(code);   // 跳过静态析构（QtConcurrent/平台插件 teardown 偶发挂起）
     return code;   // 不可达
 }
@@ -1198,8 +1213,9 @@ static const char *u8(const QString &s);   // 定义在下方自检工具区（U
 /// 更新提示自检（全离线，不碰网络）：
 ///   ① 纯逻辑：版本规范化 / 数值段比较 / 忽略规则 / 两种清单格式 / 垃圾输入；
 ///   ② 真链路：本地清单文件 → 工作线程读取 → 回主线程落地 → 发 updateFound；
-///      再验"每天最多一次"节流、开关关掉不查、"不再提醒"压住自动弹窗但不挡手动检查、
-///      远端出现比忽略版本更新的会重新提醒、同版本判 uptodate、坏清单判 failed 且不弹窗。
+///      再验"每次启动查一次"（会话级不重查）、开关关掉不查、"不再提醒"压住自动弹窗但不挡手动检查、
+///      远端出现比忽略版本更新的会重新提醒、「稍后」压住本会话自动弹窗、同版本判 uptodate、
+///      坏清单判 failed 且不弹窗。每个"自动检查"场景用新实例模拟"下次启动"（会话标记归零）。
 /// 用法：MuyunMusic.exe --test-update   （必须隔离 MUYUN_STORE_ROOT，本自检会写设置文档）
 static int runUpdateSelfTest()
 {
@@ -1285,115 +1301,158 @@ static int runUpdateSelfTest()
     };
     qputenv("MUYUN_UPDATE_FEED_FILE", feedPath.toLocal8Bit());
     qunsetenv("MUYUN_UPDATE_DISABLE");
-    qunsetenv("MUYUN_UPDATE_INTERVAL_MS");   // 走产品默认的 24 小时
 
     auto pump = [](int ms) {
         const qint64 end = QDateTime::currentMSecsSinceEpoch() + ms;
         while (QDateTime::currentMSecsSinceEpoch() < end)
             QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
     };
-    UpdateChecker checker;
-    checker.setAutoCheckEnabled(true);
-    checker.clearIgnoredVersion();
+    // 一次性清掉上次运行可能留下的忽略记录（隔离目录可能复用）
+    { UpdateChecker c0; c0.clearIgnoredVersion(); }
+    // 每个"自动检查"场景新建实例：模拟"下次启动"（会话级"已查过"标记归零）
+    auto newChecker = [&]() {
+        auto *c = new UpdateChecker();
+        c->setAutoCheckEnabled(true);
+        return c;
+    };
+    auto waitIdle = [&pump](UpdateChecker *c, int timeoutMs) {
+        const qint64 end = QDateTime::currentMSecsSinceEpoch() + timeoutMs;
+        while (c->checking() && QDateTime::currentMSecsSinceEpoch() < end) pump(30);
+        pump(80);   // 再泵一下，让 queued 调用落地
+    };
+
+    // ① 每次启动查一次（无节流）+ 同一进程内不重复查（会话级）
+    check("清单文件写入成功", writeFeed(feedV));
     int found = 0; QString foundVer;
-    QObject::connect(&checker, &UpdateChecker::updateFound, &checker,
+    UpdateChecker *checker = newChecker();
+    QObject::connect(checker, &UpdateChecker::updateFound, checker,
                      [&found, &foundVer](const QString &v, const QString &) {
         ++found; foundVer = v;
     });
-    auto waitIdle = [&checker, &pump](int timeoutMs) {
-        const qint64 end = QDateTime::currentMSecsSinceEpoch() + timeoutMs;
-        while (checker.checking() && QDateTime::currentMSecsSinceEpoch() < end) pump(30);
-        pump(80);   // 再泵一下，让 queued 调用落地
-    };
-    auto lastCheckAgo = [](qint64 ms) {
-        DocumentStore::instance()->writeSync(
-            QStringLiteral("general"), QStringLiteral("updateLastCheckAt"),
-            QDateTime::currentMSecsSinceEpoch() - ms);
-    };
-    const qint64 h25 = 25LL * 3600 * 1000;
-
-    // ① 到期 + 远端更新 → 真拉取、真发信号
-    check("清单文件写入成功", writeFeed(feedV));
-    lastCheckAgo(h25);
-    checker.autoCheck();
-    waitIdle(4000);
-    check("到期自动检查：拉到 1.1.0 并发 updateFound",
+    checker->autoCheck();
+    waitIdle(checker, 4000);
+    check("每次启动自动检查：拉到 1.1.0 并发 updateFound",
           found == 1 && foundVer == QStringLiteral("1.1.0")
-              && checker.status() == QStringLiteral("available"),
-          QStringLiteral("found=%1 ver=%2 status=%3").arg(found).arg(foundVer, checker.status()));
+              && checker->status() == QStringLiteral("available"),
+          QStringLiteral("found=%1 ver=%2 status=%3").arg(found).arg(foundVer, checker->status()));
 
-    // ② 节流：刚查过 → 再调 autoCheck 不该再查
-    checker.autoCheck();
-    waitIdle(1500);
-    check("每天最多一次：间隔内再调 autoCheck 不查", found == 1,
+    // ② 会话级：同一进程内第二次 autoCheck 不该再查（替代旧"每天最多一次"）
+    checker->autoCheck();
+    waitIdle(checker, 1500);
+    check("每次启动只查一次：同一进程内第二次 autoCheck 不查", found == 1,
           QStringLiteral("found=%1").arg(found));
 
-    // ③ 关掉「启动时自动检查」→ 即使到期也不查
-    checker.setAutoCheckEnabled(false);
-    lastCheckAgo(h25);
-    checker.autoCheck();
-    waitIdle(1200);
-    check("关掉启动自动检查后到期也不查", found == 1, QStringLiteral("found=%1").arg(found));
-    checker.setAutoCheckEnabled(true);
+    // ③ 关掉「启动时自动检查」→ 新实例也不查
+    {
+        auto *c2 = newChecker();
+        c2->setAutoCheckEnabled(false);
+        int f2 = 0;
+        QObject::connect(c2, &UpdateChecker::updateFound, c2,
+                         [&f2](const QString &, const QString &) { ++f2; });
+        c2->autoCheck();
+        waitIdle(c2, 1200);
+        check("关掉启动自动检查后也不查", f2 == 0, QStringLiteral("found=%1").arg(f2));
+        delete c2;
+    }
 
-    // ④ 「不再提醒」→ 版本号落盘 + 压住自动弹窗
-    checker.ignoreLatestVersion();
+    // ④ 「不再提醒」→ 版本号落盘 + 压住自动弹窗（新实例 = 下次启动）
+    checker->ignoreLatestVersion();
     const QString saved = DocumentStore::instance()
                               ->readSync(QStringLiteral("general"),
                                          QStringLiteral("updateIgnoredVersion"), QString())
                               .toString();
-    lastCheckAgo(h25);
-    checker.autoCheck();
-    waitIdle(4000);
-    check("不再提醒：版本号落盘且自动检查不再弹窗",
-          saved == QStringLiteral("1.1.0") && found == 1
-              && checker.status() == QStringLiteral("ignored"),
-          QStringLiteral("存档=%1 status=%2").arg(saved, checker.status()));
+    {
+        auto *c4 = newChecker();
+        int f4 = 0;
+        QObject::connect(c4, &UpdateChecker::updateFound, c4,
+                         [&f4](const QString &, const QString &) { ++f4; });
+        c4->autoCheck();
+        waitIdle(c4, 4000);
+        check("不再提醒：版本号落盘且自动检查不再弹窗",
+              saved == QStringLiteral("1.1.0") && f4 == 0
+                  && c4->status() == QStringLiteral("ignored"),
+              QStringLiteral("存档=%1 status=%2").arg(saved, c4->status()));
+        delete c4;
+    }
 
     // ⑤ 手动检查是用户主动问的 → 忽略过也要给结果
-    checker.checkForUpdates();
-    waitIdle(4000);
+    checker->checkForUpdates();
+    waitIdle(checker, 4000);
     check("手动检查不受「不再提醒」影响",
           found == 2 && foundVer == QStringLiteral("1.1.0")
-              && checker.status() == QStringLiteral("available"),
-          QStringLiteral("found=%1 status=%2").arg(found).arg(checker.status()));
+              && checker->status() == QStringLiteral("available"),
+          QStringLiteral("found=%1 status=%2").arg(found).arg(checker->status()));
 
-    // ⑥ 远端出现比忽略版本更新的 → 自动检查重新提醒
+    // ⑥ 远端出现比忽略版本更新的 → 自动检查重新提醒（新实例 = 下次启动）
     writeFeed(feedApi);
-    lastCheckAgo(h25);
-    checker.autoCheck();
-    waitIdle(4000);
-    check("远端出现 1.2.0（比忽略的 1.1.0 新）→ 自动检查重新提醒",
-          found == 3 && foundVer == QStringLiteral("1.2.0")
-              && checker.status() == QStringLiteral("available"),
-          QStringLiteral("found=%1 ver=%2").arg(found).arg(foundVer));
+    {
+        auto *c6 = newChecker();
+        int f6 = 0; QString v6;
+        QObject::connect(c6, &UpdateChecker::updateFound, c6,
+                         [&f6, &v6](const QString &v, const QString &) { ++f6; v6 = v; });
+        c6->autoCheck();
+        waitIdle(c6, 4000);
+        check("远端出现 1.2.0（比忽略的 1.1.0 新）→ 自动检查重新提醒",
+              f6 == 1 && v6 == QStringLiteral("1.2.0")
+                  && c6->status() == QStringLiteral("available"),
+              QStringLiteral("found=%1 ver=%2").arg(f6).arg(v6));
+        delete c6;
+    }
 
-    // ⑦ 远端与本地同版本 → 已是最新
+    // ⑦ 「稍后」→ 本会话不再自动弹（同版本）；出更新版本会再弹（新实例模拟下次启动）
+    checker->checkForUpdates();
+    waitIdle(checker, 4000);
+    check("手动检查给「稍后」提供版本", checker->status() == QStringLiteral("available"));
+    checker->snoozeLatestVersion();
+    check("「稍后」后状态变为 snoozed（会话级）",
+          checker->status() == QStringLiteral("snoozed"), checker->statusText());
+    checker->checkForUpdates();
+    waitIdle(checker, 4000);
+    check("手动检查不受「稍后」影响（用户主动问仍给结果）",
+          checker->status() == QStringLiteral("available"),
+          checker->statusText());
+    {
+        auto *c7 = newChecker();   // 下次启动：同版本仍被「稍后」压住（会话标记不跨进程）
+        int f7 = 0;
+        QObject::connect(c7, &UpdateChecker::updateFound, c7,
+                         [&f7](const QString &, const QString &) { ++f7; });
+        c7->autoCheck();
+        waitIdle(c7, 4000);
+        check("「稍后」不落盘：同版本在下次启动仍会提醒（每次上线触发一次）",
+              f7 == 1 && c7->status() == QStringLiteral("available"),
+              QStringLiteral("found=%1 status=%2").arg(f7).arg(c7->status()));
+        delete c7;
+    }
+
+    // ⑧ 远端与本地同版本 → 已是最新
     writeFeed(R"({"version":"1.0.0","notes":""})");
-    checker.checkForUpdates();
-    waitIdle(4000);
+    checker->checkForUpdates();
+    waitIdle(checker, 4000);
     check("远端与本地同版本 → uptodate 且不弹窗",
-          found == 3 && checker.status() == QStringLiteral("uptodate"), checker.statusText());
+          found == 4 && checker->status() == QStringLiteral("uptodate"), checker->statusText());
 
-    // ⑧ 坏清单 → failed（不崩、不弹窗）
+    // ⑨ 坏清单 → failed（不崩、不弹窗）
     writeFeed("<html>404</html>");
-    checker.checkForUpdates();
-    waitIdle(4000);
+    checker->checkForUpdates();
+    waitIdle(checker, 4000);
     check("坏清单 → failed 且不弹窗",
-          found == 3 && checker.status() == QStringLiteral("failed"), checker.statusText());
+          found == 4 && checker->status() == QStringLiteral("failed"), checker->statusText());
+    delete checker;
 
-    // ⑨ 可选：真网络链路（设了 MUYUN_UPDATE_LIVE_URL 才跑）。默认的 GitHub 地址在本机可能
+    // ⑩ 可选：真网络链路（设了 MUYUN_UPDATE_LIVE_URL 才跑）。默认的 GitHub 地址在本机可能
     //    连不上（国内网络常见），此时用本地 HTTP 服务/镜像地址验证"HTTP 取回 → 回主线程 → 落地"
     //    这条腿；开源后仓库真地址也可直接拿它验（例：MUYUN_UPDATE_LIVE_URL=<raw version.json>）。
     const QString liveUrl = qEnvironmentVariable("MUYUN_UPDATE_LIVE_URL");
     if (!liveUrl.isEmpty()) {
         qunsetenv("MUYUN_UPDATE_FEED_FILE");   // 改走网络，不再读本地文件
         qputenv("MUYUN_UPDATE_FEED", liveUrl.toLocal8Bit());
-        checker.checkForUpdates();
-        waitIdle(12000);
+        UpdateChecker liveChecker;
+        liveChecker.setAutoCheckEnabled(true);
+        liveChecker.checkForUpdates();
+        waitIdle(&liveChecker, 12000);
         check("真网络链路：HTTP 清单能取回并解析（MUYUN_UPDATE_LIVE_URL）",
-              checker.status() != QStringLiteral("failed"),
-              QStringLiteral("%1 → %2").arg(liveUrl, checker.statusText()));
+              liveChecker.status() != QStringLiteral("failed"),
+              QStringLiteral("%1 → %2").arg(liveUrl, liveChecker.statusText()));
     } else {
         printf("[SKIP] 未设 MUYUN_UPDATE_LIVE_URL，跳过真网络链路用例\n");
     }
@@ -1641,6 +1700,12 @@ int main(int argc, char *argv[])
 #endif // MUYUN_SELFTES
 
     auto *store = DocumentStore::instance();
+
+    // ---- 跨线程警告预防（待办 #3）----
+    // HttpClient 单例的父是 qApp，若它第一次被"音源解析/歌词/下载"等 worker 线程
+    // 触发创建，就会报 "Cannot create children for a parent that is in a different
+    // thread"。必须由主线程抢先创建（DocumentStore/MusicSdk 已在主线程早建，只差它）。
+    Muyun::HttpClient::instance();
 
     // ---- 单实例守护 ----
     // 再次启动程序 → 通知已运行实例（含最小化到托盘托管的）唤起主界面，本进程静默退出。
@@ -2004,6 +2069,8 @@ int main(int argc, char *argv[])
 
     // Windows 无边框：原生边缘缩放 + 最大化几何修复（替代 QML MouseArea 抖动方案）
     auto *frameless = new FramelessWindow(qApp);
+    // QML 侧 toggleMaximize 时同步 WS_MAXIMIZE 样式位（HANDOFF #11，第三方任务栏工具认最大化）
+    engine.rootContext()->setContextProperty(QStringLiteral("frameless"), frameless);
 
     // 舞台 fx 视觉控制台：独立置顶浮层小窗（QQuickView 复用主 engine，
     // 浮在舞台窗之上，经 stage 的 fx* 通道透传引擎）
@@ -3470,12 +3537,70 @@ int main(int argc, char *argv[])
                playedFromCache ? "PASS" : "FAIL", int(hitOk),
                qPrintable(player->currentAudioLocalPath()));
 
+        // -- 4) 随机播放不重复（牌堆一轮内不重复、每首必播；轮尽重洗继续）--
+        auto makeWavDur = [&](const QString &path, double sec) {
+            QFile w(path);
+            if (!w.open(QIODevice::WriteOnly | QIODevice::Truncate)) return;
+            const quint32 rate = 8000;
+            const quint32 dataBytes = quint32(rate * 2) * quint32(sec);
+            auto u32 = [](quint32 v){ QByteArray b(4,0); b[0]=char(v&0xFF); b[1]=char((v>>8)&0xFF); b[2]=char((v>>16)&0xFF); b[3]=char((v>>24)&0xFF); return b; };
+            auto u16 = [](quint16 v){ QByteArray b(2,0); b[0]=char(v&0xFF); b[1]=char((v>>8)&0xFF); return b; };
+            w.write("RIFF" + u32(36 + dataBytes) + "WAVEfmt " + u32(16) + u16(1) + u16(1)
+                    + u32(rate) + u32(rate * 2) + u16(2) + u16(16) + "data" + u32(dataBytes));
+            w.write(QByteArray(int(dataBytes), '\0'));
+            w.close();
+        };
+        auto shSong = [&](const QString &tag) {
+            const QString p = QDir::tempPath() + QStringLiteral("/muyun-sh-%1.wav").arg(tag);
+            makeWavDur(p, 30.0);   // 30s 静音：测试期间不会自然播完触发切歌
+            QVariantMap m;
+            m[QStringLiteral("id")] = p;
+            m[QStringLiteral("name")] = QStringLiteral("S-") + tag;
+            m[QStringLiteral("artist")] = QStringLiteral("test");
+            m[QStringLiteral("duration")] = 30.0;
+            m[QStringLiteral("platform")] = QStringLiteral("local");
+            m[QStringLiteral("localPath")] = p;
+            return m;
+        };
+        player->setPlayModeId(QStringLiteral("shuffle"));
+        const QStringList shTags = { QStringLiteral("a"), QStringLiteral("b"),
+                                     QStringLiteral("c"), QStringLiteral("d"), QStringLiteral("e") };
+        QVariantList shList;
+        for (const QString &t : shTags) shList.append(shSong(t));
+        player->playSong(shSong(QStringLiteral("a")), shList);
+        waitMs(300);
+        // 首轮：从当前曲出发走完牌堆剩下的 4 张 → 全部不同、且都与当前曲不同
+        QStringList seq;
+        seq << player->currentSong().name;   // S-a
+        bool shuffleOk = true;
+        for (int i = 0; i < 4 && shuffleOk; ++i) {
+            player->next();
+            waitMs(300);
+            const QString cur = player->currentSong().name;
+            if (seq.contains(cur)) shuffleOk = false;   // 一轮内出现重复 → 算法失败
+            seq << cur;
+        }
+        // 第 5 下 next：一轮走完 → 重洗开新一轮，不能停在原地/不能立刻重放刚播完的
+        player->next();
+        waitMs(300);
+        const QString round2 = player->currentSong().name;
+        const bool round2Ok = !round2.isEmpty() && round2 != seq.last();
+        const QSet<QString> uniqueSeq(seq.begin(), seq.end());   // Qt6 无 toSet()
+        shuffleOk = shuffleOk && round2Ok
+            && seq.size() == 5              // 当前曲 + 首轮剩下的 4 首
+            && uniqueSeq.size() == 5;       // 首轮 5 首全不同（一轮内不重复、每首必播）
+        printf("[%s] 4) 随机播放一轮内不重复（序列=%s，第二轮=%s）\n",
+               shuffleOk ? "PASS" : "FAIL",
+               qPrintable(seq.join(QLatin1String(">"))), qPrintable(round2));
+
         // 清理测试产物
         QFile::remove(cachePath);
         for (const QString tag : { QStringLiteral("a"), QStringLiteral("b"), QStringLiteral("c") })
             QFile::remove(QDir::tempPath() + QStringLiteral("/muyun-q-%1.wav").arg(tag));
+        for (const QString tag : shTags)
+            QFile::remove(QDir::tempPath() + QStringLiteral("/muyun-sh-%1.wav").arg(tag));
         player->stop();
-        const int rc = (overrideOk && autoNextOk && playedFromCache) ? 0 : 4;
+        const int rc = (overrideOk && autoNextOk && playedFromCache && shuffleOk) ? 0 : 4;
         printf("=== 队列自检 %s ===\n", rc == 0 ? "PASS" : "FAIL");
         return finishSelfTest(rc);
     }
@@ -3764,6 +3889,8 @@ int main(int argc, char *argv[])
     stage->attachWindow(mainWin);
     hotkey->attach(mainWin);
     imeGuard->attach(mainWin);
+    // 手动最大化样式位同步（#11）：只需窗口句柄，不激活原生过滤器（见 FramelessWindow 头注释）
+    frameless->bindMaxWindow(mainWin);
     // mineradio 舞台是独立进程窗，它抢焦点时本应用会判为"后台"→ 热键保活，
     // 保证舞台全屏界面里 F11 仍能切主窗全屏。
     QObject::connect(stage, &Muyun::StageBridge::activeChanged, hotkey,
@@ -3808,18 +3935,24 @@ int main(int argc, char *argv[])
 #endif
             fflush(stdout);
         };
-        QTimer::singleShot(1500, mainWin, [mainWin, dump]() {
+        QTimer::singleShot(1500, mainWin, [mainWin, dump, frameless]() {
             dump("before");
             // 手动几何最大化（与 Main.qml toggleMaximize 同机制，不碰 showMaximized）
             const QRect avail = mainWin->screen()->availableGeometry();
             mainWin->setGeometry(avail);
-            QTimer::singleShot(1000, mainWin, [mainWin, dump]() {
+            QTimer::singleShot(1000, mainWin, [mainWin, dump, frameless]() {
                 dump("afterManualMax");
-                mainWin->showNormal();
-                mainWin->setGeometry(200, 150, 1200, 720);
-                QTimer::singleShot(800, mainWin, [mainWin, dump]() {
-                    dump("afterRestore");
-                    QCoreApplication::quit();
+                // #11：补 WS_MAXIMIZE 样式位 → IsZoomed 应变真（第三方任务栏工具认最大化）
+                frameless->setMaximizedStyle(true);
+                QTimer::singleShot(400, mainWin, [mainWin, dump, frameless]() {
+                    dump("afterStyleBit");
+                    frameless->setMaximizedStyle(false);
+                    mainWin->showNormal();
+                    mainWin->setGeometry(200, 150, 1200, 720);
+                    QTimer::singleShot(800, mainWin, [mainWin, dump]() {
+                        dump("afterRestore");
+                        QCoreApplication::quit();
+                    });
                 });
             });
         });
@@ -3944,9 +4077,9 @@ int main(int argc, char *argv[])
             const bool kept = refreshed && yAfter > yBefore - 200;
             printf("[%s] 取消喜欢刷新+保滚动 count=%d(期望39) before=%.0f after=%.0f\n",
                    kept ? "PASS" : "FAIL", countAfter, yBefore, yAfter);
+            fflush(stdout);
             const QString p2 = QDir::tempPath() + QStringLiteral("/muyun_ui_favorites.png");
             mainWin->grabWindow().save(p2);
-            fflush(stdout);
             finishSelfTest(kept ? 0 : 4);
         });
     }
@@ -4595,6 +4728,7 @@ int main(int argc, char *argv[])
         if (!mainWin) { printf("[FAIL] 没有主窗口\n"); return finishSelfTest(4); }
 
         static bool exitFsOk = false, exitMaxOk = false, popupSafeOk = false, closeOk = false;
+        static bool escDialogOk = false, lyricsFocusCloseOk = false, stalePopupCloseOk = false;
         static bool didFs = false, didMax = false;
         auto prop = [mainWin](const char *p) { return mainWin->property(p).toBool(); };
         auto call = [mainWin](const char *m) { QMetaObject::invokeMethod(mainWin, m); };
@@ -4705,12 +4839,372 @@ int main(int argc, char *argv[])
             closeOk = asked || hidden;
             printf("[%s] 第⑤步：Esc 关闭主窗口（%s）\n", closeOk ? "PASS" : "FAIL",
                    asked ? "弹出退出确认（按设置分流）" : (hidden ? "窗口已关闭/隐藏" : "什么都没发生"));
-            const bool all = didFs && exitFsOk && didMax && exitMaxOk && popupSafeOk && closeOk;
+        }});
+        // ⑥ exitDialog 打开时按 Esc → 该关掉确认框，而不是什么都不做（#19 候选病因③）
+        steps->push_back({400, []() {
+            // 注意：不能像 pressEsc 那样先 raiseOwn() 抬主窗——那会把焦点从确认框
+            // 抢回主窗，CloseOnEscape 就不触发了（测试假阴性）。真实场景确认框有焦点，
+            // 这里直接注入 Esc。
+            printf("    第⑥步：确认框在场（有焦点），注入真实 Esc\n");
+            fflush(stdout);
+            QTimer::singleShot(400, qApp, []() {
+#ifdef Q_OS_WIN
+                keybd_event(VK_ESCAPE, 0, 0, 0);
+                Sleep(30);
+                keybd_event(VK_ESCAPE, 0, KEYEVENTF_KEYUP, 0);
+#endif
+            });
+        }});
+        steps->push_back({900, [mainWin, findByObj]() {
+            QObject *dlg = findByObj("exitDialogObj");
+            const bool closed = dlg && !dlg->property("visible").toBool();
+            const bool winAlive = mainWin->isVisible();
+            escDialogOk = closed && winAlive && !mainWin->property("fullScreenOn").toBool()
+                          && !mainWin->property("maximized").toBool();
+            printf("[%s] 第⑥步：确认框打开时 Esc 关掉确认框（框关=%d 窗口还在=%d）\n",
+                   escDialogOk ? "PASS" : "FAIL", int(closed), int(winAlive));
+        }});
+        // ⑦（#19 断言①）焦点交给自家另一个窗（桌面歌词）→ 主窗没 active →
+        //    按 Esc 仍要能关掉主窗（系统热键接管，不再两头都收不到）
+        steps->push_back({400, [deskLyrics]() {
+            // 不抬主窗：直接把桌面歌词窗抬到前台，模拟用户刚点过它
+            deskLyrics->requestActivate();
+            printf("    第⑦步前置：桌面歌词窗已抬前台（主窗不再 active）\n");
+            fflush(stdout);
+            QTimer::singleShot(400, qApp, []() {
+                printf("    第⑦步：注入真实 Esc（主窗非前台）\n");
+                fflush(stdout);
+#ifdef Q_OS_WIN
+                keybd_event(VK_ESCAPE, 0, 0, 0);
+                Sleep(30);
+                keybd_event(VK_ESCAPE, 0, KEYEVENTF_KEYUP, 0);
+#endif
+            });
+        }});
+        steps->push_back({900, [mainWin, findByObj]() {
+            QObject *dlg = findByObj("exitDialogObj");
+            // 主窗应该真的走了一次"关闭"（exitAction=ask → 弹确认框）
+            lyricsFocusCloseOk = dlg && dlg->property("visible").toBool()
+                                 && mainWin->isVisible();
+            printf("[%s] 第⑦步：焦点在桌面歌词窗时 Esc 仍关得掉主窗（确认框已弹=%d）\n",
+                   lyricsFocusCloseOk ? "PASS" : "FAIL", int(lyricsFocusCloseOk));
+            // 关掉确认框，回到普通态
+            if (dlg && dlg->property("visible").toBool()) {
+                QMetaObject::invokeMethod(dlg, "close");
+                QCoreApplication::processEvents();
+            }
+        }});
+        // ⑧（#19 断言②）刚 close 掉弹层、紧接着按 Esc → 弹层已退场，Esc 该归阶梯
+        steps->push_back({300, [findByObj]() {
+            if (QObject *panel = findByObj("settingsPanelObj")) {
+                QMetaObject::invokeMethod(panel, "open");
+                QCoreApplication::processEvents();
+                QTimer::singleShot(200, qApp, [panel]() {
+                    QMetaObject::invokeMethod(panel, "close");
+                    // 同帧紧接着注入 Esc（弹层刚关，焦点可能还没来得及复位）
+                    QTimer::singleShot(80, qApp, []() {
+                        printf("    第⑧步：弹层刚关、80ms 后注入 Esc\n");
+                        fflush(stdout);
+#ifdef Q_OS_WIN
+                        keybd_event(VK_ESCAPE, 0, 0, 0);
+                        Sleep(30);
+                        keybd_event(VK_ESCAPE, 0, KEYEVENTF_KEYUP, 0);
+#endif
+                    });
+                });
+            } else {
+                printf("    第⑧步：找不到设置面板，跳过\n");
+            }
+        }});
+        steps->push_back({900, [mainWin, findByObj]() {
+            QObject *dlg = findByObj("exitDialogObj");
+            stalePopupCloseOk = dlg && dlg->property("visible").toBool();
+            printf("[%s] 第⑧步：弹层刚关就按 Esc → 阶梯生效（确认框已弹=%d）\n",
+                   stalePopupCloseOk ? "PASS" : "FAIL", int(stalePopupCloseOk));
+            const bool all = didFs && exitFsOk && didMax && exitMaxOk && popupSafeOk
+                             && closeOk && escDialogOk && lyricsFocusCloseOk
+                             && stalePopupCloseOk;
             printf("ESC 阶梯自检结束（%s）\n", all ? "全绿" : "有失败项");
             fflush(stdout);
             finishSelfTest(all ? 0 : 4);
         }});
         (*run)();
+    }
+#endif // MUYUN_SELFTES
+
+    // 桌面歌词"置顶态悬停取消置顶"自检（用户反馈：置顶后没显示取消置顶按钮）
+    //   根因：置顶窗是点击穿透的，收不到 Qt 鼠标事件 → 悬停只能靠 C++ 全局光标轮询。
+    //   硬断言：置顶 + 光标移到窗内 → deskLyrics.pinnedHover 变真且 WS_EX_TRANSPARENT 被摘掉
+    //   （钮才可点）；光标移出 → pinnedHover 变假且穿透恢复。全程不重建窗口。
+    // 用法：MuyunMusic.exe --test-desklyric-pin   （需 MUYUN_STORE_ROOT 隔离）
+#ifdef MUYUN_SELFTES
+    if (args.contains(QStringLiteral("--test-desklyric-pin"))) {
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        printf("=== 桌面歌词置顶悬停自检 ===\n");
+        if (qEnvironmentVariableIsEmpty("MUYUN_STORE_ROOT")) {
+            printf("[FAIL] 必须设 MUYUN_STORE_ROOT 隔离后再跑\n");
+            return finishSelfTest(4);
+        }
+#ifndef Q_OS_WIN
+        printf("[SKIP] 非 Windows\n");
+        return finishSelfTest(0);
+#else
+        auto pumpMs = [](int ms) {
+            const qint64 end = QDateTime::currentMSecsSinceEpoch() + ms;
+            while (QDateTime::currentMSecsSinceEpoch() < end)
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+        };
+        int fail = 0;
+        auto check = [&fail](const char *name, bool ok, const QString &d = QString()) {
+            printf("[%s] %s%s\n", ok ? "PASS" : "FAIL", name,
+                   d.isEmpty() ? "" : qPrintable(QStringLiteral("  （") + d + QStringLiteral("）")));
+            if (!ok) ++fail;
+        };
+        QCursor::setPos(20, 20);   // 先把光标挪到角落，避免上一轮残留位置让 pollHover 立刻解除穿透
+        deskLyrics->show();
+        deskLyrics->setPinned(true);
+        pumpMs(300);
+        check("置顶态已建立（pinned=1）", deskLyrics->isPinned());
+
+        auto hwndDl = [deskLyrics]() -> HWND {
+            return reinterpret_cast<HWND>(deskLyrics->winIdForTest());
+        };
+        auto transparentNow = [&hwndDl]() {
+            const HWND h = hwndDl();
+            if (!h) return false;
+            return (GetWindowLongPtr(h, GWL_EXSTYLE) & WS_EX_TRANSPARENT) != 0;
+        };
+        check("置顶且光标不在窗内 → 保持穿透（WS_EX_TRANSPARENT=1）", transparentNow());
+
+        // 光标移到歌词窗中心 → 悬停命中 → 应放开穿透
+        const QPoint c = deskLyrics->centerGlobalForTest();
+        QCursor::setPos(c);   // Qt 逻辑坐标，与 pollHover 读的 QCursor::pos() 同域（别用 SetCursorPos 物理坐标）
+        pumpMs(350);   // >100ms 轮询周期
+        check("光标移入窗内 → pinnedHover=1", deskLyrics->pinnedHover(),
+              QStringLiteral("hover=%1").arg(int(deskLyrics->pinnedHover())));
+        check("悬停时临时解除穿透（钮可点）", !transparentNow());
+
+        // 光标移到远处 → 离开 → 应恢复穿透
+        QCursor::setPos(20, 20);
+        pumpMs(350);
+        check("光标移出 → pinnedHover=0", !deskLyrics->pinnedHover(),
+              QStringLiteral("hover=%1").arg(int(deskLyrics->pinnedHover())));
+        check("离开后恢复穿透", transparentNow());
+
+        deskLyrics->hide();
+        printf("%s 桌面歌词置顶悬停自检（%d 项失败）\n", fail == 0 ? "[PASS]" : "[FAIL]", fail);
+        fflush(stdout);
+        return finishSelfTest(fail == 0 ? 0 : 4);
+#endif
+    }
+#endif // MUYUN_SELFTES
+
+    // 桌面歌词"置顶后点『取消置顶』无反应"自检（用户 2026-10-04 报；--test-desklyric-pin 修的是
+    //   "钮不显示"，那条只用 QCursor::setPos 挪**软件**光标，只能证明"WS_EX_TRANSPARENT 被摘掉了"，
+    //   证明不了"真点击能送到按钮"——这是这次反馈的真问题）。这里分三段验：
+    //     ① 命中测试 WindowFromPoint(按钮的屏幕像素) 必须是我们窗口 → 穿透没真解除就点不到
+    //     ② 命中通过后把真光标移到钮上、SendInput 真点一下（不过①就跳过，绝不盲点用户界面）
+    //     ③ 结果 deskLyrics.isPinned 必须变假
+    // 用法：MuyunMusic.exe --test-desklyric-click   （需 MUYUN_STORE_ROOT 隔离）
+#ifdef MUYUN_SELFTES
+    if (args.contains(QStringLiteral("--test-desklyric-click"))) {
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        printf("=== 桌面歌词置顶真点击自检 ===\n");
+        if (qEnvironmentVariableIsEmpty("MUYUN_STORE_ROOT")) {
+            printf("[FAIL] 必须设 MUYUN_STORE_ROOT 隔离后再跑（会用真鼠标在屏幕上点一下）\n");
+            return finishSelfTest(4);
+        }
+#ifndef Q_OS_WIN
+        printf("[SKIP] 非 Windows\n");
+        return finishSelfTest(0);
+#else
+        auto pumpMs = [](int ms) {
+            const qint64 end = QDateTime::currentMSecsSinceEpoch() + ms;
+            while (QDateTime::currentMSecsSinceEpoch() < end)
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+        };
+        int fail = 0;
+        auto check = [&fail](const char *name, bool ok, const QString &d = QString()) {
+            printf("[%s] %s%s\n", ok ? "PASS" : "FAIL", name,
+                   d.isEmpty() ? "" : qPrintable(QStringLiteral("  （") + d + QStringLiteral("）")));
+            if (!ok) ++fail;
+        };
+        auto endTest = [&]() {
+            QCursor::setPos(20, 20);
+            deskLyrics->hide();
+            printf("%s 桌面歌词置顶真点击自检（%d 项失败）\n", fail == 0 ? "[PASS]" : "[FAIL]", fail);
+            fflush(stdout);
+            return finishSelfTest(fail == 0 ? 0 : 4);
+        };
+        QCursor::setPos(20, 20);
+        deskLyrics->show();
+        deskLyrics->setPinned(true);
+        pumpMs(350);
+        check("置顶态已建立（pinned=1）", deskLyrics->isPinned());
+
+        const HWND h = reinterpret_cast<HWND>(deskLyrics->winIdForTest());
+        auto exStyleTxt = [h]() -> QString {
+            if (!h) return QStringLiteral("无句柄");
+            const LONG_PTR e = GetWindowLongPtr(h, GWL_EXSTYLE);
+            return QStringLiteral("EXSTYLE=0x%1 TRANSPARENT=%2 NOACTIVATE=%3 TOPMOST=%4 LAYERED=%5 TOOL=%6")
+                .arg(quintptr(e), 0, 16)
+                .arg((e & WS_EX_TRANSPARENT) != 0 ? 1 : 0)
+                .arg((e & WS_EX_NOACTIVATE) != 0 ? 1 : 0)
+                .arg((e & WS_EX_TOPMOST) != 0 ? 1 : 0)
+                .arg((e & WS_EX_LAYERED) != 0 ? 1 : 0)
+                .arg((e & WS_EX_TOOLWINDOW) != 0 ? 1 : 0);
+        };
+        printf("    置顶初态 %s\n", qPrintable(exStyleTxt()));
+
+        // ---- 坐标空间全量诊断：dpr≠1 时 Qt 逻辑坐标与 Win32 物理坐标可能不同域 ----
+        // 先不挪光标、不假设任何 Qt 坐标是对的，只看三件事：
+        //   ① Win32 眼里这个窗真实在哪（GetWindowRect，物理像素）
+        //   ② 在它自己的物理中心做命中测试，命中到的到底是不是它
+        //   ③ Qt 的 mapToGlobal 报的位置和 ① 差多少
+        if (h) {
+            wchar_t cls[64]; GetClassNameW(h, cls, 63);
+            RECT rc{}; GetWindowRect(h, &rc);
+            const POINT rcCenter = { LONG(rc.left + (rc.right - rc.left) / 2),
+                                     LONG(rc.top + (rc.bottom - rc.top) / 2) };
+            POINT realCur{}; GetCursorPos(&realCur);
+            const QPoint qPos = QCursor::pos();
+            QScreen *scr = qApp->primaryScreen();
+            QWindow *qw0 = QWindow::fromWinId(reinterpret_cast<WId>(deskLyrics->winIdForTest()));
+            const QPoint tlG = qw0 ? qw0->mapToGlobal(QPoint(0, 0)) : QPoint(-1, -1);
+            printf("    [坐标] 窗类名=%s\n",
+                   QString::fromWCharArray(cls).toLocal8Bit().constData());
+            printf("    [坐标] GetWindowRect(物理)=(%d,%d)-(%d,%d) 尺寸=%d×%d 中心=%d,%d\n",
+                   rc.left, rc.top, rc.right, rc.bottom,
+                   rc.right - rc.left, rc.bottom - rc.top, rcCenter.x, rcCenter.y);
+            if (qw0) {
+                printf("    [坐标] Qt position=(%d,%d)  geometry=(%d,%d,%d×%d)  mapToGlobal(0,0)=(%d,%d)\n",
+                       qw0->position().x(), qw0->position().y(),
+                       qw0->geometry().x(), qw0->geometry().y(),
+                       qw0->geometry().width(), qw0->geometry().height(),
+                       tlG.x(), tlG.y());
+            }
+            printf("    [坐标] QCursor::pos()(逻辑)=%d,%d  GetCursorPos(物理)=%d,%d\n",
+                   qPos.x(), qPos.y(), realCur.x, realCur.y);
+            if (scr) {
+                printf("    [坐标] 主屏 几何(逻辑)=%d,%d,%d×%d  dpr=%g\n",
+                       scr->geometry().x(), scr->geometry().y(),
+                       scr->geometry().width(), scr->geometry().height(),
+                       scr->devicePixelRatio());
+            }
+            const qreal dpr0 = scr ? scr->devicePixelRatio() : 1.0;
+            const QPoint diff = tlG - QPoint(rc.left, rc.top);
+            printf("    [坐标] mapToGlobal(0,0) 与 GetWindowRect 左上角之差 = (%d,%d)  [应为 0 或 0/dpr]\n",
+                   diff.x(), diff.y());
+            const HWND hitC = WindowFromPoint(rcCenter);
+            wchar_t cls2[64]; GetClassNameW(hitC, cls2, 63);
+            printf("    [坐标] 命中测试A：WindowFromPoint(窗物理中心 %d,%d) = %p(%s)  期望=%p  一致=%d\n",
+                   rcCenter.x, rcCenter.y, reinterpret_cast<void *>(hitC),
+                   QString::fromWCharArray(cls2).toLocal8Bit().constData(),
+                   reinterpret_cast<void *>(h), int(hitC == h));
+            const POINT ptFromQt = { LONG(qRound(tlG.x() * dpr0)), LONG(qRound(tlG.y() * dpr0)) };
+            const HWND hitQ = WindowFromPoint(ptFromQt);
+            wchar_t cls3[64]; GetClassNameW(hitQ, cls3, 63);
+            printf("    [坐标] 命中测试B：WindowFromPoint(mapToGlobal×dpr %d,%d) = %p(%s)  期望=%p  一致=%d\n",
+                   ptFromQt.x, ptFromQt.y, reinterpret_cast<void *>(hitQ),
+                   QString::fromWCharArray(cls3).toLocal8Bit().constData(),
+                   reinterpret_cast<void *>(h), int(hitQ == h));
+        }
+
+        // 光标移到按钮上（Qt 逻辑坐标，与 pollHover 读的 QCursor::pos() 同域）
+        const QPointF btnGlobal = deskLyrics->unpinButtonGlobalForTest();
+        if (btnGlobal.isNull()) {
+            printf("[FAIL] 找不到『取消置顶』按钮（unpinBtnObj）\n");
+            fail++;
+            return endTest();
+        }
+        printf("    按钮中心(逻辑)=%.1f,%.1f  歌词窗中心=%d,%d\n",
+               btnGlobal.x(), btnGlobal.y(),
+               deskLyrics->centerGlobalForTest().x(), deskLyrics->centerGlobalForTest().y());
+        // 层级诊断：主窗若也带 TOPMOST，就会和置顶的桌面歌词抢同一层；再直接问系统
+        // 「压在我窗上面的是谁」，比猜坐标可靠。
+        if (h && mainWin) {
+            const HWND hm = reinterpret_cast<HWND>(mainWin->winId());
+            RECT mr{}; GetWindowRect(hm, &mr);
+            const LONG_PTR me = GetWindowLongPtr(hm, GWL_EXSTYLE);
+            wchar_t mc[64]; GetClassNameW(hm, mc, 63);
+            printf("    [层级] 主窗=%p(%s) EXSTYLE=0x%1lx TOPMOST=%d TRANSPARENT=%d 矩形=(%d,%d,%d,%d)\n",
+                   reinterpret_cast<void *>(hm),
+                   QString::fromWCharArray(mc).toLocal8Bit().constData(),
+                   quintptr(me), int((me & WS_EX_TOPMOST) != 0),
+                   int((me & WS_EX_TRANSPARENT) != 0),
+                   mr.left, mr.top, mr.right, mr.bottom);
+            const HWND prev = GetWindow(h, GW_HWNDPREV);   // 同一个层级带里压在我上面的窗
+            if (prev) {
+                wchar_t pc[64]; GetClassNameW(prev, pc, 63);
+                const LONG_PTR pe = GetWindowLongPtr(prev, GWL_EXSTYLE);
+                printf("    [层级] 压在我窗上面的 GW_HWNDPREV=%p(%s) TOPMOST=%d TRANSPARENT=%d 可见=%d\n",
+                       reinterpret_cast<void *>(prev),
+                       QString::fromWCharArray(pc).toLocal8Bit().constData(),
+                       int((pe & WS_EX_TOPMOST) != 0), int((pe & WS_EX_TRANSPARENT) != 0),
+                       int(IsWindowVisible(prev)));
+            } else {
+                printf("    [层级] GW_HWNDPREV=空（我上面没人）\n");
+            }
+        }
+        // 诊断：Qt 内部 flags 是否仍以为窗是"透明"（这是"点击到不了 QML"的嫌疑点）
+        if (QWindow *w = QWindow::fromWinId(reinterpret_cast<WId>(deskLyrics->winIdForTest()))) {
+            printf("    Qt侧 WindowTransparentForInput=%d  isActive=%d  visible=%d\n",
+                   int((w->flags() & Qt::WindowTransparentForInput) != 0),
+                   int(w->isActive()), int(w->isVisible()));
+            if (QQuickWindow *qw = qobject_cast<QQuickWindow *>(w)) {
+                if (QQuickItem *rootItem = qw->contentItem()) {
+                    if (QQuickItem *btnItem = rootItem->findChild<QQuickItem*>(QStringLiteral("unpinBtnObj"))) {
+                        const QPointF now = btnItem->mapToGlobal(btnItem->boundingRect().center());
+                        printf("    钮当前状态: visible=%d enabled=%d 中心现=%g,%g (移动=%g,%g)\n",
+                               int(btnItem->isVisible()), int(btnItem->isEnabled()),
+                               now.x(), now.y(), now.x() - btnGlobal.x(), now.y() - btnGlobal.y());
+                    }
+                }
+            }
+        }
+        QCursor::setPos(btnGlobal.toPoint());
+        pumpMs(350);   // 越过 100ms 轮询周期
+        check("光标在钮上 → pinnedHover=1", deskLyrics->pinnedHover(),
+              QStringLiteral("hover=%1").arg(int(deskLyrics->pinnedHover())));
+        printf("    悬停态   %s\n", qPrintable(exStyleTxt()));
+        const bool notTransparent = h && (GetWindowLongPtr(h, GWL_EXSTYLE) & WS_EX_TRANSPARENT) == 0;
+        check("悬停时穿透已摘除（EXSTYLE 的 TRANSPARENT=0）", notTransparent);
+
+        // ① 命中测试：屏幕像素坐标下那个点是不是我们窗口（Qt 逻辑坐标 → 物理像素）
+        const qreal dpr = qApp->primaryScreen() ? qApp->primaryScreen()->devicePixelRatio() : 1.0;
+        const POINT ptPix = { LONG(qRound(btnGlobal.x() * dpr)), LONG(qRound(btnGlobal.y() * dpr)) };
+        const HWND hit = WindowFromPoint(ptPix);
+        auto className = [](HWND w) -> QString {
+            if (!w) return QStringLiteral("空");
+            wchar_t b[64];
+            GetClassNameW(w, b, 63);
+            return QString::fromWCharArray(b);
+        };
+        check("命中测试：那个屏幕点落在我窗口上", hit == h,
+              QStringLiteral("WindowFromPoint=%1(%2) 期望=%3 dpr=%4 像素点=%5,%6")
+                  .arg(reinterpret_cast<quintptr>(hit), 0, 16).arg(className(hit))
+                  .arg(reinterpret_cast<quintptr>(h), 0, 16)
+                  .arg(dpr, 0, 'f', 2).arg(ptPix.x).arg(ptPix.y));
+
+        // ② 真点击（只在①通过时做，否则会打到用户别的窗口上）
+        bool sent = false;
+        if (hit == h) {
+            QCursor::setPos(btnGlobal.toPoint());
+            INPUT in[2] = {};
+            in[0].type = INPUT_MOUSE;
+            in[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+            in[1].type = INPUT_MOUSE;
+            in[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
+            sent = (SendInput(2, in, sizeof(in[0])) == 2);
+        }
+        pumpMs(450);
+        check("真点击送达 → 已取消置顶（pinned=0）", sent && !deskLyrics->isPinned(),
+              QStringLiteral("点下次数=%1 pinned=%2 hover=%3")
+                  .arg(int(sent)).arg(int(deskLyrics->isPinned())).arg(int(deskLyrics->pinnedHover())));
+        printf("    点击后   %s\n", qPrintable(exStyleTxt()));
+
+        return endTest();
+#endif
     }
 #endif // MUYUN_SELFTES
 
@@ -5736,6 +6230,13 @@ int main(int argc, char *argv[])
 
     const int ret = app.exec();
 
+    // ---- 退出收尾（新问题②：播放中托盘退出"未响应"的根因在此）----
+    // 旧代码直接 QThreadPool::waitForDone()：worker 里在途的音源解析/歌词/下载请求
+    // 若卡在网络，退出就无限干等（每次超时 20s 起、降级链还要串好几档）。
+    // 现在先置"正在退出"让在途请求 ≤200ms 内中止，再停播放内核，最后收工。
+    Muyun::HttpClient::beginShutdown();
+    Muyun::HttpClient::instance()->cancelAll();
+    if (player) player->stop();   // 停解码线程/声卡，避免其回调在销毁期访问已析构对象
     // 等待后台任务（音源解析/首页加载）结束，避免退出时的线程警告
     QThreadPool::globalInstance()->waitForDone();
     store->flushAll();

@@ -670,6 +670,7 @@ Rectangle {
     Popup {
         id: downloadPicker
         property var pendingSong: null
+        property string pendingKey: ""   // 弹窗这首歌的身份键（songKey 隔离探测结果）
         property string selectedQuality: downloads.downloadQuality
         property var sizes: ({})   // qualityId → bytes（-1 不可得；无键=探测中）
         anchors.centerIn: Overlay.overlay
@@ -686,8 +687,10 @@ Rectangle {
 
         Connections {
             target: downloads
-            function onQualitySizeReady(qid, bytes) {
+            function onQualitySizeReady(songKey, qid, bytes) {
                 if (!downloadPicker.visible) return
+                // 只认当前弹窗这首歌的探测结果（songKey 隔离，防串歌）
+                if (pendingSong && songKey !== downloadPicker.pendingKey) return
                 var s = downloadPicker.sizes
                 s[qid] = bytes
                 downloadPicker.sizes = s
@@ -698,7 +701,12 @@ Rectangle {
             // 每次打开时同步为全局默认（用户可临时改这一首的目标档）
             selectedQuality = downloads.downloadQuality
             sizes = ({})
-            if (pendingSong) downloads.probeSizes(pendingSong)
+            if (pendingSong) {
+                downloadPicker.pendingKey = pendingSong.platform === "local"
+                    ? ("local:" + (pendingSong.localPath || ""))
+                    : (((pendingSong.lx && pendingSong.lx.source) ? pendingSong.lx.source : pendingSong.platform) + ":" + pendingSong.id)
+                downloads.probeSizes(pendingSong)
+            }
         }
 
         contentItem: ColumnLayout {

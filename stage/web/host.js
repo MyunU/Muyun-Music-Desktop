@@ -154,12 +154,16 @@ const ICON = {
   pause: '<svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="5" y="4" width="5" height="16" rx="1"/><rect x="14" y="4" width="5" height="16" rx="1"/></svg>',
   repeat: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></svg>',
   repeat1: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/><path d="M11 10h1v4"/></svg>',
+  // 顺序播放专属图标（列表 + 向下箭头，与主程序 PlayBar 的 order.svg 同款）：
+  // 早先把顺序映射到 repeat 图标，和"列表循环"长得一模一样 → 全屏歌词页显示与
+  // 实际播放模式不符（用户 2026-10-04 反馈，HANDOFF 新问题③）。
+  order: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6.5h11"/><path d="M4 12h11"/><path d="M4 17.5h7"/><path d="M17.8 12.6v6.4"/><path d="M15.3 16.6l2.5 2.5 2.5-2.5"/></svg>',
   shuffle: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 2 4 4-4 4"/><path d="M2 22v-4a4 4 0 0 1 4-4h12"/><path d="m18 14 4 4-4 4"/><path d="M2 2v4a4 4 0 0 0 4 4h2"/><path d="M22 6h-6L4 18"/></svg>',
   volume: '<svg id="volume-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>',
   mute: '<svg id="volume-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="22" x2="16" y1="9" y2="15"/><line x1="16" x2="22" y1="9" y2="15"/></svg>',
   heart: '<svg class="heart-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/></svg>',
 }
-const MODE_ICONS = { sequence: ICON.repeat, loop: ICON.repeat, single: ICON.repeat1, shuffle: ICON.shuffle }
+const MODE_ICONS = { sequence: ICON.order, loop: ICON.repeat, single: ICON.repeat1, shuffle: ICON.shuffle }
 
 // ---------- DOM ----------
 const $ = (id) => document.getElementById(id)
@@ -255,7 +259,11 @@ function fmt (sec) {
   return Math.floor(t / 60) + ':' + String(t % 60).padStart(2, '0')
 }
 function setPlayIcon (playing) { el.play.innerHTML = playing ? ICON.pause : ICON.play }
-function setModeIcon (id) { el.mode.innerHTML = MODE_ICONS[id] || ICON.repeat }
+function setModeIcon (id) {
+  el.mode.innerHTML = MODE_ICONS[id] || ICON.repeat
+  // 驱动 CSS 高亮（mineradio.css 的 [data-mode=...] 规则此前因没人设 data-mode 从未生效）
+  el.mode.dataset.mode = id
+}
 function setVolIcon (v) { el.volBtn.innerHTML = v <= 0.001 ? ICON.mute : ICON.volume }
 
 // ---------- rAF：进度条/时间 ----------

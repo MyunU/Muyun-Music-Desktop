@@ -102,6 +102,31 @@ Item {
             }
         }
 
+        // 置顶态悬停：只显示「取消置顶」（其余 设置/关闭 不显示，#14）。
+        // ⚠ 置顶窗是"点击穿透"的，收不到 Qt 鼠标事件 → 悬停判断走 C++ 全局光标轮询出的
+        //   deskLyrics.pinnedHover（不是 barHover）；命中时 C++ 已顺带临时去掉穿透，钮才可点。
+        Item {
+            id: pinToolbarBox
+            z: 10
+            anchors.top: parent.top
+            anchors.right: parent.right
+            anchors.topMargin: 2
+            anchors.rightMargin: 4
+            width: pinToolbarRow.implicitWidth
+            height: pinToolbarRow.implicitHeight
+            visible: deskLyrics.pinned && deskLyrics.pinnedHover
+
+            Row {
+                id: pinToolbarRow
+                spacing: 2
+                ToolBtn {
+                    objectName: "unpinBtnObj"   // 自检定位用（--test-desklyric-click 走真鼠标点击）
+                    text: "取消置顶"; accent: true
+                    onClicked: deskLyrics.setPinned(false)
+                }
+            }
+        }
+
         MouseArea {
             id: dragArea
             anchors.fill: parent

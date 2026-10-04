@@ -35,8 +35,8 @@ static const QString kKeyIgnored   = QStringLiteral("updateIgnoredVersion");
 static const QString kKeyLastCheck = QStringLiteral("updateLastCheckAt");
 static const QString kKeyAuto      = QStringLiteral("updateAutoCheck");
 
-/// 自动检查间隔：每天最多一次（用户定：拉取失败也不重试轰炸）
-static const qint64 kAutoIntervalMs = 24LL * 60 * 60 * 1000;
+// 2026-10-04 用户拍板（HANDOFF 待办 #17）：节流从"每天最多一次"改成"每次进程启动查一次"。
+// kAutoIntervalMs / kKeyLastCheck 的时间戳不再参与节流判定（写入保留，供诊断）。
 
 static QString rawFeedUrl()
 {
@@ -258,6 +258,8 @@ QString UpdateChecker::statusText() const
         return QStringLiteral("发现新版本 v%1").arg(m_latest.version);
     if (m_status == QStringLiteral("ignored"))
         return QStringLiteral("v%1 已被忽略（不再自动提醒）").arg(m_latest.version);
+    if (m_status == QStringLiteral("snoozed"))
+        return QStringLiteral("v%1 稍后再提醒（本会话不再自动弹）").arg(m_latest.version);
     if (m_status == QStringLiteral("failed"))
         return QStringLiteral("检查更新失败：%1").arg(m_failReason);
     return QStringLiteral("尚未检查更新");
@@ -267,16 +269,8 @@ void UpdateChecker::autoCheck()
 {
     if (!m_autoCheck) return;
     if (!qEnvironmentVariableIsEmpty("MUYUN_UPDATE_DISABLE")) return;
-
-    qint64 interval = kAutoIntervalMs;
-    const QByteArray iv = qgetenv("MUYUN_UPDATE_INTERVAL_MS");
-    if (!iv.isEmpty()) interval = iv.toLongLong();
-
-    auto *store = DocumentStore::instance();
-    const qint64 last = store->readSync(kDoc, kKeyLastCheck, QVariant(0)).toLongLong();
-    const qint64 now = QDateTime::currentMSecsSinceEpoch();
-    // 每天最多一次：上次检查没过间隔就直接跳过（含"上次失败"的情况，不重试轰炸）
-    if (last > 0 && interval > 0 && now - last < interval) return;
+    // 每次进程启动查一次：同一进程内只查一次（手动检查也计入），防止启动路径被触发多次时连查
+    if (m_sessionChecked) return;
     startCheck(false);
 }
 
@@ -288,13 +282,14 @@ void UpdateChecker::checkForUpdates()
 void UpdateChecker::startCheck(bool manual)
 {
     if (m_checking) return;   // 同一时刻只跑一个
+    m_sessionChecked = true;  // 进程内已查过（每次启动最多一次）
     m_checking = true;
     m_manual = manual;
     m_failReason.clear();
     setStatus(QStringLiteral("checking"));
     emit stateChanged();
 
-    // 时间戳在"开始检查"时就落盘：失败也算今天查过（避免离线用户每次启动都打一次网络）
+    // 时间戳保留写入（诊断用），不再参与节流判定
     DocumentStore::instance()->write(kDoc, kKeyLastCheck,
                                      QDateTime::currentMSecsSinceEpoch());
 
@@ -431,8 +426,21 @@ void UpdateChecker::applyFeedBody(const QByteArray &body, bool manual)
         setStatus(QStringLiteral("ignored"));
         return;
     }
+    // "稍后"（会话级，不落盘）：同版本或更旧不再自动弹；出新版本或手动检查会再弹
+    if (!manual && !m_snoozedVersion.isEmpty()
+        && compareVersion(info.version, m_snoozedVersion) <= 0) {
+        setStatus(QStringLiteral("snoozed"));
+        return;
+    }
     setStatus(QStringLiteral("available"));
     emit updateFound(info.version, info.notes);
+}
+
+void UpdateChecker::snoozeLatestVersion()
+{
+    if (m_latest.version.isEmpty()) return;
+    m_snoozedVersion = m_latest.version;
+    if (m_status == QStringLiteral("available")) setStatus(QStringLiteral("snoozed"));
 }
 
 void UpdateChecker::finishFailed(const QString &reason)
