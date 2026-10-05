@@ -16,6 +16,18 @@ full-format audio effects (EQ / reverb / 3D surround / loudness), LX Music scrip
 
 ---
 
+## 界面预览
+
+| 主页 | 全屏歌词 · 封面模式 | 全屏歌词 · 滚筒模式 |
+|---|---|---|
+| ![主页](docs/screenshots/1.png) | ![全屏歌词·封面](docs/screenshots/2.png) | ![全屏歌词·滚筒](docs/screenshots/3.png) |
+
+| 音效控制 | 播放界面选择 | 局域网同步 |
+|---|---|---|
+| ![音效控制](docs/screenshots/4.png) | ![播放界面选择](docs/screenshots/5.png) | ![局域网同步](docs/screenshots/6.png) |
+
+---
+
 ## 功能
 
 ### 播放与队列
