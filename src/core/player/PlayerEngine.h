@@ -48,6 +48,8 @@ public:
     static QString cachePathForKey(const QString &cacheKey);
     /// 清扫过期播放缓存（>maxAgeDays 天的 .audio），返回删除数；启动时自动跑一次
     static int sweepAudioCache(int maxAgeDays = 3);
+    /// 删除当前播放的缓存文件（仅当文件在缓存目录内时），供上层「缓存损坏→删掉重下」用
+    void deleteCurrentCache();
     void pause();
     void resume();
     void stop();

@@ -82,7 +82,16 @@ PlayerEngine::PlayerEngine(QObject *parent) : QObject(parent)
                     m_playing = false;
                     m_loading = false;
                     m_positionTimer.stop();
-                    emit errorOccurred(QStringLiteral("播放卡住，尝试其它音源"));
+                    // 位置已贴末尾或回绕到开头 → 实质播完了，发 endOfMedia 前进下一首；
+                    // 否则（卡在中间）才走 errorOccurred 降档重试。
+                    // ⚠ 修复「播完→提示音质无法播放→重播同一首」：
+                    //   卡死时旧逻辑一律发 errorOccurred → onEngineError 降档重试
+                    //   → 重试成功后同一首歌从头再播，用户看到"播完了又重播"。
+                    if (pos >= dur - 3000 || pos <= 1000) {
+                        emit endOfMedia();
+                    } else {
+                        emit errorOccurred(QStringLiteral("播放卡住，尝试其它音源"));
+                    }
                     return;
                 }
             } else {
@@ -237,6 +246,13 @@ int PlayerEngine::sweepAudioCache(int maxAgeDays)
     }
     if (removed) qInfo() << "[cache] 清理过期播放缓存" << removed << "个";
     return removed;
+}
+
+void PlayerEngine::deleteCurrentCache()
+{
+    if (m_currentLocalPath.startsWith(audioCacheDir())) {
+        QFile::remove(m_currentLocalPath);
+    }
 }
 
 void PlayerEngine::onDownloadFinished(bool ok, const QString &err)
@@ -401,6 +417,11 @@ void PlayerEngine::startViaPlayer(const QString &localPath, qint64 fromMs, bool 
     m_loading = autoplay;
     // 末尾/卡死兜底：新曲从头播放、且是自启动 → 武装巡检
     m_watchArmed = autoplay;
+    // ⚠ 必须重启定时器：stop() 和 EndOfMedia 分支都会 m_watchTimer.stop()，
+    //   不重启 → 第一首歌之后巡检永久死亡 → EndOfMedia 丢失时无法补发
+    //   → 上层收不到 endOfMedia → 不前进下一首 → 用户看到"播完又重播同一首"。
+    //   handler 开头 if (!m_watchArmed ...) 自会摘停，无条件 start 也安全。
+    m_watchTimer.start();
     m_stallTicks = 0;
     m_lastWatchPos = -1;
     m_player->setSource(QUrl::fromLocalFile(localPath));

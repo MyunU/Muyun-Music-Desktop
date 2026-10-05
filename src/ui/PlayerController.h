@@ -255,6 +255,8 @@ private:
     QStringList m_pendingNext;   // “下一首播放”插入的歌 identityKey 队列：切歌时优先消费，无视播放模式
     QVector<int> m_shuffleDeck;  ///< 随机播放"不重复牌堆"：本轮内的播放顺序（播放列表索引），轮尽重洗
     int m_failStreak = 0;        // 连续自动跳歌失败计数（真正开播成功即清零，防整队列拉胯死循环）
+    int m_lastFinishedIndex = -1; // 上一首播完的索引（advanceOnPlayFailure 跳过它，防牌堆回绕→重播同一首）
+    bool m_wasPlaying = false;    // 当前曲是否已成功开播（开播后失败 → 不重试同曲，直接前进）
     bool m_loading = false;
     SongLyric m_lyric;
     bool m_lyricLoading = false;

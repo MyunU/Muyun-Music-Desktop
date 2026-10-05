@@ -52,7 +52,9 @@ PlayerController::PlayerController(QObject *parent) : QObject(parent)
     connect(m_engine, &PlayerEngine::playbackStateChanged, this,
             [this]() {
                 if (m_engine->state() == PlayerEngine::State::Playing) {
+                    m_wasPlaying = true;  // 记住已开播：开播后失败不重试同曲
                     m_failStreak = 0;    // 真播起来了：失败熔断计数清零
+                    m_lastFinishedIndex = -1; // 新曲开播 → 清除上一首记录
                     disarmSongWatchdog(); // 出声了：单首时限解武装
                 }
                 emit isPlayingChanged();
@@ -653,6 +655,7 @@ void PlayerController::resolveAndPlay()
         return;
     }
     m_playRetry = 0;
+    m_wasPlaying = false;
     resolveAndPlayAt(m_quality);
 }
 
@@ -890,6 +893,7 @@ void PlayerController::previous()
 
 void PlayerController::onEndOfMedia()
 {
+    m_lastFinishedIndex = m_currentIndex;   // 记住刚播完的曲，advanceOnPlayFailure 跳过它
     const int idx = nextIndexByMode(false);
     if (idx < 0) { emit isPlayingChanged(); return; }
     playIndex(idx);
@@ -897,6 +901,28 @@ void PlayerController::onEndOfMedia()
 
 void PlayerController::onEngineError(const QString &message)
 {
+    // ⚠ 开播后失败（位置已前进/音频流中断）→ 不重试同一首，直接前进下一首。
+    //   旧逻辑一律降档重试 → 重试成功后同曲从头再播，用户看到"播完了又重播"。
+    if (m_wasPlaying) {
+        m_wasPlaying = false;
+        // 开播后中断（缓存文件损坏/解码器崩溃）→ 删掉本曲的坏缓存，静默前进下一首。
+        // ⚠ 先删缓存再跳：删的是当前失败曲的缓存，跳的是下一首，两者不冲突。
+        const QString badKey = m_currentSong.identityKey() + QLatin1Char('@')
+                               + Muyun::qualityId(m_playTriedQ);
+        const QString badPath = PlayerEngine::cachePathForKey(badKey);
+        if (QFile::exists(badPath)) QFile::remove(badPath);
+        ++m_failStreak;
+        int idx = nextIndexByMode(false);
+        if (idx == m_currentIndex || idx == m_lastFinishedIndex)
+            idx = (idx + 1) % m_playlist.size();
+        if (idx >= 0 && idx < m_playlist.size()) {
+            startAt(idx, false);
+        } else {
+            m_failStreak = 0;
+            emit isPlayingChanged();
+        }
+        return;
+    }
     // 在线歌：QMediaPlayer 打不开（音源返回坏/失效文件）→ 自动降一档重试，
     // 逐级降到底仍失败才报错（用户"换源才好"的体验由这里兜底）
     if (!m_currentSong.isLocal() && m_playRetry < 6) {
@@ -922,8 +948,9 @@ void PlayerController::advanceOnPlayFailure(const QString &reason)
     if (!m_currentSong.isLocal() && m_playlist.size() > 1 && m_failStreak < limit) {
         ++m_failStreak;
         int idx = nextIndexByMode(false);
-        if (idx == m_currentIndex)                    // 单曲循环：强制前进一格，别卡在同一首
-            idx = (m_currentIndex + 1) % m_playlist.size();
+        if (idx == m_currentIndex || idx == m_lastFinishedIndex)
+            // 牌堆回绕可能指回刚播完/正失败的曲 → 强制顺跳一格，别原地打转
+            idx = (idx + 1) % m_playlist.size();
         if (idx >= 0 && idx < m_playlist.size()) {
             emit playFailed(reason + QStringLiteral("，已自动播放下一首"));
             // arm=false：整队列都挂时不续命单首时限（限时预算耗尽即停）
