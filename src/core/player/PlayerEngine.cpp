@@ -3,6 +3,7 @@
 #include "EffectPlayer.h"
 #include "PcmSource.h"
 #include "core/network/HttpClient.h"
+#include "core/localmusic/TagReader.h"
 #include "core/utils/AudioUrl.h"
 
 #include <QFile>
@@ -185,6 +186,8 @@ void PlayerEngine::play(const QUrl &url, const QString &cacheKey)
         nullptr,
         [engine, savePath](bool ok, const QString &err) {
             QMetaObject::invokeMethod(engine, [engine, savePath, ok, err]() {
+                // 下载失败 → 清掉半截文件，避免下次命中坏缓存（播到中间报错）
+                if (!ok) QFile::remove(savePath);
                 engine->onDownloadFinished(ok, err);
                 if (ok) {
                     // 校验下载内容是否为有效音频，避免把错误响应（JSON 等）喂给播放器/写进缓存
@@ -212,13 +215,24 @@ QString PlayerEngine::cachePathForKey(const QString &cacheKey)
            QString::number(qHash(cacheKey), 16) + QStringLiteral(".audio");
 }
 
-QString PlayerEngine::cachedAudioFile(const QString &cacheKey)
+QString PlayerEngine::cachedAudioFile(const QString &cacheKey, double expectedDurationSec)
 {
     if (cacheKey.isEmpty()) return QString();
     const QString path = cachePathForKey(cacheKey);
-    if (QFileInfo::exists(path) && QFileInfo(path).size() > 1024 && isAudioFile(path))
-        return path;
-    return QString();
+    if (!(QFileInfo::exists(path) && QFileInfo(path).size() > 1024 && isAudioFile(path)))
+        return QString();
+    // 期望时长已知 → 读真实时长对比：半截/损坏缓存（时长读不出或明显偏短）
+    // 直接删除返回空。否则播放命中坏文件 → 播到中间 FFmpeg 报错 → 误跳下一首
+    // （用户实测：清缓存后恢复正常 → 坏缓存是根因）。
+    if (expectedDurationSec > 0) {
+        const AudioInfo info = TagReader::readAudioInfo(path);
+        const int dur = info.durationSec;
+        if (dur <= 0 || qAbs(static_cast<double>(dur) - expectedDurationSec) > 3.0) {
+            QFile::remove(path);
+            return QString();
+        }
+    }
+    return path;
 }
 
 bool PlayerEngine::isAudioFile(const QString &path)

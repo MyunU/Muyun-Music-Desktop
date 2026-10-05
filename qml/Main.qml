@@ -43,10 +43,25 @@ Window {
     // 只认 root.visibility === Window.FullScreen 就会判错 → 表现为"全屏里 F11/ESC 只进不出"。
     // 与 C++ HotkeyManager::m_wantFull 同一套路（都跟着 visibilityChanged 走）。
     property bool fullScreenOn: false
+    property bool _wasMinimized: false   // 刚从任务栏恢复（用于补手动最大化的放置信息）
     onVisibilityChanged: {
         if (root.visibility === Window.FullScreen) root.fullScreenOn = true
         else if (root.visibility === Window.Windowed || root.visibility === Window.Maximized
                  || root.visibility === Window.Minimized) root.fullScreenOn = false
+        if (root.visibility === Window.Minimized) {
+            root._wasMinimized = true
+        } else if (root._wasMinimized) {
+            root._wasMinimized = false
+            // 手动最大化不走 Windows 最大化机制（ShowWindow SW_MAXIMIZE），
+            // 最小化→从任务栏恢复时 Windows 按普通尺寸放置、还可能丢掉 WS_MAXIMIZE 位
+            // → 表现为"最大化窗口回来变小/系统不认最大化"。恢复时补齐几何 + 样式位。
+            if (root.maximized) {
+                root.x = 0; root.y = 0
+                root.width = Screen.desktopAvailableWidth
+                root.height = Screen.desktopAvailableHeight
+                if (typeof frameless !== "undefined") frameless.setMaximizedStyle(true)
+            }
+        }
     }
 
     // 最大化：不依赖 Qt showMaximized()/visibility()（frameless+原生缩放 hack 下二者会误报，
@@ -70,6 +85,17 @@ Window {
         if (root.fullScreenOn) {
             root.toggleFullScreen()
             root.maximized = false
+            // ⚠ 退全屏后必须立即恢复几何：showNormal() 只会退回"上次可见状态"
+            // （可能仍是最大化尺寸）。不清标志、只赋几何也不行——下次点最大化
+            // 走 else 分支再赋工作区几何，窗口本来就那么大 → "按了没反应"（用户
+            // 实测：全屏→点→无效→再点才还原。此处一并恢复到还原目标/默认尺寸）。
+            if (_saved) { root.x = _rx; root.y = _ry; root.width = _rw; root.height = _rh }
+            else {
+                root.width = Math.round(Screen.width * 0.84)
+                root.height = Math.round(Screen.height * 0.87)
+                root.x = Math.round((Screen.width - root.width) / 2)
+                root.y = Math.round((Screen.height - root.height) / 2)
+            }
             return
         }
         if (maximized) {
@@ -2266,7 +2292,12 @@ Window {
         settingsPanel.open()
     }
 
-    function openLyricsPage() { lyricsPage.open() }
+    // 打开全屏歌词页前让搜索框失焦：否则搜索框仍持有焦点 → escClaimed=true →
+    // ESC 被"让位"给搜索框 → 必须点一下歌词页 ESC 才能退（用户实测）。
+    function openLyricsPage() {
+        searchInput.focus = false
+        lyricsPage.open()
+    }
     function closeLyricsPage() { lyricsPage.close() }
 
     // 榜单歌曲加载完成 -> 切到列表页（autoPlay=true 才自动播放）
@@ -2389,7 +2420,22 @@ Window {
     }
 
     // 全屏歌词页（覆盖内容，z:500；toast 已提到 z:1000 恒在上）
-    LyricsPage { id: lyricsPage; objectName: "lyricsPageObj" }
+    LyricsPage {
+        id: lyricsPage
+        objectName: "lyricsPageObj"
+        onClosed: {
+            // 全屏歌词页关闭后重建输入法上下文：本页是无输入控件的大 Item，期间
+            // Qt 摘掉整窗 IME；仅 reset/commit 不够（焦点项不重发 focusIn，Qt 不重建）。
+            // 等价"点窗外再点回"的机制：强制 IME 关联重走 + 焦点往返触发重建。
+            if (typeof imeGuard !== "undefined") imeGuard.forceRefresh()
+            Qt.inputMethod.reset()
+            Qt.inputMethod.commit()
+            if (searchInput.activeFocus) {
+                searchInput.focus = false
+                searchInput.forceActiveFocus()
+            }
+        }
+    }
 
     // 桌面歌词：由 C++ DesktopLyricsController 承载的独立置顶窗
     function toggleDesktopLyrics() { deskLyrics.toggle() }
@@ -2408,7 +2454,7 @@ Window {
     // 快捷键：Ctrl+L 开关歌词页；歌词页打开时 Esc 关闭、Space 播放/暂停
     Shortcut {
         sequence: "Ctrl+L"
-        onActivated: lyricsPage.visible ? lyricsPage.close() : lyricsPage.open()
+        onActivated: lyricsPage.visible ? lyricsPage.close() : root.openLyricsPage()
     }
     Shortcut {
         sequence: "Ctrl+D"

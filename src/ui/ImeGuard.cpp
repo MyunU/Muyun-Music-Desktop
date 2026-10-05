@@ -86,4 +86,23 @@ void ImeGuard::tick()
     ensureNow();
 }
 
+void ImeGuard::forceRefresh()
+{
+#ifdef Q_OS_WIN
+    const HWND h = hwndOf(m_window);
+    if (!h || !IsWindow(h)) return;
+    if (!IsWindowVisible(h)) return;
+    // 模拟"点窗外再点回"的窗口激活往返：Qt 只在收到 WM_ACTIVATE / WM_SETFOCUS
+    // 时才重建输入上下文（QWindowsInputContext::updateEnabled 由激活事件驱动，
+    // QML 内焦点切换不触发）。只发消息不真实切换窗口，无闪动。
+    SendMessage(h, WM_ACTIVATE, MAKEWPARAM(WA_ACTIVE, 0), 0);
+    SendMessage(h, WM_SETFOCUS, 0, 0);
+    ++m_restores;
+    IMELOG("模拟窗口激活往返重建 IME（hwnd=%p 第 %d 次）\n",
+           reinterpret_cast<void *>(h), m_restores);
+#else
+    // 非 Windows 无此问题
+#endif
+}
+
 } // namespace Muyun

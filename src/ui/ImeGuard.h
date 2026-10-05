@@ -42,6 +42,11 @@ public:
     /// 立刻检查一次并在被摘掉时接回；返回"这一次是否真的做了恢复"（自检用）
     Q_INVOKABLE bool ensureNow();
 
+    /// 强制重走一次 IME 关联（摘掉再接回默认上下文）。
+    /// 供「全屏歌词页关闭后」调用：那期间 Qt 可能摘掉上下文、焦点输入框的输入法
+    /// 没被认领 → 等价"点窗外再点回"的激活往返，主动触发重建。
+    Q_INVOKABLE void forceRefresh();
+
     /// 累计"发现上下文被摘掉并接回来"的次数（自检拿它证明断言不是空转）
     Q_INVOKABLE int restoreCount() const { return m_restores; }
 

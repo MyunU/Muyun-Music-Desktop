@@ -13,6 +13,8 @@
 
 namespace Muyun {
 
+class AudioPreloader;   // 预缓存（切歌后把接下来几首静默下载到缓存目录）
+
 /**
  * @brief 播放器控制器（暴露给 QML）
  *
@@ -282,6 +284,10 @@ private:
     void startAt(int index, bool armWatchdog);
 
     QTimer m_positionTimer;
+
+    // 预缓存：切歌后把接下来几首静默下载到缓存目录（见 AudioPreloader）
+    AudioPreloader *m_preloader = nullptr;
+    void restartPreloader();
 };
 
 } // namespace Muyun

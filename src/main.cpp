@@ -2094,6 +2094,7 @@ int main(int argc, char *argv[])
     // 输入法上下文守护：Qt 在"焦点对象不接受输入法"时会把整个窗口的 IME 摘掉，
     // 于是焦点不在输入框时 Ctrl+Space / Shift 切不了中英文（用户报的已知问题①）。
     auto *imeGuard = new ImeGuard(qApp);
+    engine.rootContext()->setContextProperty(QStringLiteral("imeGuard"), imeGuard);
 
     // Windows 无边框：原生边缘缩放 + 最大化几何修复（替代 QML MouseArea 抖动方案）
     auto *frameless = new FramelessWindow(qApp);

@@ -1,5 +1,6 @@
 #include "PlayerController.h"
 
+#include "AudioPreloader.h"
 #include "core/music/MusicSdk.h"
 #include "core/lyrics/LyricParser.h"
 #include "core/localmusic/TagReader.h"
@@ -29,6 +30,15 @@ static int songWatchdogMs()
     return 30000;
 }
 
+// 取更低的音质（枚举 K128=0 … Master=6，降档即 -1）；已是最低则返回 false
+static bool lowerQuality(AudioQuality q, AudioQuality *out)
+{
+    const int v = static_cast<int>(q);
+    if (v <= 0) return false;
+    *out = static_cast<AudioQuality>(v - 1);
+    return true;
+}
+
 PlayerController::PlayerController(QObject *parent) : QObject(parent)
 {
     m_engine = new PlayerEngine(this);
@@ -52,6 +62,27 @@ PlayerController::PlayerController(QObject *parent) : QObject(parent)
     connect(m_engine, &PlayerEngine::playbackStateChanged, this,
             [this]() {
                 if (m_engine->state() == PlayerEngine::State::Playing) {
+                    // 时长校验：引擎实际时长与平台接口时长不一致 → 文件损坏/不完整 → 停掉重下
+                    // ⚠ 单位：engine.duration() 毫秒，m_currentSong.duration 秒（Types.h L134）
+                    const qint64 engineDur = m_engine->duration();
+                    const qint64 apiDurMs = static_cast<qint64>(std::llround(m_currentSong.duration * 1000.0));
+                    if (engineDur > 0 && apiDurMs > 0 && qAbs(engineDur - apiDurMs) > 3000) {
+                        // 时长不一致 → 该缓存/文件损坏或音源给错 → 删坏缓存，降档重新获取
+                        const QString badKey = m_currentSong.identityKey() + QLatin1Char('@')
+                                               + Muyun::qualityId(m_playTriedQ);
+                        const QString badPath = PlayerEngine::cachePathForKey(badKey);
+                        if (QFile::exists(badPath)) QFile::remove(badPath);
+                        m_engine->stop();
+                        emit playFailed(QStringLiteral("音频时长异常，正在重新获取…"));
+                        AudioQuality lower;
+                        if (lowerQuality(m_playTriedQ, &lower)) {
+                            ++m_playRetry;
+                            resolveAndPlayAt(lower);
+                        } else {
+                            advanceOnPlayFailure(QStringLiteral("音频时长异常且无法降档"));
+                        }
+                        return;
+                    }
                     m_wasPlaying = true;  // 记住已开播：开播后失败不重试同曲
                     m_failStreak = 0;    // 真播起来了：失败熔断计数清零
                     m_lastFinishedIndex = -1; // 新曲开播 → 清除上一首记录
@@ -70,7 +101,15 @@ PlayerController::PlayerController(QObject *parent) : QObject(parent)
     connect(&m_songWatchdog, &QTimer::timeout, this,
             &PlayerController::onSongWatchdogTimeout);
 
+    // 预缓存：切歌/歌单变化 → 把接下来几首静默下载到缓存目录
+    m_preloader = new AudioPreloader(this);
+    connect(this, &PlayerController::currentSongChanged, this,
+            &PlayerController::restartPreloader);
+    connect(this, &PlayerController::playlistChanged, this,
+            &PlayerController::restartPreloader);
+
     restoreState();
+    restartPreloader();
 }
 
 // ---------------------------------------------------------------------------
@@ -637,15 +676,6 @@ void PlayerController::shufflePlaylist()
 // 内部
 // ---------------------------------------------------------------------------
 
-// 取更低的音质（枚举 K128=0 … Master=6，降档即 -1）；已是最低则返回 false
-static bool lowerQuality(AudioQuality q, AudioQuality *out)
-{
-    const int v = static_cast<int>(q);
-    if (v <= 0) return false;
-    *out = static_cast<AudioQuality>(v - 1);
-    return true;
-}
-
 void PlayerController::resolveAndPlay()
 {
     if (m_currentSong.isLocal()) {
@@ -703,11 +733,12 @@ void PlayerController::resolveAndPlayAt(AudioQuality startQ)
 {
     const Song song = m_currentSong;
 
-    // 播放缓存优先：按降级链查已缓存文件，命中则直接播本地文件——完全绕开音源解析
-    // （缓存过的歌重播无需音源脚本在线拉取，音源下线/无网也能播）
+    // 播放缓存优先：命中则直接播本地文件（预缓存/历史下载留下的有效文件），
+    // 绕开音源解析。损坏/不完整的缓存由 playbackStateChanged 的时长校验兜底：
+    // 校验失败 → 删该缓存 → 降档重新获取（不会死循环命中坏缓存）。
     for (const AudioQuality q : qualityFallbackChain(startQ)) {
         const QString cached = PlayerEngine::cachedAudioFile(
-            song.identityKey() + QLatin1Char('@') + Muyun::qualityId(q));
+            song.identityKey() + QLatin1Char('@') + Muyun::qualityId(q), song.duration);
         if (cached.isEmpty()) continue;
         m_playRetry = 0;
         m_playTriedQ = q;
@@ -718,6 +749,8 @@ void PlayerController::resolveAndPlayAt(AudioQuality startQ)
         return;
     }
 
+    // 无有效缓存 → 重新获取数据。
+    // 新流程：获取数据 → 对比时长 → 匹配则播放 → 不匹配/失败则降档重试 → 全败跳过。
     m_loading = true;
     emit isLoadingChanged();
 
@@ -901,27 +934,33 @@ void PlayerController::onEndOfMedia()
 
 void PlayerController::onEngineError(const QString &message)
 {
-    // ⚠ 开播后失败（位置已前进/音频流中断）→ 不重试同一首，直接前进下一首。
-    //   旧逻辑一律降档重试 → 重试成功后同曲从头再播，用户看到"播完了又重播"。
+    // 开播后失败：如果位置已贴末尾（实质播完了）→ 不重试，直接前进。
+    //   但如果在中间（临时中断/缓存损坏）→ 仍走降档重试，别误跳。
     if (m_wasPlaying) {
         m_wasPlaying = false;
-        // 开播后中断（缓存文件损坏/解码器崩溃）→ 删掉本曲的坏缓存，静默前进下一首。
-        // ⚠ 先删缓存再跳：删的是当前失败曲的缓存，跳的是下一首，两者不冲突。
+        // 开播后失败（贴末尾或中间）→ 当前音质文件多半损坏/半截，先删缓存，
+        // 避免下次命中同一个坏文件（用户实测：清缓存后恢复 → 坏缓存是根因）。
         const QString badKey = m_currentSong.identityKey() + QLatin1Char('@')
                                + Muyun::qualityId(m_playTriedQ);
         const QString badPath = PlayerEngine::cachePathForKey(badKey);
         if (QFile::exists(badPath)) QFile::remove(badPath);
-        ++m_failStreak;
-        int idx = nextIndexByMode(false);
-        if (idx == m_currentIndex || idx == m_lastFinishedIndex)
-            idx = (idx + 1) % m_playlist.size();
-        if (idx >= 0 && idx < m_playlist.size()) {
-            startAt(idx, false);
-        } else {
-            m_failStreak = 0;
-            emit isPlayingChanged();
+        const qint64 dur = m_engine->duration();
+        const qint64 pos = m_engine->position();
+        if (dur > 0 && pos >= dur - 3000) {
+            // 贴末尾 → 视为播完，静默前进
+            ++m_failStreak;
+            int idx = nextIndexByMode(false);
+            if (idx == m_currentIndex || idx == m_lastFinishedIndex)
+                idx = (idx + 1) % m_playlist.size();
+            if (idx >= 0 && idx < m_playlist.size()) {
+                startAt(idx, false);
+            } else {
+                m_failStreak = 0;
+                emit isPlayingChanged();
+            }
+            return;
         }
-        return;
+        // 中间中断 → 走正常降档重试（m_playRetry 不重置，沿用当前计数）
     }
     // 在线歌：QMediaPlayer 打不开（音源返回坏/失效文件）→ 自动降一档重试，
     // 逐级降到底仍失败才报错（用户"换源才好"的体验由这里兜底）
@@ -1117,6 +1156,13 @@ void PlayerController::restoreState()
         emit playlistChanged();
         emit currentIndexChanged();
     }
+}
+
+// 预缓存重启：切歌/歌单变化时，让 AudioPreloader 从当前曲之后逐首下载到缓存
+void PlayerController::restartPreloader()
+{
+    if (!m_preloader) return;
+    m_preloader->restart(m_playlist, m_currentIndex, m_quality);
 }
 
 } // namespace Muyun

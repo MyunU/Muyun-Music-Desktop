@@ -31,6 +31,9 @@ Item {
         return library.isFavorite(player.currentSong)
     }
 
+    // 关闭完成（动画播完、visible=false）后通知外层，用于重建输入法上下文
+    signal closed()
+
     function recompute() {
         var lines = player.lyricLines
         if (!lines || lines.length === 0) { activeIndex = -1; activeProgress = 0; return }
@@ -719,7 +722,10 @@ Item {
             if (typeof stageFx !== "undefined") stageFx.hide()
         }
     }
-    onVisibleChanged: syncStage()
+    onVisibleChanged: {
+        syncStage()
+        if (!visible) closed()   // 通知外层重建输入法上下文
+    }
     onStyleChanged: syncStage()
     onFavStateChanged: if (typeof stage !== "undefined" && stage.active) stage.setFav(favState)
 

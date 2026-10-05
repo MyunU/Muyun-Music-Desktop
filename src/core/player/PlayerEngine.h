@@ -41,7 +41,9 @@ public:
     void play(const QUrl &url, const QString &cacheKey = QString());
     /// 查询播放缓存：cacheKey（identityKey@音质）命中且文件有效则返回本地路径，否则空。
     /// 供上层在解析音源**之前**先走缓存——缓存歌重播无需音源脚本在线拉取。
-    static QString cachedAudioFile(const QString &cacheKey);
+    /// expectedDurationSec>0 时读真实时长对比：半截/损坏缓存直接删除返回空，
+    /// 避免命中坏文件 → 播到中间 FFmpeg 报错 → 误跳下一首。
+    static QString cachedAudioFile(const QString &cacheKey, double expectedDurationSec = 0.0);
     /// 播放缓存目录（%TEMP%/muyun-audio）。公开供启动清扫/自检定位文件。
     static QString audioCacheDir();
     /// cacheKey 对应的缓存文件路径（play 写盘与 cachedAudioFile 查询共用，防散列式漂移）
