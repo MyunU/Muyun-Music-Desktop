@@ -208,12 +208,12 @@ void PlayerEngine::play(const QUrl &url, const QString &cacheKey)
                 } else {
                     QFile::remove(tmpPath);
                 }
+                // ⚠ 只报一次失败：旧代码在 !ok（网络失败）时还会再调一次 onDownloadFinished，
+                //   errorOccurred 被 emit 两次 → onEngineError 降两档 → 6 次重试实际只试 3 档
+                //   → 更容易耗尽重试报"播放失败"。
                 engine->onDownloadFinished(good, err);
                 if (good) {
                     engine->startPlayback(savePath);
-                } else if (!ok) {
-                    engine->onDownloadFinished(false,
-                        QStringLiteral("音源返回的不是有效音频（可能已失效）"));
                 }
             }, Qt::QueuedConnection);
         });
@@ -273,13 +273,33 @@ bool PlayerEngine::verifyCacheDecodable(const QString &path, double expectedDura
                    << expectedDurationSec << "s" << path;
         return false;
     }
-    // 真读一帧：头部时长对得上但数据损坏（垃圾填充/全静音错误数据）的文件，
-    // open 成功、时长正常，却一帧都解不出 → 喂给播放器就是卡死/崩溃（FLAC/M4A 高发）
-    QVector<float> probeBuf(4096 * 2);
-    const int got = src->read(probeBuf.data(), 4096);
-    if (got <= 0) {
-        qWarning() << "[cache] 解码实测读不出帧（数据损坏）：" << path;
-        return false;
+    // 多点探测：文件开头正常但中途/末尾损坏的坏缓存（QMediaPlayer 打开即失败，
+    // 但头几帧解码器解得出）——只在开头读一帧会漏放。
+    // 在 0%、25%、50%、75% 各读一帧，全部通过才算好。
+    const int probeFrames = 4096;
+    QVector<float> probeBuf(probeFrames * 2);
+    const qint64 total = src->totalSamples();
+    if (total <= 0) {
+        // 未知总样本数（极少见），只读开头
+        const int got = src->read(probeBuf.data(), probeFrames);
+        if (got <= 0) {
+            qWarning() << "[cache] 解码实测读不出帧（数据损坏）：" << path;
+            return false;
+        }
+        return true;
+    }
+    static const int positions[] = {0, 25, 50, 75};
+    for (int pos : positions) {
+        const qint64 samplePos = total * pos / 100;
+        if (!src->seekToSample(samplePos)) {
+            qWarning() << "[cache] 解码实测 seek 失败 @%" << pos << path;
+            return false;
+        }
+        const int got = src->read(probeBuf.data(), probeFrames);
+        if (got <= 0) {
+            qWarning() << "[cache] 解码实测在" << pos << "%处读不出帧（数据损坏）：" << path;
+            return false;
+        }
     }
     return true;
 }

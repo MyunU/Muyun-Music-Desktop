@@ -45,6 +45,8 @@ class SettingsController : public QObject
     Q_PROPERTY(qint64 otherCacheSize READ otherCacheSize NOTIFY otherCacheSizeChanged)
     Q_PROPERTY(QString activeLxSourceId READ activeLxSourceId NOTIFY lxSourcesChanged)
     Q_PROPERTY(QVariantMap lxUpdateAlert READ lxUpdateAlert NOTIFY lxUpdateAlertChanged)
+    /// 音源脚本加载中（切换音源时主线程同步加载 QuickJS，UI 需禁用切换/显示加载中）
+    Q_PROPERTY(bool lxLoading READ lxLoading NOTIFY lxLoadingChanged)
     /// 是否允许显示更新提醒（用户可在设置里关闭）
     Q_PROPERTY(bool allowUpdateAlert READ allowUpdateAlert WRITE setAllowUpdateAlert NOTIFY allowUpdateAlertChanged)
     /// 关闭窗口行为："ask" 询问 / "minimize" 最小化到托盘 / "exit" 直接退出
@@ -130,6 +132,7 @@ signals:
     void importFailed(const QString &reason);
     void lxUpdateAlertChanged();
     void allowUpdateAlertChanged();
+    void lxLoadingChanged();
     void exitActionChanged();
     void playerStyleChanged();
     void embedChanged();
@@ -144,6 +147,7 @@ private:
     static bool doLoadLxScript(const QString &path, QString *err);
     /// 把活跃音源的名称/版本/描述合并进更新提醒 Map（脚本只 send log+updateUrl）
     void mergeActiveSourceMeta(QVariantMap &alert);
+    bool lxLoading() const { return m_lxLoading; }
 
     QVector<LxSourceInfo> m_sources;
     QString m_activeId;

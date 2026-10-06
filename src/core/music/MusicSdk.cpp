@@ -40,6 +40,50 @@ MusicSdk *MusicSdk::instance()
     return s_instance;
 }
 
+namespace {
+/// ⚠ LX 脚本 URL 轻量探测：GET 前 2KB，要求 200 且内容像音频（排除 404/HTML/JSON 错误页/空文件）。
+///   脚本常给"非空但必坏"的链接——数字 songId 冒充 songmid → 404；kg 缺 hash → 404；
+///   mg 返回空文件。不探测就把坏 URL 当成功返回 → 播放/下载才报错 → 兜底跨平台抓酷我
+///   （用户："QQ 的歌怎么能报酷我"）。
+bool lxUrlLooksPlayable(const QString &url)
+{
+    if (url.isEmpty()) return false;
+    HttpOptions opt;
+    opt.headers[QStringLiteral("Range")] = QStringLiteral("bytes=0-2047");
+    opt.timeoutMs = 6000;
+    const HttpResponse resp = HttpClient::instance()->get(url, opt);
+    // ⚠ 接受 200 和 206：带 Range 的探测正常返回 206 Partial Content，误判 206 会把
+    //   好 URL 当坏 → 音源失败 → 兜底跨平台抓酷我（实测踩过：念心 301→206 被丢）。
+    if (!resp.ok || (resp.status != 200 && resp.status != 206)) return false;
+    if (resp.body.isEmpty()) return false;
+    const QByteArray head = resp.body.left(16);
+    if (head.startsWith("<") || head.startsWith("{") || head.startsWith("[")) return false;
+    return true;
+}
+
+/// ⚠ 补全 musicInfo：老收藏/洛雪导入的 lx 字段常不完整（LxSongMeta::toMap 只写非空字段 →
+///   缺 key），传给脚本时 JS 访问 undefined 报 "Cannot convert undefined value to object"
+///   → 音源失败 → 兜底跨平台抓酷我（用户实测：同步给洛雪手机端也报同一错）。
+///   缺的关键字段用 songmid/id 兜底填充，保证脚本拿到的 musicInfo 无 undefined。
+void completeLxInfo(QVariantMap &info, const Song &s)
+{
+    auto fill = [&info](const char *k, const QString &v) {
+        if (!v.isEmpty() && !info.contains(QLatin1String(k))) info[QLatin1String(k)] = v;
+    };
+    const QString mid = info.value(QLatin1String("songmid")).toString();
+    const QString id  = mid.isEmpty() ? s.id : mid;
+    fill("songmid", id);
+    fill("songId", id);
+    fill("hash", id);
+    fill("strMediaMid", id);
+    fill("albumId", s.lx.albumId);
+    fill("albumMid", s.lx.albumMid.isEmpty() ? s.lx.albumId : s.lx.albumMid);
+    fill("albumName", s.lx.albumName.isEmpty() ? s.album : s.lx.albumName);
+    fill("img", s.lx.img.isEmpty() ? s.cover : s.lx.img);
+    fill("interval", s.lx.interval.isEmpty() ? Format::duration(s.duration) : s.lx.interval);
+}
+} // namespace
+
 void MusicSdk::registerSources()
 {
     // 五个在线平台音源
@@ -139,20 +183,68 @@ QString MusicSdk::resolveUrl(const Song &song, AudioQuality quality, AudioQualit
     // 1) 优先用 LX 自定义音源脚本解析（当已加载脚本且歌曲带 lx 元信息）
     // ⚠ 整段用读锁护住 m_lxEngine：取源期间禁止 loadLxScript 换实例（delete+new），否则 UAF。
     QReadLocker rl(&m_lxEngineLock);
-    if (m_lxEngine && m_lxEngine->inited() && song.hasLx) {
+
+    // 老版本内置搜索收藏的歌 hasLx=false、lx 元信息为空——直接跳过 LX 脚本会退化成
+    // 纯内置 API 取链（音质低/版权受限时报错），且内置 API 兜底 findMusic 可能跨平台
+    // 找到别家（酷我等）的链接。从歌曲基础元数据补构 lx 让 LX 脚本也参与优先尝试，
+    // 脚本失败再走内置 API（行为不变），保证"配了音源就走音源"。
+    Song lxSong = song;
+    if (!lxSong.hasLx && !lxSong.isLocal()) {
+        lxSong.lx.source = platformSourceCode(lxSong.platform);
+        lxSong.lx.songId = lxSong.id;
+        lxSong.lx.songmid = lxSong.id;
+        lxSong.lx.hash = lxSong.id;
+        lxSong.lx.albumId = lxSong.albumId;
+        lxSong.lx.albumName = lxSong.album;
+        lxSong.lx.img = lxSong.cover;
+        lxSong.lx.interval = Format::duration(lxSong.duration);
+        lxSong.hasLx = true;
+    }
+
+    // ⚠ tx 源 songmid 常被老收藏/洛雪快照存成数字 songId（如 101091484），而合法
+    //   QQ songmid 是 003xxx 这种带字母的 mid → 音源脚本拼出的 URL 下载 404 →
+    //   播放/下载兜底跨平台抓到酷我等别家（用户："QQ 的歌怎么能报酷我"）。
+    //   检测到纯数字 songmid 就用歌名在本平台重搜取合法条目，让 LX 脚本拿合法
+    //   songmid 解析；搜不到就维持原样走原有链路（内置/跨平台兜底）。
+    if (lxSong.lx.source == QStringLiteral("tx") && !lxSong.name.isEmpty()) {
+        static const QRegularExpression kNumOnly(QStringLiteral("^\\d+$"));
+        if (kNumOnly.match(lxSong.lx.songmid).hasMatch()) {
+            const SearchResult local = search(QStringLiteral("tx"), lxSong.name, 1, 8);
+            for (const auto &c : local.songs) {
+                if (c.identityKey() == lxSong.identityKey()) continue;  // 同一条跳过
+                if (c.lx.source != QStringLiteral("tx")) continue;
+                if (kNumOnly.match(c.lx.songmid).hasMatch()) continue;  // 仍是数字，放弃
+                lxSong = c;   // 换用合法条目
+                break;
+            }
+        }
+    }
+
+    if (m_lxEngine && m_lxEngine->inited() && lxSong.hasLx) {
         // 协议只有 128k/320k/flac/flac24bit 四档，且 inited.sources[src].qualitys
         // 就是"这个源支持哪些音质"的权威声明：先把自己的音质投影过去，
         // 再按声明过滤——没声明的档位直接跳过，别拿 undefined 去问脚本（白跑一次网络）。
-        const QStringList declared = m_lxEngine->declaredQualitys(song.lx.source);
+        const QStringList declared = m_lxEngine->declaredQualitys(lxSong.lx.source);
         const auto chain = qualityFallbackChain(quality);
         for (auto q : chain) {
             const QString reqId = LxScriptEngine::protocolQualityId(qualityId(q));
             if (!declared.isEmpty() && !declared.contains(reqId)) continue;
             // #10：这档刚失败过（60s 内）→ 跳过，别再打一次网络
-            const QString fkey = song.lx.source + QLatin1Char('@') + reqId;
+            //   ⚠ fkey 带 "lx:" 前缀：与内置同源分支（code@quality）区分——LX 脚本失败
+            //   不应连累内置源跳过同一档，否则会直接跨平台兜底抓酷我。
+            const QString fkey = QStringLiteral("lx:") + lxSong.lx.source
+                                 + QLatin1Char('@') + reqId;
             if (recentlyFailed(fkey)) continue;
-            const QString url = m_lxEngine->musicUrl(song.lx.source, song.lx.toMap(), reqId);
-            if (!url.isEmpty()) {
+            // ⚠ 补齐 musicInfo 字段（防脚本访问 undefined 报错）再调脚本
+            QVariantMap info = lxSong.lx.toMap();
+            completeLxInfo(info, lxSong);
+            const QString url = m_lxEngine->musicUrl(lxSong.lx.source, info, reqId);
+            // ⚠ 拒绝"非空但必坏"的脚本返回：① 含 undefined 的坏链接（kg 缺 hash 拼出
+            //   kg.php?id=undefined → 404）；② 轻量探测失败的链接（数字 songId 冒充
+            //   songmid → 404；mg 空文件；HTML/JSON 错误页）。不拦下就当成功返回 →
+            //   播放/下载才报错 → 兜底跨平台抓酷我。视为失败 → 记 failure → 降级下一档。
+            const bool badUrl = url.contains(QStringLiteral("undefined"));
+            if (!url.isEmpty() && !badUrl && lxUrlLooksPlayable(url)) {
                 if (actualQuality) {
                     bool known = false;
                     const AudioQuality real = qualityFromId(reqId, &known);
@@ -176,12 +268,42 @@ QString MusicSdk::resolveUrl(const Song &song, AudioQuality quality, AudioQualit
         const QString fkey = code + QLatin1Char('@') + qualityId(q);
         if (recentlyFailed(fkey)) continue;
         const QString url = src->getMusicUrl(song, q);
-        if (!url.isEmpty()) {
+        // ⚠ 内置源 URL 也做轻量探测：QQ strMediaMid 拼的 CDN 可能 403、坏 songmid 的
+        //   vkey 结果可能 404——不拦下就当成功返回 → 播放失败 → 兜底跨平台抓酷我。
+        if (!url.isEmpty() && lxUrlLooksPlayable(url)) {
             if (actualQuality) *actualQuality = q;
             return url;
         }
         rememberFailure(fkey);
     }
+
+    // ⚠ 跨平台兜底（findMusic）之前：先在本平台重搜一次，用合法元数据再走取链。
+    //   老收藏条目 songmid 常存错（QQ 数字 songId 冒充 songmid → 音源 404；kg 缺 hash 等），
+    //   若直接跨平台兜底会抓到酷我等别家链接（用户："QQ 的歌怎么能报酷我"）。
+    //   用歌名在本平台搜出合法条目，走 LX/内置再试；**候选必须歌名与原曲匹配**
+    //   （双向包含），防止搜索返回同名异曲/翻唱顶替。
+    if (!song.name.isEmpty()) {
+        const SearchResult local = search(code, song.name, 1, 8);
+        const QString sName = song.name.trimmed();
+        for (const auto &c : local.songs) {
+            if (c.identityKey() == song.identityKey()) continue;   // 同一条跳过
+            const QString cCode = c.lx.source.isEmpty() ? platformSourceCode(c.platform)
+                                                        : c.lx.source;
+            if (cCode != code) continue;                            // 只在本平台内兜
+            const QString cName = c.name.trimmed();
+            if (cName.isEmpty()) continue;
+            if (cName != sName && !cName.contains(sName) && !sName.contains(cName))
+                continue;                                           // 歌名不匹配，跳过
+            AudioQuality cQ = quality;
+            // 递归一次：候选条目元数据合法，走 LX/内置取链；条目不同不会无限递归。
+            const QString u = resolveUrl(c, quality, &cQ);
+            if (!u.isEmpty()) {
+                if (actualQuality) *actualQuality = cQ;
+                return u;
+            }
+        }
+    }
+
 
     // 兜底（智能换源）：本音源拿不到链接时，跨平台找同名歌曲借用其它音源的链接
     FindMusicRequest req;
@@ -215,10 +337,43 @@ QString MusicSdk::resolveUrlAtQuality(const Song &song, AudioQuality quality)
     // 不沿降级链、不跨平台兜底。上层（下载器）自己组织尝试顺序。
     {
         QReadLocker rl(&m_lxEngineLock);   // 护住 m_lxEngine，防异步切音源换实例
-        if (m_lxEngine && m_lxEngine->inited() && song.hasLx) {
-            const QString url = m_lxEngine->musicUrl(song.lx.source, song.lx.toMap(),
+        // 同 resolveUrl：老版本收藏的歌 hasLx=false，构造 lx 元数据让 LX 脚本参与
+        Song lxSong = song;
+        if (!lxSong.hasLx && !lxSong.isLocal()) {
+            lxSong.lx.source = platformSourceCode(lxSong.platform);
+            lxSong.lx.songId = lxSong.id;
+            lxSong.lx.songmid = lxSong.id;
+            lxSong.lx.hash = lxSong.id;
+            lxSong.lx.albumId = lxSong.albumId;
+            lxSong.lx.albumName = lxSong.album;
+            lxSong.lx.img = lxSong.cover;
+            lxSong.lx.interval = Format::duration(lxSong.duration);
+            lxSong.hasLx = true;
+        }
+        // 同 resolveUrl：tx 源纯数字 songmid（老收藏存成数字 songId）→ 本平台重搜取合法条目
+        if (lxSong.lx.source == QStringLiteral("tx") && !lxSong.name.isEmpty()) {
+            static const QRegularExpression kNumOnly(QStringLiteral("^\\d+$"));
+            if (kNumOnly.match(lxSong.lx.songmid).hasMatch()) {
+                const SearchResult local = search(QStringLiteral("tx"), lxSong.name, 1, 8);
+                for (const auto &c : local.songs) {
+                    if (c.identityKey() == lxSong.identityKey()) continue;
+                    if (c.lx.source != QStringLiteral("tx")) continue;
+                    if (kNumOnly.match(c.lx.songmid).hasMatch()) continue;
+                    lxSong = c;
+                    break;
+                }
+            }
+        }
+        if (m_lxEngine && m_lxEngine->inited() && lxSong.hasLx) {
+            // 补齐 musicInfo 字段（防脚本访问 undefined 报错）再调脚本
+            QVariantMap info = lxSong.lx.toMap();
+            completeLxInfo(info, lxSong);
+            const QString url = m_lxEngine->musicUrl(lxSong.lx.source, info,
                                                      qualityId(quality));
-            if (!url.isEmpty()) return url;
+            // 同 resolveUrl：拒绝 "undefined" 坏链接 + 轻量探测坏 URL（404/空文件/HTML 错误页）
+            if (!url.isEmpty() && !url.contains(QStringLiteral("undefined"))
+                    && lxUrlLooksPlayable(url))
+                return url;
             // 脚本没给链接时，仍然允许内置音源用同一首歌的元信息试一次
         }
     }

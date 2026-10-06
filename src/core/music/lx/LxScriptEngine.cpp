@@ -1319,7 +1319,14 @@ bool LxScriptEngine::loadScript(const QString &path, QString *error)
                     break;
                 }
             } else if (!m_timers.isEmpty()) {
-                QThread::msleep(1);   // 不在非 GUI 线程泵 Qt 事件循环（见 pumpUntilDone 注释）
+                // ⚠ 关键：GUI 线程（主线程）加载时泵 Qt 事件循环，避免"脚本加载卡死 UI"；
+                //   同时保证 QuickJS 实例在**主线程**创建（1.1.5 在 worker 线程加载导致
+                //   跨线程调用 musicUrl 返回空 → 播放失败兜底酷我，用户实测确认）。
+                //   非 GUI 线程才 msleep（worker 线程泵事件循环是 UB，见 pumpUntilDone 注释）。
+                if (QThread::currentThread() == QCoreApplication::instance()->thread())
+                    QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+                else
+                    QThread::msleep(1);
             } else {
                 break;   // 彻底没事可做
             }
@@ -1329,7 +1336,8 @@ bool LxScriptEngine::loadScript(const QString &path, QString *error)
         // 脚本可能在 send('inited') 后调用 checkUpdate()，该函数发 HTTP 请求，
         // Promise 尚未 resolve 时退出循环会导致 send('updateAlert') 永远不会被调用。
         if (m_inited) {
-            while ((JS_IsJobPending(m_rt) || !m_timers.isEmpty()) && timer.elapsed() < 10000) {
+            // 更新提醒不是播放关键路径：只等 2s（脚本 checkUpdate 网络慢时主线程少被占用）
+            while ((JS_IsJobPending(m_rt) || !m_timers.isEmpty()) && timer.elapsed() < 2000) {
                 runDueTimers();
                 if (JS_IsJobPending(m_rt)) {
                     int r = JS_ExecutePendingJob(m_rt, &m_ctx);
@@ -1339,7 +1347,11 @@ bool LxScriptEngine::loadScript(const QString &path, QString *error)
                         break;
                     }
                 } else if (!m_timers.isEmpty()) {
-                    QThread::msleep(1);   // 不在非 GUI 线程泵 Qt 事件循环（见 pumpUntilDone 注释）
+                    // 同前：GUI 线程泵事件循环（不冻结 UI），非 GUI 线程 msleep
+                    if (QThread::currentThread() == QCoreApplication::instance()->thread())
+                        QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+                    else
+                        QThread::msleep(1);
                 } else {
                     break;
                 }

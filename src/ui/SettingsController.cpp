@@ -352,56 +352,43 @@ void SettingsController::syncActiveLxScript()
         }
     }
 
-    // ⚠ 脚本加载（QuickJS init + checkUpdate，最长十几秒）绝不能在主线程同步跑——
-    //   那是"切换音源就卡死未响应"的真凶。改成后台线程加载，完成后回主线程刷新 UI。
-    //   卸载（空路径）很快，直接主线程做。
+    // ⚠ 主线程同步加载：QuickJS 必须在主线程创建（worker 线程加载 → 跨线程调用
+    //   musicUrl 返回空 → 播放失败兜底酷我，用户实测确认）。加载期间 m_lxLoading=true
+    //   供 QML 禁用切换/显示"加载中"；loadScript 内等待脚本异步逻辑时会泵事件循环
+    //   （processEvents），UI 不会完全冻结。
+    if (m_lxLoading) { m_lxPendingReload = true; return; }
+    m_lxLoading = true;
+    emit lxLoadingChanged();
+
     if (activePath.isEmpty()) {
         doLoadLxScript(QString(), nullptr);
         m_updateAlert.clear();
+        m_lxLoading = false;
+        emit lxLoadingChanged();
+        emit lxSourcesChanged();
         return;
     }
 
-    // 已有加载在途：记下"要重载"，本轮完成后再补做一次（保证最终落在用户最后一次选择上）。
-    if (m_lxLoading) { m_lxPendingReload = true; return; }
-    m_lxLoading = true;
+    QString err;
+    if (!doLoadLxScript(activePath, &err)) {
+        qWarning() << "[Settings] LX 脚本加载失败:" << err;
+        emit message(QStringLiteral("音源脚本加载失败：%1").arg(err));
+        m_updateAlert.clear();
+        emit lxUpdateAlertChanged();
+    } else if (m_allowUpdateAlert) {
+        m_updateAlert = MusicSdk::instance()->lxUpdateAlert();
+        mergeActiveSourceMeta(m_updateAlert);
+        if (!m_updateAlert.isEmpty()) emit lxUpdateAlertChanged();
+    }
+    m_lxLoading = false;
+    emit lxLoadingChanged();
+    emit lxSourcesChanged();   // 让抽屉里"当前音源"勾选/状态刷新
 
-    const QString path = activePath;
-    auto *watcher = new QFutureWatcher<QPair<bool, QString>>(this);
-    connect(watcher, &QFutureWatcher<QPair<bool, QString>>::finished, this,
-            [this, watcher]() {
-        watcher->deleteLater();
-        const auto res = watcher->result();
-        m_lxLoading = false;
-        const bool ok = res.first;
-        const QString err = res.second;
-
-        // 结果落地必须在主线程：这里已在主线程（watcher finished 回调）
-        if (!ok) {
-            qWarning() << "[Settings] LX 脚本加载失败:" << err;
-            emit message(QStringLiteral("音源脚本加载失败：%1").arg(err));
-            m_updateAlert.clear();
-            emit lxUpdateAlertChanged();
-        } else if (m_allowUpdateAlert) {
-            m_updateAlert = MusicSdk::instance()->lxUpdateAlert();
-            mergeActiveSourceMeta(m_updateAlert);
-            if (!m_updateAlert.isEmpty()) emit lxUpdateAlertChanged();
-        }
-        emit lxSourcesChanged();   // 让抽屉里"当前音源"勾选/状态刷新
-
-        // 加载期间用户又切了一次 → 用最新目标补做一轮
-        if (m_lxPendingReload) {
-            m_lxPendingReload = false;
-            syncActiveLxScript();
-        }
-    });
-
-    // 后台线程执行阻塞式脚本加载；QPointer 守卫 this（SettingsController 随 app 生命周期，一般安全）
-    QPointer<SettingsController> self(this);
-    watcher->setFuture(QtConcurrent::run([self, path]() -> QPair<bool, QString> {
-        QString e;
-        const bool r = MusicSdk::instance()->loadLxScript(path, &e);
-        return qMakePair(r, e);
-    }));
+    // 加载期间用户又切了一次 → 用最新目标补做一轮
+    if (m_lxPendingReload) {
+        m_lxPendingReload = false;
+        syncActiveLxScript();
+    }
 }
 
 /// 把活跃音源的名称/版本/描述合并进更新提醒 Map。

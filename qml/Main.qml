@@ -1509,9 +1509,11 @@ Window {
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
                         onClicked: {
+                            if (settings.lxLoading) { notify("音源加载中，请稍候…"); return }
                             if (!srcRow.isCurrent) {
                                 settings.setActiveLxSource(srcRow.modelData.id)
-                                notify("已切换音源：" + srcRow.modelData.name)
+                                notify(settings.lxLoading ? "正在加载音源：" + srcRow.modelData.name
+                                                          : "已切换音源：" + srcRow.modelData.name)
                             }
                             sourceDrawer.close()
                         }

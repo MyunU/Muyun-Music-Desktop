@@ -15,6 +15,7 @@ class QQuickMouseEvent;   // 定义在 Qt 私有头里；自检只往 clicked �
 #include <QLocale>
 #include <QDebug>
 #include <QThreadPool>
+#include <QtConcurrent>
 #include <QTimer>
 #include <QDir>
 #include <QFile>
@@ -782,21 +783,47 @@ static int runDownloadSelfTest(const QString &keyword, const QString &qualityIdA
         printf("[FATAL] no LX scripts in %s\n", qPrintable(srcDir));
         return 1;
     }
+    // 优先加载用户活跃脚本（lx-sources.json activeId），复现用户真实播放链路
     QString scriptPath = d.absoluteFilePath(js.first());
+    {
+        const QVariantMap doc = DocumentStore::instance()->readAll(QStringLiteral("lx-sources"));
+        const QString activeId = doc.value(QStringLiteral("activeId")).toString();
+        for (const auto &fi : d.entryInfoList({QStringLiteral("*.js")}, QDir::Files)) {
+            if (fi.baseName() == activeId) { scriptPath = fi.absoluteFilePath(); break; }
+        }
+    }
     QString err;
-    if (!MusicSdk::instance()->loadLxScript(scriptPath, &err)) {
+    // MUYUN_WORKER_LOAD=1 时模拟 GUI 的 SettingsController 异步加载（worker 线程）
+    if (qEnvironmentVariableIsSet("MUYUN_WORKER_LOAD")) {
+        auto fut = QtConcurrent::run([scriptPath]() {
+            QString e;
+            return MusicSdk::instance()->loadLxScript(scriptPath, &e) ? QString() : e;
+        });
+        err = fut.result();
+        printf("[OK] script loaded (worker): %s\n", qPrintable(QFileInfo(scriptPath).fileName()));
+    } else if (!MusicSdk::instance()->loadLxScript(scriptPath, &err)) {
         printf("[WARN] load script failed: %s\n", qPrintable(err));
     } else {
-        printf("[OK] script loaded: %s\n", qPrintable(js.first()));
+        printf("[OK] script loaded: %s\n", qPrintable(QFileInfo(scriptPath).fileName()));
     }
 
     // 2) 搜索
     SearchResult r = MusicSdk::instance()->searchAll(keyword, 1, 10);
     printf("[OK] searchAll returned %d songs\n", r.songs.size());
     if (r.songs.isEmpty()) { printf("[FATAL] no results\n"); return 2; }
+    for (int i = 0; i < r.songs.size(); ++i) {
+        const Song &s = r.songs.at(i);
+        const QString sc = s.lx.source.isEmpty() ? platformSourceCode(s.platform) : s.lx.source;
+        printf("  [%d] %s - %s [%s] id=%s songmid=%s\n", i, qPrintable(s.artist),
+               qPrintable(s.name), qPrintable(sc), qPrintable(s.id),
+               qPrintable(s.lx.songmid));
+    }
     Song target = r.songs.first();
     printf("  target: %s - %s [%s]\n", qPrintable(target.artist),
            qPrintable(target.name), qPrintable(target.sourceCode()));
+    printf("  target.id=%s lx.songmid=%s lx.source=%s hasLx=%d dur=%f\n",
+           qPrintable(target.id), qPrintable(target.lx.songmid),
+           qPrintable(target.lx.source), int(target.hasLx), target.duration);
 
     // 3) 加入下载队列（DownloadController 是 QObject，用栈对象即可）
     DownloadController dl;

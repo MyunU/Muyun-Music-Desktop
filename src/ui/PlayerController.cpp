@@ -76,23 +76,17 @@ PlayerController::PlayerController(QObject *parent) : QObject(parent)
                         m_durationCheckArmed = false;   // 先 disarm：本次校验只做一次，防信号链重入
                         const qint64 engineDur = m_engine->duration();
                         const qint64 apiDurMs = static_cast<qint64>(std::llround(m_currentSong.duration * 1000.0));
-                        if (engineDur > 0 && apiDurMs > 0 && qAbs(engineDur - apiDurMs) > 3000) {
-                            // 时长不一致 → 该缓存/文件损坏或音源给错 → 删坏缓存，降档重新获取
-                            const QString badKey = m_currentSong.identityKey() + QLatin1Char('@')
-                                                   + Muyun::qualityId(m_playTriedQ);
-                            const QString badPath = PlayerEngine::cachePathForKey(badKey);
-                            if (QFile::exists(badPath)) QFile::remove(badPath);
-                            m_engine->stop();
-                            emit playFailed(QStringLiteral("音频时长异常，正在重新获取…"));
-                            AudioQuality lower;
-                            if (lowerQuality(m_playTriedQ, &lower)) {
-                                ++m_playRetry;
-                                resolveAndPlayAt(lower);
-                            } else {
-                                advanceOnPlayFailure(QStringLiteral("音频时长异常且无法降档"));
-                            }
-                            return;
-                        }
+                        // ⚠ 开播时长校验只做**日志观察**，不再删缓存/降档重下：
+                        //   ① 音源脚本的 interval 是估计值，常与实际音频差几十秒（实测差 37s），
+                        //     绝对差 >3s 会把这类正常文件误杀 → 删缓存 → 降档重下同一文件 → 循环失败；
+                        //   ② 试听片段（几秒~几十秒预览）本身是完整音频，能进 Playing 就该能播，
+                        //     1.1.4 就是直接播的——拿它当"坏文件"删掉重下还是同一试听，必然失败；
+                        //   ③ 真坏文件（半截/损坏）会在播放中报 errorOccurred → onEngineError
+                        //     已有删缓存 + 降档兜底，不需要这里重复拦截。
+                        if (engineDur > 0 && apiDurMs > 0 && engineDur < apiDurMs / 10)
+                            qWarning() << "[duration] 文件时长异常偏短（< 声明 10%）：实际"
+                                       << engineDur << "ms vs 声明" << apiDurMs << "ms ("
+                                       << m_currentSong.name << ")";
                     }
                     m_wasPlaying = true;  // 记住已开播：开播后失败不重试同曲
                     m_failStreak = 0;    // 真播起来了：失败熔断计数清零
@@ -973,16 +967,42 @@ void PlayerController::onEndOfMedia()
 
 void PlayerController::onEngineError(const QString &message)
 {
+    // ⚠ 先删坏缓存——**无论是否已开播**（这是 1.1.7 仍"播放失败、手清缓存才好"的根因）：
+    //   缓存命中坏文件时，QMediaPlayer 打开即失败、**从未进入 Playing** → m_wasPlaying 一直是
+    //   false → 若只在下面 m_wasPlaying 分支里删缓存，坏文件永远不会被删；而降档重试走
+    //   resolveAndPlayAt，缓存查询用的是 m_wantedQuality（用户选的档，降档递归**不变**）→
+    //   于是每次都命中同一个坏缓存 → 6 次降档全撞同一个坏文件 → advanceOnPlayFailure
+    //   → 表现为"怎么都播不了，手动清 %TEMP%/muyun-audio 就好了"。
+    //   删掉后：降档重试查同一 key → 已不存在 → 转去下载 → 拿到完整文件 → 正常播放。
+    //
+    //   **即时失败（m_wasPlaying==false）** 额外清光同歌所有音质档的缓存：
+    //   坏缓存可能不止当前这一档（上次降档链留下的其他档也可能坏），
+    //   清干净后降档重试不会碰到第二块坏石头。
+    const bool wasPlaying = m_wasPlaying;   // 记住原始值，后面判断"即时失败 vs 中途断开"
+    {
+        const QString songKey = m_currentSong.identityKey();
+        if (wasPlaying) {
+            // 中途断开：只删当前音质这一档
+            const QString badKey = songKey + QLatin1Char('@') + Muyun::qualityId(m_playTriedQ);
+            const QString badPath = PlayerEngine::cachePathForKey(badKey);
+            if (QFile::exists(badPath)) QFile::remove(badPath);
+        } else {
+            // 即时失败（缓存坏/QMediaPlayer 打开即报错）：清光所有档
+            const auto allQ = {AudioQuality::Master, AudioQuality::Atmos, AudioQuality::HiRes,
+                               AudioQuality::Flac24Bit, AudioQuality::Flac, AudioQuality::K320,
+                               AudioQuality::K128};
+            for (auto q : allQ) {
+                const QString badPath = PlayerEngine::cachePathForKey(
+                    songKey + QLatin1Char('@') + Muyun::qualityId(q));
+                if (QFile::exists(badPath)) QFile::remove(badPath);
+            }
+        }
+    }
+
     // 开播后失败：如果位置已贴末尾（实质播完了）→ 不重试，直接前进。
     //   但如果在中间（临时中断/缓存损坏）→ 仍走降档重试，别误跳。
-    if (m_wasPlaying) {
+    if (wasPlaying) {
         m_wasPlaying = false;
-        // 开播后失败（贴末尾或中间）→ 当前音质文件多半损坏/半截，先删缓存，
-        // 避免下次命中同一个坏文件（用户实测：清缓存后恢复 → 坏缓存是根因）。
-        const QString badKey = m_currentSong.identityKey() + QLatin1Char('@')
-                               + Muyun::qualityId(m_playTriedQ);
-        const QString badPath = PlayerEngine::cachePathForKey(badKey);
-        if (QFile::exists(badPath)) QFile::remove(badPath);
         const qint64 dur = m_engine->duration();
         const qint64 pos = m_engine->position();
         if (dur > 0 && pos >= dur - 3000) {
@@ -1002,12 +1022,16 @@ void PlayerController::onEngineError(const QString &message)
         // 中间中断 → 走正常降档重试（m_playRetry 不重置，沿用当前计数）
     }
     // 在线歌：QMediaPlayer 打不开（音源返回坏/失效文件）→ 自动降一档重试，
-    // 逐级降到底仍失败才报错（用户"换源才好"的体验由这里兜底）
+    // 逐级降到底仍失败才报错（用户"换源才好"的体验由这里兜底）。
+    // ⚠ 即时失败（wasPlaying==false，坏缓存被清后重试）→ **不弹报错**，静默降档。
+    //   用户看到的就是"加载→出声"，不会看到"音源返回的不是有效音频"那种旧报错。
     if (!m_currentSong.isLocal() && m_playRetry < 6) {
         AudioQuality lower;
         if (lowerQuality(m_playTriedQ, &lower)) {
             ++m_playRetry;
-            emit playFailed(QStringLiteral("当前音质无法播放，降档重试…"));
+            if (wasPlaying) {
+                emit playFailed(QStringLiteral("当前音质无法播放，降档重试…"));
+            }
             resolveAndPlayAt(lower);
             return;
         }
