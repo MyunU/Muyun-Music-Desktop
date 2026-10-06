@@ -14,6 +14,7 @@
 #include <QMetaObject>
 #include <QMediaDevices>
 #include <QDateTime>
+#include <QCoreApplication>
 #include <QElapsedTimer>
 
 namespace Muyun {
@@ -179,25 +180,40 @@ void PlayerEngine::play(const QUrl &url, const QString &cacheKey)
     if (QFileInfo::exists(savePath))
         QFile::remove(savePath);   // 残留的无效/半截缓存清掉重下
 
+    // ⚠ 下载写唯一 .tmp 文件（加 pid+时间戳），完成后原子 rename 到最终路径。
+    //   否则：① 预缓存/播放同时写同一 .tmp → 文件损坏 → rename 后播放崩溃；
+    //   ② 播放端打开半截文件 → FFmemo 后端读到被写入/删除的文件 → 崩溃退出。
+    const QString tmpPath = savePath + QStringLiteral(".tmp.%1.%2")
+                                .arg(QCoreApplication::applicationPid())
+                                .arg(QDateTime::currentMSecsSinceEpoch());
+
     auto *engine = this;
     HttpOptions opt;
     opt.referer = refererForAudioUrl(url.toString());
-    HttpClient::instance()->downloadFile(url.toString(), savePath, opt,
+    HttpClient::instance()->downloadFile(url.toString(), tmpPath, opt,
         nullptr,
-        [engine, savePath](bool ok, const QString &err) {
-            QMetaObject::invokeMethod(engine, [engine, savePath, ok, err]() {
-                // 下载失败 → 清掉半截文件，避免下次命中坏缓存（播到中间报错）
-                if (!ok) QFile::remove(savePath);
-                engine->onDownloadFinished(ok, err);
-                if (ok) {
-                    // 校验下载内容是否为有效音频，避免把错误响应（JSON 等）喂给播放器/写进缓存
-                    if (!isAudioFile(savePath)) {
-                        QFile::remove(savePath);
-                        engine->onDownloadFinished(false,
-                            QStringLiteral("音源返回的不是有效音频（可能已失效）"));
-                        return;
+        [engine, savePath, tmpPath](bool ok, const QString &err) {
+            QMetaObject::invokeMethod(engine, [engine, savePath, tmpPath, ok, err]() {
+                bool good = ok;
+                if (ok && !isAudioFile(tmpPath)) {
+                    QFile::remove(tmpPath);
+                    good = false;
+                }
+                if (good) {
+                    // 原子 rename：要么完整文件，要么不存在，播放器永远不会看到半截
+                    if (!QFile::rename(tmpPath, savePath)) {
+                        QFile::remove(tmpPath);
+                        good = false;
                     }
+                } else {
+                    QFile::remove(tmpPath);
+                }
+                engine->onDownloadFinished(good, err);
+                if (good) {
                     engine->startPlayback(savePath);
+                } else if (!ok) {
+                    engine->onDownloadFinished(false,
+                        QStringLiteral("音源返回的不是有效音频（可能已失效）"));
                 }
             }, Qt::QueuedConnection);
         });
@@ -224,6 +240,9 @@ QString PlayerEngine::cachedAudioFile(const QString &cacheKey, double expectedDu
     // 期望时长已知 → 读真实时长对比：半截/损坏缓存（时长读不出或明显偏短）
     // 直接删除返回空。否则播放命中坏文件 → 播到中间 FFmpeg 报错 → 误跳下一首
     // （用户实测：清缓存后恢复正常 → 坏缓存是根因）。
+    // ⚠ 这只是"轻校验"：读标签/容器头出的时长。FLAC STREAMINFO / MP3 Xing / M4A moov
+    //   都在文件头，坏文件（数据被截断/填充垃圾）时长照样读得"完整"→ 会放行。
+    //   真正的硬校验在 verifyCacheDecodable（播放前解码实测），别只依赖这里。
     if (expectedDurationSec > 0) {
         const AudioInfo info = TagReader::readAudioInfo(path);
         const int dur = info.durationSec;
@@ -233,6 +252,36 @@ QString PlayerEngine::cachedAudioFile(const QString &cacheKey, double expectedDu
         }
     }
     return path;
+}
+
+bool PlayerEngine::verifyCacheDecodable(const QString &path, double expectedDurationSec)
+{
+    if (path.isEmpty() || !QFileInfo::exists(path)) return false;
+    // 解码后端试 open：打不开（头损坏/无音频流/容器不对）→ 坏缓存
+    QString err;
+    std::unique_ptr<PcmSource> src(createPcmSource(path, &err));
+    if (!src) {
+        qWarning() << "[cache] 解码实测失败（打不开）：" << err << path;
+        return false;
+    }
+    // 解码器实测时长 vs 期望：差 >3s 判坏（覆盖"容器头声称完整、实际数据被截断"——
+    // 半截 MP3/FLAC 的解码器时长会偏短，这里就拦下）
+    const qint64 decDurMs = src->durationMs();
+    if (decDurMs <= 0 || (expectedDurationSec > 0
+            && qAbs(decDurMs / 1000.0 - expectedDurationSec) > 3.0)) {
+        qWarning() << "[cache] 解码实测时长不符：" << decDurMs << "ms vs 期望"
+                   << expectedDurationSec << "s" << path;
+        return false;
+    }
+    // 真读一帧：头部时长对得上但数据损坏（垃圾填充/全静音错误数据）的文件，
+    // open 成功、时长正常，却一帧都解不出 → 喂给播放器就是卡死/崩溃（FLAC/M4A 高发）
+    QVector<float> probeBuf(4096 * 2);
+    const int got = src->read(probeBuf.data(), 4096);
+    if (got <= 0) {
+        qWarning() << "[cache] 解码实测读不出帧（数据损坏）：" << path;
+        return false;
+    }
+    return true;
 }
 
 bool PlayerEngine::isAudioFile(const QString &path)
@@ -520,6 +569,8 @@ void PlayerEngine::resume()
 
 void PlayerEngine::stop()
 {
+    if (m_stopping) return;   // 重入保护：stop 期间的信号链再触发 stop 直接忽略（防递归栈溢出）
+    m_stopping = true;
     m_positionTimer.stop();
     m_nudgeTimer.stop();
     m_watchTimer.stop();      // 主动停止：解除末尾/卡死兜底，别在收尾时误报
@@ -538,6 +589,7 @@ void PlayerEngine::stop()
     m_playing = false;
     m_loading = false;
     emit effectsRuntimeChanged();
+    m_stopping = false;
 }
 
 bool PlayerEngine::isPlaying() const

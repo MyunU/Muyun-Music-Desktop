@@ -137,7 +137,9 @@ void MusicSdk::rememberFailure(const QString &key)
 QString MusicSdk::resolveUrl(const Song &song, AudioQuality quality, AudioQuality *actualQuality)
 {
     // 1) 优先用 LX 自定义音源脚本解析（当已加载脚本且歌曲带 lx 元信息）
-    if (hasLxScript() && song.hasLx) {
+    // ⚠ 整段用读锁护住 m_lxEngine：取源期间禁止 loadLxScript 换实例（delete+new），否则 UAF。
+    QReadLocker rl(&m_lxEngineLock);
+    if (m_lxEngine && m_lxEngine->inited() && song.hasLx) {
         // 协议只有 128k/320k/flac/flac24bit 四档，且 inited.sources[src].qualitys
         // 就是"这个源支持哪些音质"的权威声明：先把自己的音质投影过去，
         // 再按声明过滤——没声明的档位直接跳过，别拿 undefined 去问脚本（白跑一次网络）。
@@ -161,6 +163,7 @@ QString MusicSdk::resolveUrl(const Song &song, AudioQuality quality, AudioQualit
             rememberFailure(fkey);
         }
     }
+    rl.unlock();   // 后面走内置平台，不再碰 m_lxEngine，尽早放锁避免长期占住
 
     const QString code = song.lx.source.isEmpty() ? platformSourceCode(song.platform)
                                                   : song.lx.source;
@@ -210,11 +213,14 @@ QString MusicSdk::resolveUrlAtQuality(const Song &song, AudioQuality quality)
 {
     // 与 resolveUrl 的区别：只试这一档音质、只用这首歌自带的 source，
     // 不沿降级链、不跨平台兜底。上层（下载器）自己组织尝试顺序。
-    if (hasLxScript() && song.hasLx) {
-        const QString url = m_lxEngine->musicUrl(song.lx.source, song.lx.toMap(),
-                                                 qualityId(quality));
-        if (!url.isEmpty()) return url;
-        // 脚本没给链接时，仍然允许内置音源用同一首歌的元信息试一次
+    {
+        QReadLocker rl(&m_lxEngineLock);   // 护住 m_lxEngine，防异步切音源换实例
+        if (m_lxEngine && m_lxEngine->inited() && song.hasLx) {
+            const QString url = m_lxEngine->musicUrl(song.lx.source, song.lx.toMap(),
+                                                     qualityId(quality));
+            if (!url.isEmpty()) return url;
+            // 脚本没给链接时，仍然允许内置音源用同一首歌的元信息试一次
+        }
     }
     const QString code = song.lx.source.isEmpty() ? platformSourceCode(song.platform)
                                                   : song.lx.source;
@@ -227,15 +233,18 @@ SongLyric MusicSdk::resolveLyric(const Song &song)
 {
     // LX 脚本优先：歌曲带 lx 元信息时先问脚本要歌词（local 源 lyric action，
     // HANDOFF 待办 #9 已接）。脚本没给/给的不是合法歌词就走内置五源。
-    if (hasLxScript() && song.hasLx && m_lxEngine) {
-        QString lxErr;
-        const QString raw = m_lxEngine->lyric(song.lx.source, song.lx.toMap(), &lxErr);
-        if (!raw.isEmpty()) {
-            const SongLyric probe = LyricParser::parseLrc(raw);
-            if (!probe.lines.isEmpty()) {
-                SongLyric l;
-                l.rawLrc = raw;
-                return l;
+    {
+        QReadLocker rl(&m_lxEngineLock);   // 护住 m_lxEngine，防异步切音源换实例
+        if (m_lxEngine && m_lxEngine->inited() && song.hasLx) {
+            QString lxErr;
+            const QString raw = m_lxEngine->lyric(song.lx.source, song.lx.toMap(), &lxErr);
+            if (!raw.isEmpty()) {
+                const SongLyric probe = LyricParser::parseLrc(raw);
+                if (!probe.lines.isEmpty()) {
+                    SongLyric l;
+                    l.rawLrc = raw;
+                    return l;
+                }
             }
         }
     }
@@ -273,7 +282,8 @@ QString MusicSdk::resolveCover(const Song &song)
 {
     // 歌曲自带封面直接用；为空且带 LX 元信息时，问脚本要封面（local 源 pic action）
     if (!song.cover.isEmpty()) return song.cover;
-    if (hasLxScript() && song.hasLx && m_lxEngine) {
+    QReadLocker rl(&m_lxEngineLock);   // 护住 m_lxEngine，防异步切音源换实例
+    if (m_lxEngine && m_lxEngine->inited() && song.hasLx) {
         QString lxErr;
         const QString url = m_lxEngine->pic(song.lx.source, song.lx.toMap(), &lxErr);
         if (!url.isEmpty()) return url;
@@ -287,6 +297,8 @@ QString MusicSdk::resolveCover(const Song &song)
 
 bool MusicSdk::loadLxScript(const QString &scriptPath, QString *error)
 {
+    // 独占写锁：换引擎实例（delete+new）期间，禁止任何取源 worker 读旧指针。
+    QWriteLocker wl(&m_lxEngineLock);
     if (!m_lxEngine) m_lxEngine = new LxScriptEngine();
     if (scriptPath.isEmpty()) {
         delete m_lxEngine;
@@ -298,23 +310,27 @@ bool MusicSdk::loadLxScript(const QString &scriptPath, QString *error)
 
 bool MusicSdk::hasLxScript() const
 {
+    QReadLocker rl(&m_lxEngineLock);
     return m_lxEngine && m_lxEngine->inited();
 }
 
 QString MusicSdk::lxScriptName() const
 {
-    if (!hasLxScript()) return QString();
+    QReadLocker rl(&m_lxEngineLock);
+    if (!m_lxEngine || !m_lxEngine->inited()) return QString();
     return m_lxEngine->scriptInfo().value(QStringLiteral("name")).toString();
 }
 
 QVariantMap MusicSdk::lxUpdateAlert() const
 {
+    QReadLocker rl(&m_lxEngineLock);
     if (!m_lxEngine) return {};
     return m_lxEngine->updateAlert();
 }
 
 void MusicSdk::setUpdateAlertCallback(std::function<void(const QVariantMap &)> cb)
 {
+    QWriteLocker wl(&m_lxEngineLock);
     if (m_lxEngine) m_lxEngine->setUpdateAlertCallback(std::move(cb));
 }
 

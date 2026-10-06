@@ -860,6 +860,35 @@ Popup {
                     }
                 }
 
+                // GitHub 仓库入口（用户 1.1.3 后提：关于页最后加 GitHub 链接）
+                RowLayout {
+                    spacing: 8
+                    Layout.topMargin: 8
+                    Text { text: "开源地址"; color: theme.subTextColor; font.pixelSize: 12 }
+                    Rectangle {
+                        id: ghLinkBtn
+                        width: ghLinkText.width + 28; height: 28; radius: 14
+                        color: ghLinkHover.containsMouse ? theme.hoverColor : theme.cardColor
+                        border.color: ghLinkHover.containsMouse ? theme.accentColor : theme.borderColor
+                        border.width: 1
+                        Text {
+                            id: ghLinkText
+                            anchors.centerIn: parent
+                            text: "GitHub 仓库"
+                            color: ghLinkHover.containsMouse ? theme.accentColor : theme.textColor
+                            font.pixelSize: 12
+                        }
+                        MouseArea {
+                            id: ghLinkHover
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            objectName: "githubLinkBtn"
+                            onClicked: Qt.openUrlExternally("https://github.com/MyunU/Muyun-Music-Desktop")
+                        }
+                    }
+                }
+
                 Item { Layout.fillHeight: true }
             }
 

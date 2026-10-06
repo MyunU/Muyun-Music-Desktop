@@ -15,6 +15,9 @@
 #include <QStandardPaths>
 #include <QUuid>
 #include <QUrl>
+#include <QDesktopServices>
+#include <QtConcurrent>
+#include <QFutureWatcher>
 
 namespace Muyun {
 
@@ -332,9 +335,15 @@ QVariantList SettingsController::lxSources() const
 QString SettingsController::activeLxSourceId() const { return m_activeId; }
 
 /// 把当前活跃脚本同步加载到 MusicSdk 的 LX 引擎
+bool SettingsController::doLoadLxScript(const QString &path, QString *err)
+{
+    // 可能在 worker 线程执行：只碰 MusicSdk 的引擎加载（内部已用读写锁护住实例指针）。
+    return MusicSdk::instance()->loadLxScript(path, err);
+}
+
 void SettingsController::syncActiveLxScript()
 {
-    // 找到活跃且启用的脚本
+    // 找到活跃且启用的脚本路径
     QString activePath;
     for (const auto &s : m_sources) {
         if (s.id == m_activeId && s.enabled) {
@@ -343,25 +352,56 @@ void SettingsController::syncActiveLxScript()
         }
     }
 
-    QString err;
+    // ⚠ 脚本加载（QuickJS init + checkUpdate，最长十几秒）绝不能在主线程同步跑——
+    //   那是"切换音源就卡死未响应"的真凶。改成后台线程加载，完成后回主线程刷新 UI。
+    //   卸载（空路径）很快，直接主线程做。
     if (activePath.isEmpty()) {
-        MusicSdk::instance()->loadLxScript(QString(), &err);
-        m_updateAlert.clear();
-        return;
-    }
-    if (!MusicSdk::instance()->loadLxScript(activePath, &err)) {
-        qWarning() << "[Settings] LX 脚本加载失败:" << err;
-        emit message(QStringLiteral("音源脚本加载失败：%1").arg(err));
+        doLoadLxScript(QString(), nullptr);
         m_updateAlert.clear();
         return;
     }
 
-    // 检查脚本是否上报了更新推送
-    if (!m_allowUpdateAlert) return;
-    m_updateAlert = MusicSdk::instance()->lxUpdateAlert();
-    mergeActiveSourceMeta(m_updateAlert);
-    if (!m_updateAlert.isEmpty())
-        emit lxUpdateAlertChanged();
+    // 已有加载在途：记下"要重载"，本轮完成后再补做一次（保证最终落在用户最后一次选择上）。
+    if (m_lxLoading) { m_lxPendingReload = true; return; }
+    m_lxLoading = true;
+
+    const QString path = activePath;
+    auto *watcher = new QFutureWatcher<QPair<bool, QString>>(this);
+    connect(watcher, &QFutureWatcher<QPair<bool, QString>>::finished, this,
+            [this, watcher]() {
+        watcher->deleteLater();
+        const auto res = watcher->result();
+        m_lxLoading = false;
+        const bool ok = res.first;
+        const QString err = res.second;
+
+        // 结果落地必须在主线程：这里已在主线程（watcher finished 回调）
+        if (!ok) {
+            qWarning() << "[Settings] LX 脚本加载失败:" << err;
+            emit message(QStringLiteral("音源脚本加载失败：%1").arg(err));
+            m_updateAlert.clear();
+            emit lxUpdateAlertChanged();
+        } else if (m_allowUpdateAlert) {
+            m_updateAlert = MusicSdk::instance()->lxUpdateAlert();
+            mergeActiveSourceMeta(m_updateAlert);
+            if (!m_updateAlert.isEmpty()) emit lxUpdateAlertChanged();
+        }
+        emit lxSourcesChanged();   // 让抽屉里"当前音源"勾选/状态刷新
+
+        // 加载期间用户又切了一次 → 用最新目标补做一轮
+        if (m_lxPendingReload) {
+            m_lxPendingReload = false;
+            syncActiveLxScript();
+        }
+    });
+
+    // 后台线程执行阻塞式脚本加载；QPointer 守卫 this（SettingsController 随 app 生命周期，一般安全）
+    QPointer<SettingsController> self(this);
+    watcher->setFuture(QtConcurrent::run([self, path]() -> QPair<bool, QString> {
+        QString e;
+        const bool r = MusicSdk::instance()->loadLxScript(path, &e);
+        return qMakePair(r, e);
+    }));
 }
 
 /// 把活跃音源的名称/版本/描述合并进更新提醒 Map。
@@ -384,6 +424,18 @@ void SettingsController::mergeActiveSourceMeta(QVariantMap &alert)
             alert[QStringLiteral("scriptName")] = QFileInfo(s.scriptPath).fileName();
         break;
     }
+
+    // ⚠ 更新地址归一化（修"点打开更新地址没反应"）：各家 LX 脚本 send('updateAlert') 的
+    //   链接字段名不统一（updateUrl / url / link / downloadUrl），且有的值是裸域名
+    //   （github.com/x/y）没有协议 → Qt.openUrlExternally 拿到空串或非 URL 直接无响应。
+    QString u = alert.value(QStringLiteral("updateUrl")).toString();
+    if (u.isEmpty()) u = alert.value(QStringLiteral("url")).toString();
+    if (u.isEmpty()) u = alert.value(QStringLiteral("link")).toString();
+    if (u.isEmpty()) u = alert.value(QStringLiteral("downloadUrl")).toString();
+    u = u.trimmed();
+    if (!u.isEmpty() && !u.contains(QLatin1Char(':')))     // 裸域名 → 补 https://
+        u = QStringLiteral("https://") + u;
+    alert[QStringLiteral("updateUrl")] = u;                 // 回写规范字段供 QML 直接读
 }
 
 void SettingsController::checkLxUpdate()
@@ -393,6 +445,20 @@ void SettingsController::checkLxUpdate()
     if (m_updateAlert.isEmpty()) {
         emit message(QStringLiteral("当前音源已是最新版本"));
     }
+}
+
+bool SettingsController::openLxUpdateUrl()
+{
+    const QString u = m_updateAlert.value(QStringLiteral("updateUrl")).toString().trimmed();
+    if (u.isEmpty()) { emit message(QStringLiteral("没有可打开的更新地址")); return false; }
+    QUrl url(u);
+    if (!url.isValid() || url.scheme().isEmpty()) {
+        // 仍无协议（如纯中文/畸形串）→ 补 https 再试一次
+        url = QUrl(QStringLiteral("https://") + u);
+    }
+    const bool ok = QDesktopServices::openUrl(url);
+    if (!ok) emit message(QStringLiteral("无法打开更新地址：%1").arg(u));
+    return ok;
 }
 
 void SettingsController::setAllowUpdateAlert(bool v)

@@ -259,6 +259,16 @@ private:
     int m_failStreak = 0;        // 连续自动跳歌失败计数（真正开播成功即清零，防整队列拉胯死循环）
     int m_lastFinishedIndex = -1; // 上一首播完的索引（advanceOnPlayFailure 跳过它，防牌堆回绕→重播同一首）
     bool m_wasPlaying = false;    // 当前曲是否已成功开播（开播后失败 → 不重试同曲，直接前进）
+    /// 时长校验武装标志：只有"当前曲刚发起播放"（resolveAndPlay / resolveAndPlayAt）时才 armed，
+    /// 收到 Playing 校验一次后 disarm。防止切歌瞬间的 stop() 信号链误入 Playing 分支——
+    /// 那时引擎还在播旧歌（duration 是旧歌的），拿新歌 API 时长去比 → 误判"时长异常" →
+    /// 又 stop() → 无限递归 → 栈溢出（0xC00000FD）。armed=false 时绝不做时长校验。
+    bool m_durationCheckArmed = false;
+    /// 本轮取源的"用户选择起点档"。缓存命中必须优先匹配这一档——只有所选档确实没有/坏掉，
+    /// 才允许降级用更低档的缓存。否则换到一首有旧低档缓存的歌时，会直接播旧档并把标签显示成
+    /// 旧的（与菜单所选不符，需手动重选才刷新）。resolveAndPlayAt 首次进入时记为 m_quality，
+    /// 降档递归时保持不变（这样 lower 递归里 q==起点档的判断仍指向"用户真正想要的那档"）。
+    AudioQuality m_wantedQuality = AudioQuality::K320;
     bool m_loading = false;
     SongLyric m_lyric;
     bool m_lyricLoading = false;

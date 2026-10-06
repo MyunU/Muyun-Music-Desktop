@@ -7,6 +7,7 @@
 #include <QTimer>
 #include <QVariantList>
 #include <QStringList>
+#include <QPointer>
 
 namespace Muyun {
 
@@ -94,6 +95,9 @@ public:
 
     /// 主动触发更新检查：重新加载活跃脚本，让脚本有机会 send('updateAlert')
     Q_INVOKABLE void checkLxUpdate();
+    /// 打开当前更新提醒里的更新地址（C++ 侧 QDesktopServices，比 QML openUrlExternally 可靠；
+    /// 失败会 toast 提示，避免"点了没反应"无从判断）。返回是否成功发起。
+    Q_INVOKABLE bool openLxUpdateUrl();
 
     bool allowUpdateAlert() const { return m_allowUpdateAlert; }
     void setAllowUpdateAlert(bool v);
@@ -134,8 +138,10 @@ private:
     void loadLxSources();
     void saveLxSources();
     QString sourcesDir() const;
-    /// 把当前活跃脚本同步加载到 MusicSdk 的 LX 引擎
+    /// 把当前活跃脚本同步加载到 MusicSdk 的 LX 引擎（内部走异步，见下）
     void syncActiveLxScript();
+    /// 真正执行脚本加载（可能在 worker 线程）。返回是否成功 + 错误串。
+    static bool doLoadLxScript(const QString &path, QString *err);
     /// 把活跃音源的名称/版本/描述合并进更新提醒 Map（脚本只 send log+updateUrl）
     void mergeActiveSourceMeta(QVariantMap &alert);
 
@@ -144,6 +150,10 @@ private:
     LibraryController *m_library = nullptr;
     QVariantMap m_updateAlert;
     bool m_allowUpdateAlert = true;
+    /// 音源脚本正在后台加载：期间禁止再次切换（防并发换引擎 / 连点错乱）。
+    bool m_lxLoading = false;
+    /// 加载进行中又收到新的目标 → 记下来，本轮完成后补做（避免"点了最后一个却没生效"）
+    bool m_lxPendingReload = false;
     QString m_exitAction = QStringLiteral("ask");
     QString m_playerStyle = QStringLiteral("amll");
     bool m_embedCover = true;

@@ -7,6 +7,7 @@
 #include <QJsonDocument>
 #include <QNetworkAccessManager>
 #include <QCoreApplication>
+#include <QThread>
 #include <QDateTime>
 #include <QRandomGenerator>
 #include <QElapsedTimer>
@@ -1132,7 +1133,9 @@ void LxScriptEngine::runPendingJobs(int maxMs)
         } else if (m_timers.isEmpty()) {
             break;
         } else {
-            QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+            // ⚠ 同 pumpUntilDone：不在非 GUI 线程泵 Qt 事件循环。QuickJS 的 setTimeout/微任务
+            //   由 runDueTimers + JS_ExecutePendingJob 推进，短睡让定时器到期即可，不需要 processEvents。
+            QThread::msleep(1);
         }
         if (timer.elapsed() > maxMs) break;
     }
@@ -1155,7 +1158,15 @@ bool LxScriptEngine::pumpUntilDone(int maxMs)
                 break;
             }
         }
-        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+        // ⚠ 绝不能在非 GUI 线程调 QCoreApplication::processEvents()！
+        //   本函数跑在 QtConcurrent worker 线程（MusicSdk::resolveUrl → musicUrl → requestString）。
+        //   脚本的 request() 是同步阻塞（局部 QNAM + execRequest 自带阻塞循环），Promise 的 settle
+        //   全在本线程内闭合，根本不依赖 Qt 事件循环推进。以前这里 processEvents 会把「主线程投递到
+        //   本线程队列」的事件（含另一条并发取源的 queued 回调、UI 事件）在 worker 线程里乱执行 →
+        //   与 m_mutex 形成嵌套等待 → 「加载歌曲时切音源大概率卡死未响应」（用户报）。
+        //   改成纯 QuickJS job/timer 驱动 + 短睡；无待办且没 settle 就交给超时兜底。
+        if (!JS_IsJobPending(m_rt) && m_timers.isEmpty()) break;
+        QThread::msleep(1);
     }
     return m_done;
 }
@@ -1308,7 +1319,7 @@ bool LxScriptEngine::loadScript(const QString &path, QString *error)
                     break;
                 }
             } else if (!m_timers.isEmpty()) {
-                QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+                QThread::msleep(1);   // 不在非 GUI 线程泵 Qt 事件循环（见 pumpUntilDone 注释）
             } else {
                 break;   // 彻底没事可做
             }
@@ -1328,7 +1339,7 @@ bool LxScriptEngine::loadScript(const QString &path, QString *error)
                         break;
                     }
                 } else if (!m_timers.isEmpty()) {
-                    QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+                    QThread::msleep(1);   // 不在非 GUI 线程泵 Qt 事件循环（见 pumpUntilDone 注释）
                 } else {
                     break;
                 }

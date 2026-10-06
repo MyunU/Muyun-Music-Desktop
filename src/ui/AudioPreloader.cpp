@@ -7,6 +7,8 @@
 #include "core/utils/AudioUrl.h"
 
 #include <QtConcurrent>
+#include <QCoreApplication>
+#include <QDateTime>
 
 namespace Muyun {
 
@@ -66,18 +68,33 @@ void AudioPreloader::onResolved(int idx, const QString &url, AudioQuality actual
     const Song &s = m_playlist.at(idx);
     const QString key = s.identityKey() + QLatin1Char('@') + qualityId(actual);
     const QString savePath = PlayerEngine::cachePathForKey(key);
+    // ⚠ 下载写唯一 .tmp 文件（加 pid+时间戳），完成后原子 rename 到最终路径。
+    //   否则：① 预缓存/播放同时写同一 .tmp → 文件损坏 → rename 后播放崩溃；
+    //   ② 用户切到正在预缓存的歌 → cachedAudioFile 命中半截文件 → playFile 打开半截
+    //   → 预缓存继续写入或失败时 QFile::remove → FFmpeg 后端读到被截断/删除的文件 → 崩溃退出。
+    const QString tmpPath = savePath + QStringLiteral(".tmp.%1.%2")
+                                .arg(QCoreApplication::applicationPid())
+                                .arg(QDateTime::currentMSecsSinceEpoch());
+    if (QFileInfo::exists(savePath)) QFile::remove(savePath);   // 残留旧缓存清掉重下
     HttpOptions opt;
     opt.referer = refererForAudioUrl(url);
     const quint64 epoch = m_epoch;
     auto *self = this;
-    HttpClient::instance()->downloadFile(url, savePath, opt, nullptr,
-        [self, epoch, idx, savePath](bool ok, const QString &) {
+    HttpClient::instance()->downloadFile(url, tmpPath, opt, nullptr,
+        [self, epoch, idx, savePath, tmpPath](bool ok, const QString &) {
             bool good = ok;
-            if (good && !TagReader::isAudioFile(savePath)) {
-                QFile::remove(savePath);           // 无效响应（JSON 等）不进缓存
+            if (good && !TagReader::isAudioFile(tmpPath)) {
+                QFile::remove(tmpPath);           // 无效响应（JSON 等）不进缓存
                 good = false;
             } else if (!good) {
-                QFile::remove(savePath);           // 下载失败 → 清半截文件，防命中坏缓存
+                QFile::remove(tmpPath);           // 下载失败 → 清半截文件，防命中坏缓存
+            }
+            if (good) {
+                // 原子 rename：要么完整文件，要么不存在，播放器永远不会看到半截
+                if (!QFile::rename(tmpPath, savePath)) {
+                    QFile::remove(tmpPath);
+                    good = false;
+                }
             }
             QMetaObject::invokeMethod(self, [self, epoch, idx, good]() {
                 if (epoch != self->m_epoch) return;

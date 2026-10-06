@@ -44,6 +44,12 @@ public:
     /// expectedDurationSec>0 时读真实时长对比：半截/损坏缓存直接删除返回空，
     /// 避免命中坏文件 → 播到中间 FFmpeg 报错 → 误跳下一首。
     static QString cachedAudioFile(const QString &cacheKey, double expectedDurationSec = 0.0);
+    /// 播放前**解码实测**：用解码后端（minimp3/FFmpeg）试 open + 读一帧 + 时长对比。
+    /// 拦截 cachedAudioFile 轻校验放行的坏缓存——头部完整（FLAC STREAMINFO / MP3 Xing /
+    /// M4A moov 声称完整时长）但实际数据损坏/解不出数据的文件，读时长对得上却一帧都解不出，
+    /// 直接喂给播放器就是崩溃/卡死。所有格式统一走这条硬校验（MP3 之外以前没有防御）。
+    /// 返回 false 表示文件损坏，调用方应删除并降档重试。
+    static bool verifyCacheDecodable(const QString &path, double expectedDurationSec);
     /// 播放缓存目录（%TEMP%/muyun-audio）。公开供启动清扫/自检定位文件。
     static QString audioCacheDir();
     /// cacheKey 对应的缓存文件路径（play 写盘与 cachedAudioFile 查询共用，防散列式漂移）
@@ -171,6 +177,11 @@ private:
     bool m_muted = false;
     bool m_playing = false;
     bool m_loading = false;
+    /// 重入保护：stop() 内部 m_effect->stop() / m_player->stop() 会同步发 Stopped 信号，
+    /// 上层（PlayerController）的 playbackStateChanged 里若再调 stop()，就无限递归 → 栈溢出
+    /// （实测 0xC00000FD：切歌瞬间旧歌还在 Playing，时长校验误判"时长异常"→ 又 stop()）。
+    /// 已在 stop() 中则直接返回，不让信号链重入。
+    bool m_stopping = false;
     QTimer m_positionTimer;
     QString m_pendingLocalPath;
 

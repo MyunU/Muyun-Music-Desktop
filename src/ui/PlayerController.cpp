@@ -1,6 +1,7 @@
 #include "PlayerController.h"
 
 #include "AudioPreloader.h"
+#include "core/player/PlayerEngine.h"
 #include "core/music/MusicSdk.h"
 #include "core/lyrics/LyricParser.h"
 #include "core/localmusic/TagReader.h"
@@ -39,6 +40,33 @@ static bool lowerQuality(AudioQuality q, AudioQuality *out)
     return true;
 }
 
+// ⚠ 把"脚本归一化后的实测档"还原回"用户真正想要的档"（修音质标签与实际不符）。
+//   LX 协议只有四档（128k/320k/flac/flac24bit），hires/master/atmos 都被 protocolQualityId
+//   压成 flac24bit 去问脚本，脚本返回的 actualQuality 也就成了 flac24bit → 播放条标签显示
+//   "FLAC/24Bit"，与菜单选的 Hi-Res/Master 不符。
+//   规则：若实测档与请求档"协议等价"（同为 flac24bit 一族，或同为 flac，或同 bitrate）→
+//   说明拿到的就是用户要的那一档，标签按用户选择显示；只有确实降到更低普通档才如实显示降级。
+static AudioQuality restoreWantedQuality(AudioQuality wanted, AudioQuality gotFromScript)
+{
+    auto protoTier = [](AudioQuality q) -> int {
+        switch (q) {
+        case AudioQuality::K128:      return 0;
+        case AudioQuality::K320:      return 1;
+        case AudioQuality::Flac:      return 2;
+        // flac24bit / hires / atmos / master 在协议里都是同一最高档
+        case AudioQuality::Flac24Bit:
+        case AudioQuality::HiRes:
+        case AudioQuality::Atmos:
+        case AudioQuality::Master:    return 3;
+        }
+        return -1;
+    };
+    // 脚本给的最高无损档(3) 覆盖了用户所有 ≥3 的选择；等价即还原为用户要的档名。
+    // 若脚本实际给了更低档（如只拿到 320k），tier 不等 → 如实返回降级结果。
+    if (protoTier(wanted) == protoTier(gotFromScript)) return wanted;
+    return gotFromScript;
+}
+
 PlayerController::PlayerController(QObject *parent) : QObject(parent)
 {
     m_engine = new PlayerEngine(this);
@@ -64,24 +92,31 @@ PlayerController::PlayerController(QObject *parent) : QObject(parent)
                 if (m_engine->state() == PlayerEngine::State::Playing) {
                     // 时长校验：引擎实际时长与平台接口时长不一致 → 文件损坏/不完整 → 停掉重下
                     // ⚠ 单位：engine.duration() 毫秒，m_currentSong.duration 秒（Types.h L134）
-                    const qint64 engineDur = m_engine->duration();
-                    const qint64 apiDurMs = static_cast<qint64>(std::llround(m_currentSong.duration * 1000.0));
-                    if (engineDur > 0 && apiDurMs > 0 && qAbs(engineDur - apiDurMs) > 3000) {
-                        // 时长不一致 → 该缓存/文件损坏或音源给错 → 删坏缓存，降档重新获取
-                        const QString badKey = m_currentSong.identityKey() + QLatin1Char('@')
-                                               + Muyun::qualityId(m_playTriedQ);
-                        const QString badPath = PlayerEngine::cachePathForKey(badKey);
-                        if (QFile::exists(badPath)) QFile::remove(badPath);
-                        m_engine->stop();
-                        emit playFailed(QStringLiteral("音频时长异常，正在重新获取…"));
-                        AudioQuality lower;
-                        if (lowerQuality(m_playTriedQ, &lower)) {
-                            ++m_playRetry;
-                            resolveAndPlayAt(lower);
-                        } else {
-                            advanceOnPlayFailure(QStringLiteral("音频时长异常且无法降档"));
+                    // ⚠ 必须只在校验武装时做（m_durationCheckArmed）：切歌瞬间 stop() 的信号链
+                    //   会误入这个分支——那时引擎还在播**旧歌**（duration 是旧歌的），拿新歌 API
+                    //   时长去比必然"不符"→ 又 stop() → 无限递归 → 栈溢出（0xC00000FD，程序
+                    //   静默消失无弹窗）。armed 只在"当前曲刚发起播放"时为 true，开播校验一次即 disarm。
+                    if (m_durationCheckArmed) {
+                        m_durationCheckArmed = false;   // 先 disarm：本次校验只做一次，防信号链重入
+                        const qint64 engineDur = m_engine->duration();
+                        const qint64 apiDurMs = static_cast<qint64>(std::llround(m_currentSong.duration * 1000.0));
+                        if (engineDur > 0 && apiDurMs > 0 && qAbs(engineDur - apiDurMs) > 3000) {
+                            // 时长不一致 → 该缓存/文件损坏或音源给错 → 删坏缓存，降档重新获取
+                            const QString badKey = m_currentSong.identityKey() + QLatin1Char('@')
+                                                   + Muyun::qualityId(m_playTriedQ);
+                            const QString badPath = PlayerEngine::cachePathForKey(badKey);
+                            if (QFile::exists(badPath)) QFile::remove(badPath);
+                            m_engine->stop();
+                            emit playFailed(QStringLiteral("音频时长异常，正在重新获取…"));
+                            AudioQuality lower;
+                            if (lowerQuality(m_playTriedQ, &lower)) {
+                                ++m_playRetry;
+                                resolveAndPlayAt(lower);
+                            } else {
+                                advanceOnPlayFailure(QStringLiteral("音频时长异常且无法降档"));
+                            }
+                            return;
                         }
-                        return;
                     }
                     m_wasPlaying = true;  // 记住已开播：开播后失败不重试同曲
                     m_failStreak = 0;    // 真播起来了：失败熔断计数清零
@@ -244,11 +279,22 @@ void PlayerController::setQualityId(const QString &id)
     const AudioQuality q = Muyun::qualityFromId(id, &ok);
     if (!ok) return;
     m_quality = q;
+    // ⚠ 用户重选音质 → 实测标志作废：标签先显示新选的档，重新解析播放拿到实测后才更新。
+    m_actualQualityKnown = false;
+    m_wantedQuality = q;   // 本轮取源只命中这一档的缓存（无则下载），不被旧低档缓存顶替
+#ifdef MUYUN_SELFTES
+    qInfo() << "[quality] setQualityId ->" << id << "label=" << currentQualityLabel();
+#endif
     emit qualityChanged();
     emit currentQualityChanged();   // #12：音质标签随选择即时刷新（不再等播放）
     saveState();
-    // 切换音质后重新解析当前歌曲
-    if (!m_currentSong.id.isEmpty() && !m_currentSong.isLocal()) resolveAndPlay();
+    // 切换音质后重新解析当前歌曲。⚠ 不走 resolveAndPlay()（那里会把 m_wantedQuality 重置成
+    // m_quality——虽然这里也是 q，但保持单一路径、避免重复清标志/重复 emit）。
+    if (!m_currentSong.id.isEmpty() && !m_currentSong.isLocal()) {
+        m_playRetry = 0;
+        m_wasPlaying = false;
+        resolveAndPlayAt(m_quality);
+    }
 }
 
 void PlayerController::setPlaylistName(const QString &name)
@@ -541,9 +587,9 @@ void PlayerController::togglePlay()
     else if (!m_playlist.isEmpty()) playIndex(0);
 }
 
-void PlayerController::pause() { m_engine->pause(); disarmSongWatchdog(); emit isPlayingChanged(); }
+void PlayerController::pause() { m_engine->pause(); disarmSongWatchdog(); m_durationCheckArmed = false; emit isPlayingChanged(); }
 void PlayerController::resume() { m_engine->resume(); emit isPlayingChanged(); }
-void PlayerController::stop() { m_engine->stop(); disarmSongWatchdog(); emit isPlayingChanged(); }
+void PlayerController::stop() { m_engine->stop(); disarmSongWatchdog(); m_durationCheckArmed = false; emit isPlayingChanged(); }
 
 void PlayerController::seek(qint64 ms) { m_engine->seek(ms); emit positionChanged(); }
 
@@ -678,9 +724,14 @@ void PlayerController::shufflePlaylist()
 
 void PlayerController::resolveAndPlay()
 {
+    m_wantedQuality = m_quality;   // 常规播放发起：用户想要的档 = 当前选择（缓存只命中这一档）
+    m_durationCheckArmed = true;   // 发起播放：武装时长校验（开播校验一次后自动 disarm）
+    // ⚠ 换曲瞬间就作废上一首的实测档并通知刷新：否则新曲走下载期间（无缓存、要几秒），
+    //   currentQualityLabel 仍返回上一首的 m_actualQuality → "自动切下一首后标签停在上一首档位"。
+    //   先回落显示用户选择的档（m_quality），本曲真正播成时 resolveAndPlayAt 会再设实测并 emit。
+    m_actualQualityKnown = false;
+    emit currentQualityChanged();
     if (m_currentSong.isLocal()) {
-        m_actualQualityKnown = false;
-        emit currentQualityChanged();
         m_engine->playFile(m_currentSong.localPath);
         return;
     }
@@ -732,21 +783,29 @@ void PlayerController::onSongWatchdogTimeout()
 void PlayerController::resolveAndPlayAt(AudioQuality startQ)
 {
     const Song song = m_currentSong;
+    m_durationCheckArmed = true;   // 每次发起取源/播放都重新武装时长校验（开播校验一次即 disarm）
 
-    // 播放缓存优先：命中则直接播本地文件（预缓存/历史下载留下的有效文件），
-    // 绕开音源解析。损坏/不完整的缓存由 playbackStateChanged 的时长校验兜底：
-    // 校验失败 → 删该缓存 → 降档重新获取（不会死循环命中坏缓存）。
-    for (const AudioQuality q : qualityFallbackChain(startQ)) {
+    // 播放缓存优先：但**只命中"用户选择的那一档"（m_wantedQuality）的缓存**。
+    //   绝不能让更低档的旧缓存顶替用户的选择——否则换到一首之前播过低档、留了旧缓存的歌时，
+    //   会直接播旧档并把播放条标签显示成旧的（与音质菜单所选不符，要手动重选才刷新）。
+    //   起点档没有有效缓存 → 走下面的下载（下载内部才沿降级链取源，拿到什么档就显示什么档）。
+    // 损坏/不完整的缓存由 verifyCacheDecodable 硬校验兜底：坏文件删掉 → 视作无缓存 → 下载。
+    {
         const QString cached = PlayerEngine::cachedAudioFile(
-            song.identityKey() + QLatin1Char('@') + Muyun::qualityId(q), song.duration);
-        if (cached.isEmpty()) continue;
-        m_playRetry = 0;
-        m_playTriedQ = q;
-        m_actualQuality = q;
-        m_actualQualityKnown = true;
-        emit currentQualityChanged();
-        m_engine->playFile(cached);
-        return;
+            song.identityKey() + QLatin1Char('@') + Muyun::qualityId(m_wantedQuality), song.duration);
+        if (!cached.isEmpty()) {
+            if (!PlayerEngine::verifyCacheDecodable(cached, song.duration)) {
+                QFile::remove(cached);   // 坏缓存：删掉，绝不进播放器，转去下载
+            } else {
+                m_playRetry = 0;
+                m_playTriedQ = m_wantedQuality;
+                m_actualQuality = m_wantedQuality;
+                m_actualQualityKnown = true;
+                emit currentQualityChanged();
+                m_engine->playFile(cached);
+                return;
+            }
+        }
     }
 
     // 无有效缓存 → 重新获取数据。
@@ -779,7 +838,10 @@ void PlayerController::resolveAndPlayAt(AudioQuality startQ)
                     }
                     return;
                 }
-                m_actualQuality = result.second;
+                // ⚠ 标签显示的实测档要"还原"到用户真正想要的档：脚本协议把 hires/master/atmos
+                //   都压成 flac24bit 返回，直接显示会变成 FLAC/24Bit 与菜单所选不符。
+                //   等价档按用户选择显示；确实降到更低普通档才如实显示降级。
+                m_actualQuality = restoreWantedQuality(m_wantedQuality, result.second);
                 m_actualQualityKnown = true;
                 emit currentQualityChanged();
                 // 缓存 key = 歌曲稳定身份 + 实际音质（在线 URL 每次签名不同，不能拿 URL 当 key）

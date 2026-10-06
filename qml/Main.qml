@@ -2148,7 +2148,7 @@ Window {
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
                             onClicked: {
-                                Qt.openUrlExternally(settings.lxUpdateAlert.updateUrl)
+                                settings.openLxUpdateUrl()   // C++ 侧 QDesktopServices，失败会 toast
                                 updateDialog.close()
                                 settings.dismissLxUpdateAlert()
                             }

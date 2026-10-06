@@ -6,6 +6,7 @@
 #include <QObject>
 #include <QHash>
 #include <QMutex>
+#include <QReadWriteLock>
 #include <functional>
 
 namespace Muyun {
@@ -127,6 +128,11 @@ private:
     QHash<QString, MusicSource *> m_sources;
     QStringList m_platformOrder;
     LxScriptEngine *m_lxEngine = nullptr;
+    /// 保护 m_lxEngine 指针本身：取源（resolveUrl/lyric/cover）持**读锁**，
+    /// loadLxScript 换实例（delete+new）持**写锁**。否则"后台异步切音源正在换引擎"与
+    /// "另一 worker 正拿旧引擎跑 musicUrl"并发 → use-after-free。
+    /// 注意：QuickJS 内部的 m_mutex 只串行化"同一实例的调用"，不保护实例被替换，故必须再加这一层。
+    mutable QReadWriteLock m_lxEngineLock;
     mutable QHash<QString, qint64> m_failedAt;   ///< key → 最近失败时刻（worker 多线程读）
     mutable QMutex m_failMutex;
 };

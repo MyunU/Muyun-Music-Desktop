@@ -3311,6 +3311,77 @@ int main(int argc, char *argv[])
     }
 #endif // MUYUN_SELFTES
 
+    // 缓存文件体检：逐个跑 readAudioInfo + createPcmSource 试解码，
+    // 复现"缓存文件损坏 → 解析/解码路径崩溃"（MP3 有完整防御，FLAC 部分，M4A/OGG/WAV/AAC 基本没有）。
+    // 用法：MuyunMusic.exe --test-cache-bad [文件|目录]（默认 %TEMP%/muyun-audio）
+#ifdef MUYUN_SELFTES
+    if (args.contains(QStringLiteral("--test-cache-bad"))) {
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        printf("=== 缓存文件体检 ===\n");
+        const int ci = args.indexOf(QStringLiteral("--test-cache-bad"));
+        const QString target = (ci + 1 < args.size() && !args.at(ci + 1).startsWith(QStringLiteral("--")))
+                                   ? args.at(ci + 1) : QString();
+        QStringList paths;
+        if (target.isEmpty()) {
+            QDir d(PlayerEngine::audioCacheDir());
+            if (d.exists())
+                for (const QFileInfo &fi : d.entryInfoList({QStringLiteral("*.audio")}, QDir::Files))
+                    paths << fi.absoluteFilePath();
+        } else if (QFileInfo(target).isDir()) {
+            QDir d(target);
+            for (const QFileInfo &fi : d.entryInfoList(
+                     {QStringLiteral("*.audio"), QStringLiteral("*.mp3"), QStringLiteral("*.flac"),
+                      QStringLiteral("*.m4a"), QStringLiteral("*.ogg"), QStringLiteral("*.wav"),
+                      QStringLiteral("*.aac"), QStringLiteral("*.mp4")}, QDir::Files))
+                paths << fi.absoluteFilePath();
+        } else {
+            paths << target;
+        }
+        printf("[INFO] 待检文件 %d 个\n", paths.size());
+        fflush(stdout);
+        int infoFail = 0, decodeFail = 0;
+        for (const QString &path : paths) {
+            printf("[FILE] %s (%lld bytes)\n", qPrintable(path), (long long)QFileInfo(path).size());
+            fflush(stdout);
+            // 1) cachedAudioFile 的读取路径（时长校验）：TagReader::readAudioInfo
+            const AudioInfo ai = TagReader::readAudioInfo(path);
+            printf("  readAudioInfo: valid=%d fmt=%s dur=%ds rate=%d\n",
+                   int(ai.valid), qPrintable(ai.format), ai.durationSec, ai.sampleRate);
+            fflush(stdout);
+            if (!ai.valid || ai.durationSec <= 0) ++infoFail;
+            // 2) 播放解码路径：createPcmSource 试 open + 读几块
+            QString err;
+            std::unique_ptr<PcmSource> src(createPcmSource(path, &err));
+            if (!src) {
+                ++decodeFail;
+                printf("  decode: FAIL (%s)\n", qPrintable(err));
+            } else {
+                const qint64 durMs = src->durationMs();
+                QVector<float> buf(4096 * 2);
+                int got = 0, reads = 0;
+                while (reads < 8) {
+                    const int r = src->read(buf.data(), 4096);
+                    if (r > 0) got += r;
+                    if (r <= 0) break;
+                    ++reads;
+                }
+                printf("  decode: OK backend=%s dur=%lldms got=%d\n",
+                       qPrintable(src->backendName()), (long long)durMs, got);
+                if (durMs <= 0) ++decodeFail;
+            }
+            // 3) 播放前硬校验：verifyCacheDecodable（用容器头声称时长当期望，
+            //    模拟"头部完整声称完整时长、实际数据损坏"的场景）
+            const double expect = ai.durationSec > 0 ? double(ai.durationSec) : 0.0;
+            const bool verOk = PlayerEngine::verifyCacheDecodable(path, expect);
+            printf("  verifyCacheDecodable: %s (期望=%gs)\n", verOk ? "PASS" : "BLOCK", expect);
+            fflush(stdout);
+        }
+        printf("== 汇总：文件=%d readAudioInfo失败=%d 解码失败=%d ==\n",
+               paths.size(), infoFail, decodeFail);
+        return finishSelfTest(0);
+    }
+#endif // MUYUN_SELFTES
+
     // 本地播放自检：直接喂 QMediaPlayer 一个本地文件，看状态机/位置是否推进（复现"点了不播"）
     // 用法：MuyunMusic.exe --test-play [音频文件]
 #ifdef MUYUN_SELFTES
@@ -3487,6 +3558,18 @@ int main(int argc, char *argv[])
             w.write(QByteArray(int(dataBytes), '\0'));
             w.close();
         };
+        auto makeWavDur = [](const QString &path, double sec) {   // 指定时长静音 WAV（8kHz 16bit mono）
+            QFile w(path);
+            if (!w.open(QIODevice::WriteOnly | QIODevice::Truncate)) return;
+            const quint32 rate = 8000;
+            const quint32 dataBytes = quint32(rate * 2) * quint32(sec);
+            auto u32 = [](quint32 v){ QByteArray b(4,0); b[0]=char(v&0xFF); b[1]=char((v>>8)&0xFF); b[2]=char((v>>16)&0xFF); b[3]=char((v>>24)&0xFF); return b; };
+            auto u16 = [](quint16 v){ QByteArray b(2,0); b[0]=char(v&0xFF); b[1]=char((v>>8)&0xFF); return b; };
+            w.write("RIFF" + u32(36 + dataBytes) + "WAVEfmt " + u32(16) + u16(1) + u16(1)
+                    + u32(rate) + u32(rate * 2) + u16(2) + u16(16) + "data" + u32(dataBytes));
+            w.write(QByteArray(int(dataBytes), '\0'));
+            w.close();
+        };
         auto localSong = [&](const QString &tag) {
             const QString p = QDir::tempPath() + QStringLiteral("/muyun-q-%1.wav").arg(tag);
             makeWav(p);
@@ -3551,7 +3634,9 @@ int main(int argc, char *argv[])
             Muyun::Song::fromMap(cs).identityKey() + QLatin1Char('@')
             + Muyun::qualityId(Muyun::AudioQuality::K320));
         QDir().mkpath(Muyun::PlayerEngine::audioCacheDir());
-        makeWav(cachePath);
+        // 缓存 wav 时长必须匹配歌曲声明（duration=100s）——五-73 起缓存命中前有
+        // verifyCacheDecodable 硬校验（解码实测时长 vs 期望 >3s 判坏），1s 假缓存会被正确拦截。
+        makeWavDur(cachePath, 100.0);
         const bool hitOk = Muyun::PlayerEngine::cachedAudioFile(
             Muyun::Song::fromMap(cs).identityKey() + QLatin1Char('@')
             + Muyun::qualityId(Muyun::AudioQuality::K320)) == cachePath;
@@ -3566,19 +3651,31 @@ int main(int argc, char *argv[])
                playedFromCache ? "PASS" : "FAIL", int(hitOk),
                qPrintable(player->currentAudioLocalPath()));
 
-        // -- 4) 随机播放不重复（牌堆一轮内不重复、每首必播；轮尽重洗继续）--
-        auto makeWavDur = [&](const QString &path, double sec) {
-            QFile w(path);
-            if (!w.open(QIODevice::WriteOnly | QIODevice::Truncate)) return;
-            const quint32 rate = 8000;
-            const quint32 dataBytes = quint32(rate * 2) * quint32(sec);
-            auto u32 = [](quint32 v){ QByteArray b(4,0); b[0]=char(v&0xFF); b[1]=char((v>>8)&0xFF); b[2]=char((v>>16)&0xFF); b[3]=char((v>>24)&0xFF); return b; };
-            auto u16 = [](quint16 v){ QByteArray b(2,0); b[0]=char(v&0xFF); b[1]=char((v>>8)&0xFF); return b; };
-            w.write("RIFF" + u32(36 + dataBytes) + "WAVEfmt " + u32(16) + u16(1) + u16(1)
-                    + u32(rate) + u32(rate * 2) + u16(2) + u16(16) + "data" + u32(dataBytes));
-            w.write(QByteArray(int(dataBytes), '\0'));
-            w.close();
-        };
+        // -- 4) 音质切换：切换界面高亮（player.quality）与外面标签（currentQualityLabel）必须一致
+        player->setQualityId(QStringLiteral("128k"));
+        const bool qTagFollows = player->currentQualityLabel() == QStringLiteral("128K");
+        printf("[%s] 4) 音质切换标签跟随（标签=%s）\n",
+               qTagFollows ? "PASS" : "FAIL", qPrintable(player->currentQualityLabel()));
+        // 5) 切回 320k：本轮取源只命中 320k 缓存（m_wantedQuality 限档），
+        //    第 3 项写的 320k 缓存应命中 → 标签回到 320K；不会因为 128k 有缓存就钉在低档
+        player->setQualityId(QStringLiteral("320k"));
+        waitMs(150);
+        const bool qTagFollows2 = player->currentQualityLabel() == QStringLiteral("320K");
+        printf("[%s] 5) 切回高档标签跟随（标签=%s）\n",
+               qTagFollows2 ? "PASS" : "FAIL", qPrintable(player->currentQualityLabel()));
+        // 6) 关键回归（五-74 真凶）：选一个**没有缓存的高档**（FLAC），但这歌有 320k 旧缓存。
+        //    修复前：降级链会命中 320k 旧缓存直接播 → 标签被顶成 320K（与菜单选的 FLAC 不符，
+        //    要手动重选才对）。修复后：只查 FLAC 档缓存（无）→ 走下载（lxtest 音源秒回空、失败），
+        //    标签保持显示用户选的 FLAC，绝不被旧低档缓存顶替。
+        player->setQualityId(QStringLiteral("flac"));
+        waitMs(400);   // 给下载/降档链一点时间跑完（离线必失败）
+        const QString flacLabel = player->currentQualityLabel();
+        const bool noCacheOverride = (flacLabel == QStringLiteral("FLAC"));
+        printf("[%s] 6) 旧低档缓存不顶替所选高档（标签=%s）\n",
+               noCacheOverride ? "PASS" : "FAIL", qPrintable(flacLabel));
+        player->setQualityId(QStringLiteral("320k"));   // 复位，别影响后续随机测试
+
+        // -- 6) 随机播放不重复（牌堆一轮内不重复、每首必播；轮尽重洗继续）--
         auto shSong = [&](const QString &tag) {
             const QString p = QDir::tempPath() + QStringLiteral("/muyun-sh-%1.wav").arg(tag);
             makeWavDur(p, 30.0);   // 30s 静音：测试期间不会自然播完触发切歌
@@ -3618,7 +3715,7 @@ int main(int argc, char *argv[])
         shuffleOk = shuffleOk && round2Ok
             && seq.size() == 5              // 当前曲 + 首轮剩下的 4 首
             && uniqueSeq.size() == 5;       // 首轮 5 首全不同（一轮内不重复、每首必播）
-        printf("[%s] 4) 随机播放一轮内不重复（序列=%s，第二轮=%s）\n",
+        printf("[%s] 7) 随机播放一轮内不重复（序列=%s，第二轮=%s）\n",
                shuffleOk ? "PASS" : "FAIL",
                qPrintable(seq.join(QLatin1String(">"))), qPrintable(round2));
 
@@ -3629,7 +3726,8 @@ int main(int argc, char *argv[])
         for (const QString tag : shTags)
             QFile::remove(QDir::tempPath() + QStringLiteral("/muyun-sh-%1.wav").arg(tag));
         player->stop();
-        const int rc = (overrideOk && autoNextOk && playedFromCache && shuffleOk) ? 0 : 4;
+        const int rc = (overrideOk && autoNextOk && playedFromCache && qTagFollows
+                        && qTagFollows2 && noCacheOverride && shuffleOk) ? 0 : 4;
         printf("=== 队列自检 %s ===\n", rc == 0 ? "PASS" : "FAIL");
         return finishSelfTest(rc);
     }
@@ -3703,7 +3801,12 @@ int main(int argc, char *argv[])
         QObject::connect(player, &PlayerController::playFailed,
                          [&failMsgs, &failSeq, player](const QString &s) {
                              failMsgs << s;
-                             failSeq << player->currentSong().name;
+                             // 只有"已自动播放下一首"（前进事件）才进 failSeq：
+                             // 降档提示（"该音质不可用，正在降档重试…"）也走 playFailed，
+                             // 会把同一首歌记录两次 → 相邻重复 → 误判"回弹"（既有假 FAIL，
+                             // 五-73 逐项核 FAIL 时抓到：原版 git HEAD 同样 FAIL）。
+                             if (s.contains(QStringLiteral("已自动播放下一首")))
+                                 failSeq << player->currentSong().name;
                          });
 
         // -- 1) 随机模式：整队列取不到音频 → 前进式跳歌，不重放、不回弹 --
