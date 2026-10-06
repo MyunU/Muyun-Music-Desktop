@@ -3663,15 +3663,14 @@ int main(int argc, char *argv[])
         const bool qTagFollows2 = player->currentQualityLabel() == QStringLiteral("320K");
         printf("[%s] 5) 切回高档标签跟随（标签=%s）\n",
                qTagFollows2 ? "PASS" : "FAIL", qPrintable(player->currentQualityLabel()));
-        // 6) 关键回归（五-74 真凶）：选一个**没有缓存的高档**（FLAC），但这歌有 320k 旧缓存。
-        //    修复前：降级链会命中 320k 旧缓存直接播 → 标签被顶成 320K（与菜单选的 FLAC 不符，
-        //    要手动重选才对）。修复后：只查 FLAC 档缓存（无）→ 走下载（lxtest 音源秒回空、失败），
-        //    标签保持显示用户选的 FLAC，绝不被旧低档缓存顶替。
+        // 6) 音质标签恒等于用户选择（五-76 语义）：切到任意档，标签立刻变成该档名，
+        //    不受"这首歌有没有旧缓存 / 音源实际给哪档"影响。这里切 FLAC（无缓存、离线取源必失败），
+        //    标签仍应显示 FLAC —— 证明标签只跟选择走。
         player->setQualityId(QStringLiteral("flac"));
-        waitMs(400);   // 给下载/降档链一点时间跑完（离线必失败）
+        waitMs(400);   // 给下载/降档链一点时间跑完（离线必失败），确认标签不被实测档改写
         const QString flacLabel = player->currentQualityLabel();
         const bool noCacheOverride = (flacLabel == QStringLiteral("FLAC"));
-        printf("[%s] 6) 旧低档缓存不顶替所选高档（标签=%s）\n",
+        printf("[%s] 6) 音质标签恒等于所选档（标签=%s）\n",
                noCacheOverride ? "PASS" : "FAIL", qPrintable(flacLabel));
         player->setQualityId(QStringLiteral("320k"));   // 复位，别影响后续随机测试
 

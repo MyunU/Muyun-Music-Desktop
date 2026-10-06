@@ -40,32 +40,8 @@ static bool lowerQuality(AudioQuality q, AudioQuality *out)
     return true;
 }
 
-// ⚠ 把"脚本归一化后的实测档"还原回"用户真正想要的档"（修音质标签与实际不符）。
-//   LX 协议只有四档（128k/320k/flac/flac24bit），hires/master/atmos 都被 protocolQualityId
-//   压成 flac24bit 去问脚本，脚本返回的 actualQuality 也就成了 flac24bit → 播放条标签显示
-//   "FLAC/24Bit"，与菜单选的 Hi-Res/Master 不符。
-//   规则：若实测档与请求档"协议等价"（同为 flac24bit 一族，或同为 flac，或同 bitrate）→
-//   说明拿到的就是用户要的那一档，标签按用户选择显示；只有确实降到更低普通档才如实显示降级。
-static AudioQuality restoreWantedQuality(AudioQuality wanted, AudioQuality gotFromScript)
-{
-    auto protoTier = [](AudioQuality q) -> int {
-        switch (q) {
-        case AudioQuality::K128:      return 0;
-        case AudioQuality::K320:      return 1;
-        case AudioQuality::Flac:      return 2;
-        // flac24bit / hires / atmos / master 在协议里都是同一最高档
-        case AudioQuality::Flac24Bit:
-        case AudioQuality::HiRes:
-        case AudioQuality::Atmos:
-        case AudioQuality::Master:    return 3;
-        }
-        return -1;
-    };
-    // 脚本给的最高无损档(3) 覆盖了用户所有 ≥3 的选择；等价即还原为用户要的档名。
-    // 若脚本实际给了更低档（如只拿到 320k），tier 不等 → 如实返回降级结果。
-    if (protoTier(wanted) == protoTier(gotFromScript)) return wanted;
-    return gotFromScript;
-}
+// ⚠ 音质标签恒等于用户选择的档位（见 currentQualityLabel），与菜单 ✓ 同源，永不"实际档顶替选择"。
+//   m_actualQuality 只记录脚本真正返回的归一化档，供内部降档/校验逻辑用，不驱动对外显示。
 
 PlayerController::PlayerController(QObject *parent) : QObject(parent)
 {
@@ -165,9 +141,11 @@ QString PlayerController::qualityId() const { return Muyun::qualityId(m_quality)
 QString PlayerController::currentQualityLabel() const
 {
     if (m_currentSong.isLocal()) return QStringLiteral("本地文件");
-    // #12：别再一直"获取中"——还没实际播放时显示用户选的音质（播放后自动换成实测档）
-    if (!m_actualQualityKnown) return Muyun::qualityName(m_quality);
-    return Muyun::qualityName(m_actualQuality);
+    // ⚠ 音质标签**永远等于用户选择的档位**（m_quality），与音质菜单的 ✓ 同源 → 两者恒一致。
+    //   不再显示"实际拿到的归一化档"——之前那样会导致：选 24Bit 但音源只有 FLAC 时标签跳成
+    //   FLAC（与菜单不符）；有缓存时切音质标签也不动。用户明确要求跟随选择（五-76）。
+    //   实测档 m_actualQuality 仍保留给内部逻辑（如降档判断），只是不再驱动这个对外标签。
+    return Muyun::qualityName(m_quality);
 }
 
 // 实测码率 = 音频文件字节×8 / 时长秒。音源常虚标（标 Master 实际只给 320k/128k 的量），
@@ -838,10 +816,9 @@ void PlayerController::resolveAndPlayAt(AudioQuality startQ)
                     }
                     return;
                 }
-                // ⚠ 标签显示的实测档要"还原"到用户真正想要的档：脚本协议把 hires/master/atmos
-                //   都压成 flac24bit 返回，直接显示会变成 FLAC/24Bit 与菜单所选不符。
-                //   等价档按用户选择显示；确实降到更低普通档才如实显示降级。
-                m_actualQuality = restoreWantedQuality(m_wantedQuality, result.second);
+                // 内部记录脚本实际给的档（供降档/校验等逻辑用）；对外标签恒等于用户选择，
+                // 不受这里影响（见 currentQualityLabel）。
+                m_actualQuality = result.second;
                 m_actualQualityKnown = true;
                 emit currentQualityChanged();
                 // 缓存 key = 歌曲稳定身份 + 实际音质（在线 URL 每次签名不同，不能拿 URL 当 key）
