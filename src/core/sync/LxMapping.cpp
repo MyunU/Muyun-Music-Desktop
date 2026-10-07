@@ -33,37 +33,41 @@ QJsonObject songToMusicInfo(const Song &s)
     } else {
         id = source + QLatin1Char('_') + songmid;
     }
-    if (!s.lx.albumId.isEmpty()) meta[QStringLiteral("albumId")] = s.lx.albumId;
-    if (source == QLatin1String("tx")) {
-        if (!s.lx.strMediaMid.isEmpty()) meta[QStringLiteral("strMediaMid")] = s.lx.strMediaMid;
-        if (!s.lx.albumMid.isEmpty()) meta[QStringLiteral("albumMid")] = s.lx.albumMid;
-        if (!s.lx.songId.isEmpty()) meta[QStringLiteral("id")] = s.lx.songId;
-    } else if (source == QLatin1String("mg")) {
-        if (!s.lx.copyrightId.isEmpty()) meta[QStringLiteral("copyrightId")] = s.lx.copyrightId;
-        if (!s.lx.lrcUrl.isEmpty()) meta[QStringLiteral("lrcUrl")] = s.lx.lrcUrl;
-        if (!s.lx.mrcUrl.isEmpty()) meta[QStringLiteral("mrcUrl")] = s.lx.mrcUrl;
-        if (!s.lx.trcUrl.isEmpty()) meta[QStringLiteral("trcUrl")] = s.lx.trcUrl;
+    // ⚠ 手机端脚本常做 Object.entries(meta._qualitys)，undefined 会报
+    //   "Cannot convert undefined value to object"。用户收藏中 91% 的歌 lx.types
+    //   为空（老版本不存 qualitys），同步后手机端拿到的 meta._qualitys 就是
+    //   undefined → 脚本崩。修法：始终写入，空数据写空 array/object。
+    // ⚠ 同时写 _types（星海等脚本用 _types 而非 _qualitys）。
+    QJsonArray qualitys;
+    QJsonObject qualitysObj;
+    for (const auto &t : s.lx.types) {
+        QJsonObject q;
+        q[QStringLiteral("type")] = t.type;
+        q[QStringLiteral("size")] = t.size.isEmpty() ? QJsonValue::Null : QJsonValue(t.size);
+        if (source == QLatin1String("kg") && !t.hash.isEmpty())
+            q[QStringLiteral("hash")] = t.hash;
+        qualitys.append(q);
+        QJsonObject s2;
+        s2[QStringLiteral("size")] = q.value(QStringLiteral("size"));
+        if (source == QLatin1String("kg") && !t.hash.isEmpty())
+            s2[QStringLiteral("hash")] = t.hash;
+        qualitysObj[t.type] = s2;
     }
+    meta[QStringLiteral("qualitys")] = qualitys;
+    meta[QStringLiteral("_qualitys")] = qualitysObj;
+    meta[QStringLiteral("_types")] = qualitysObj;
 
-    // 音质列表（洛雪 qualitys/_qualitys；kg 每项带 hash）
-    if (!s.lx.types.isEmpty()) {
-        QJsonArray qualitys;
-        QJsonObject qualitysObj;
-        for (const auto &t : s.lx.types) {
-            QJsonObject q;
-            q[QStringLiteral("type")] = t.type;
-            q[QStringLiteral("size")] = t.size.isEmpty() ? QJsonValue::Null : QJsonValue(t.size);
-            if (source == QLatin1String("kg") && !t.hash.isEmpty())
-                q[QStringLiteral("hash")] = t.hash;
-            qualitys.append(q);
-            QJsonObject s2;
-            s2[QStringLiteral("size")] = q.value(QStringLiteral("size"));
-            if (source == QLatin1String("kg") && !t.hash.isEmpty())
-                s2[QStringLiteral("hash")] = t.hash;
-            qualitysObj[t.type] = s2;
-        }
-        meta[QStringLiteral("qualitys")] = qualitys;
-        meta[QStringLiteral("_qualitys")] = qualitysObj;
+    // albumId / hash 始终写入（空串不破坏脚本 ||/?? 兜底；缺 key 才危险）
+    meta[QStringLiteral("albumId")] = s.lx.albumId;
+    if (source == QLatin1String("tx")) {
+        meta[QStringLiteral("strMediaMid")] = s.lx.strMediaMid;
+        meta[QStringLiteral("albumMid")] = s.lx.albumMid;
+        meta[QStringLiteral("id")] = s.lx.songId;
+    } else if (source == QLatin1String("mg")) {
+        meta[QStringLiteral("copyrightId")] = s.lx.copyrightId;
+        meta[QStringLiteral("lrcUrl")] = s.lx.lrcUrl;
+        meta[QStringLiteral("mrcUrl")] = s.lx.mrcUrl;
+        meta[QStringLiteral("trcUrl")] = s.lx.trcUrl;
     }
 
     info[QStringLiteral("id")] = id;

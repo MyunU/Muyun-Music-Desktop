@@ -1,8 +1,8 @@
 {
   "_comment": "更新提示用的版本清单。发布版：改 version/notes 与下面两个 url，并把同版本号的安装包传到 Releases。版本号规则：修 bug 末位 +1、加功能中间 +1、项目大改动首位 +1。",
-  "version": "1.1.8",
+  "version": "1.1.9",
   "pubDate": "2026-10-07",
-  "notes": "1.1.8 更新：\n· 修复：播放收藏歌曲时音源脚本未生效、播放内容兜底到酷我音乐的问题（音源脚本改回主线程加载，QuickJS 实例稳定，跨线程调用返回空的老问题根治）\n· 修复：切换音源时程序卡死/未响应的问题（加载中禁用重复切换 + 主线程泵事件循环不冻结 UI）\n· 修复：老收藏条目 songmid 存错（数字 songId 冒充）导致音源解析 404 的问题（同平台重搜合法条目 + 补齐脚本字段，顺带解决同步洛雪手机端报 Cannot convert undefined value to object）",
-  "pageUrl": "https://github.com/MyunU/Muyun-Music-Desktop/releases/tag/v1.1.8",
-  "downloadUrl": "https://github.com/MyunU/Muyun-Music-Desktop/releases/download/v1.1.8/MuyunMusic-1.1.8.exe"
+  "notes": "1.1.9 更新：\n· 修复：同步给洛雪手机端后点击播放报 Cannot convert undefined value to object 的问题（老收藏缺 qualitys 元数据，手机端脚本访问 undefined 崩溃，改为始终写入空值兜底）\n· 修复：开启音效时拖动窗口标题栏导致音频卡住的问题（音效管线缓冲从 120ms 加大到 1.5 秒，兜住拖动时的调度抖动）",
+  "pageUrl": "https://github.com/MyunU/Muyun-Music-Desktop/releases/tag/v1.1.9",
+  "downloadUrl": "https://github.com/MyunU/Muyun-Music-Desktop/releases/download/v1.1.9/MuyunMusic-1.1.9.exe"
 }

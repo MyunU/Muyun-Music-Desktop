@@ -183,7 +183,11 @@ private:
     qint64 m_lastReportedMs = -1;
 
     static constexpr int kRingSeconds = 2;        ///< 环形缓冲容量（吸收主线程抖动）
-    static constexpr int kSinkBufferMs = 120;     ///< sink 内部缓冲（暂停尾巴/延迟）
+    // ⚠ 旧值 120ms 太小：拖标题栏时 GUI 线程狂刷 → CPU 争抢 → Pipeline 线程
+    //   被调度延迟 → 环形缓冲供数不及 → 120ms 秒空 → 音频卡住（用户报"拖窗就卡"）。
+    //   QMediaPlayer 路径没这问题是因为 FFmpeg 后端默认缓冲 ~5s。1500ms 兜住长时间拖动，
+    //   延迟增加 ~1.4s（用户无感，比卡住好）。
+    static constexpr int kSinkBufferMs = 1500;    ///< sink 内部缓冲（暂停尾巴/延迟）
     static constexpr int kTailMs = 700;           ///< 曲尾留给混响衰减的静音
 };
 
