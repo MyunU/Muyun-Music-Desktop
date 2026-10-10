@@ -105,7 +105,7 @@ Item {
         anchors.margins: -60
         source: (page.stageTakeover || !player.currentSong || !player.currentSong.cover)
                 ? "" : player.currentSong.cover
-        sourceSize: Qt.size(900, 900)
+        sourceSize: Qt.size(640, 640)
         fillMode: Image.PreserveAspectCrop
         asynchronous: true
         visible: status === Image.Ready
@@ -245,7 +245,7 @@ Item {
                         Image {
                             anchors.fill: parent
                             source: (player.currentSong && player.currentSong.cover) ? player.currentSong.cover : ""
-                            sourceSize: Qt.size(600, 600)
+                            sourceSize: Qt.size(320, 320)
                             fillMode: Image.PreserveAspectCrop
                             asynchronous: true
                             visible: status === Image.Ready
@@ -850,7 +850,7 @@ Item {
                     anchors.centerIn: parent
                     width: parent.width * 1.2; height: parent.height * 1.2
                     source: (player.currentSong && player.currentSong.cover) ? player.currentSong.cover : ""
-                    sourceSize: Qt.size(900, 900)
+                    sourceSize: Qt.size(640, 640)
                     fillMode: Image.PreserveAspectCrop
                     asynchronous: true
                     visible: status === Image.Ready

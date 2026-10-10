@@ -124,7 +124,7 @@ Rectangle {
                 Image {
                     anchors.fill: parent
                     source: player.currentSong.cover || ""
-                    sourceSize: Qt.size(120, 120)
+                    sourceSize: Qt.size(64, 64)
                     fillMode: Image.PreserveAspectCrop
                     asynchronous: true
                     visible: status === Image.Ready

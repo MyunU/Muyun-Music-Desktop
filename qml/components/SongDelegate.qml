@@ -79,7 +79,7 @@ Rectangle {
                 Image {
                     anchors.fill: parent
                     source: (row.song && row.song.cover) ? row.song.cover : ""
-                    sourceSize: Qt.size(120, 120)
+                    sourceSize: Qt.size(64, 64)
                     fillMode: Image.PreserveAspectCrop
                     asynchronous: true
                     visible: status === Image.Ready

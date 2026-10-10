@@ -1344,7 +1344,7 @@ Window {
                             Image {
                                 anchors.fill: parent
                                 source: qItem.modelData.cover || ""
-                                sourceSize: Qt.size(360, 360)
+                                sourceSize: Qt.size(80, 80)
                                 fillMode: Image.PreserveAspectCrop
                                 asynchronous: true
                                 visible: status === Image.Ready
@@ -1660,7 +1660,7 @@ Window {
                             Image {
                                 anchors.fill: parent
                                 source: (ddItem.modelData.song && ddItem.modelData.song.cover) ? ddItem.modelData.song.cover : ""
-                                sourceSize: Qt.size(120, 120)
+                                sourceSize: Qt.size(64, 64)
                                 fillMode: Image.PreserveAspectCrop
                                 asynchronous: true
                                 visible: status === Image.Ready

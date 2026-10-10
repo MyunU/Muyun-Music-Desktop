@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(MuyunMusic VERSION 1.2.0 LANGUAGES CXX C)
+project(MuyunMusic VERSION 1.2.1 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -16,7 +16,7 @@ endif()
 # Qt
 # ---------------------------------------------------------------------------
 find_package(Qt6 REQUIRED COMPONENTS
-    Core Gui Qml Quick QuickControls2 Network Multimedia Concurrent Sql Svg Widgets
+    Core Gui Qml Quick QuickControls2 Network Multimedia Concurrent Svg Widgets
 )
 
 qt_standard_project_setup(REQUIRES 6.5)
@@ -106,7 +106,7 @@ set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/minimp3/mini
 target_link_libraries(MuyunMusic PRIVATE
     quickjs
     Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2
-    Qt6::Network Qt6::Multimedia Qt6::Concurrent Qt6::Sql Qt6::Svg Qt6::Widgets
+    Qt6::Network Qt6::Multimedia Qt6::Concurrent Qt6::Svg Qt6::Widgets
 )
 
 # 洛雪同步 gzip 用 zlib：MinGW sysroot 自带 libz.a（g++ 原生 -lz），不走 FindZLIB

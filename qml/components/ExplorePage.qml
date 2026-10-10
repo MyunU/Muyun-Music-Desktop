@@ -204,7 +204,7 @@ Item {
                         Image {
                             anchors.fill: parent
                             source: modelData.cover || ""
-                            sourceSize: Qt.size(360, 360)
+                            sourceSize: Qt.size(200, 200)
                             fillMode: Image.PreserveAspectCrop
                             asynchronous: true
                             visible: status === Image.Ready
