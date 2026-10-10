@@ -24,6 +24,7 @@ Popup {
     property var sections: [
         { id: "local",  name: "本地音乐" },
         { id: "source", name: "在线音源" },
+        { id: "lyrics", name: "歌词设置" },
         { id: "player", name: "播放界面" },
         { id: "sync",   name: "同步" },
         { id: "about",  name: "关于" }
@@ -885,6 +886,77 @@ Popup {
                             cursorShape: Qt.PointingHandCursor
                             objectName: "githubLinkBtn"
                             onClicked: Qt.openUrlExternally("https://github.com/MyunU/Muyun-Music-Desktop")
+                        }
+                    }
+                }
+
+                Item { Layout.fillHeight: true }
+            }
+
+            // ---------- 歌词设置 ----------
+            ColumnLayout {
+                visible: panel.section === "lyrics"
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                spacing: 14
+
+                Text {
+                    text: "控制全屏播放页（经典 / Apple Music）歌词的翻译与罗马音显示。改动即时生效。"
+                    color: theme.subTextColor; font.pixelSize: 11; wrapMode: Text.Wrap
+                    Layout.fillWidth: true
+                }
+
+                // 翻译开关（直接绑定 settings，切换即时刷新）
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 10
+                    Text {
+                        text: "显示翻译歌词"
+                        color: theme.subTextColor; font.pixelSize: 12
+                    }
+                    Item { Layout.fillWidth: true }
+                    Rectangle {
+                        width: 80
+                        height: 26
+                        radius: 13
+                        color: settings.lyricTranslation ? theme.accentColor : theme.hoverColor
+                        Text {
+                            anchors.centerIn: parent
+                            text: "翻译" + (settings.lyricTranslation ? "：开" : "：关")
+                            color: settings.lyricTranslation ? "white" : theme.textColor
+                            font.pixelSize: 11
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: settings.lyricTranslation = !settings.lyricTranslation
+                        }
+                    }
+                }
+                // 罗马音开关
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 10
+                    Text {
+                        text: "显示罗马音注音"
+                        color: theme.subTextColor; font.pixelSize: 12
+                    }
+                    Item { Layout.fillWidth: true }
+                    Rectangle {
+                        width: 80
+                        height: 26
+                        radius: 13
+                        color: settings.lyricRoman ? theme.accentColor : theme.hoverColor
+                        Text {
+                            anchors.centerIn: parent
+                            text: "罗马音" + (settings.lyricRoman ? "：开" : "：关")
+                            color: settings.lyricRoman ? "white" : theme.textColor
+                            font.pixelSize: 11
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: settings.lyricRoman = !settings.lyricRoman
                         }
                     }
                 }

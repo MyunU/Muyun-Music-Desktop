@@ -358,6 +358,7 @@ QMediaPlayer *PlayerEngine::ensurePlayer()
             [this](qint64 dur) { emit durationChanged(dur); });
     connect(m_player, &QMediaPlayer::playbackStateChanged, this,
             [this](QMediaPlayer::PlaybackState s) {
+                if (m_suppressStateChange) return;   // seek 期间忽略状态闪变
                 if (s == QMediaPlayer::PlayingState) {
                     // 设备切换恢复：媒体加载就绪后跳到切设备前的位置（未就绪时挂起等状态信号）
                     tryApplyResumeSeek();
@@ -648,7 +649,37 @@ void PlayerEngine::seek(qint64 ms)
         m_effect->seek(ms);
         return;
     }
-    if (m_player) m_player->setPosition(ms);
+    if (!m_player) return;
+
+    if (m_player->playbackState() == QMediaPlayer::PlayingState) {
+        // 重建 QAudioOutput 冲刷旧音频缓冲（类似 EffectPlayer 重启 sink），再 setPosition + play
+        m_suppressStateChange = true;
+        m_positionTimer.stop();
+
+        m_player->stop();
+
+        // 重建 output 丢弃内部旧缓冲数据
+        if (m_output) {
+            const QAudioDevice dev = m_output->device();
+            delete m_output;
+            m_output = new QAudioOutput(dev, this);
+            m_output->setVolume(m_muted ? 0.0 : m_volume);
+            m_player->setAudioOutput(m_output);
+        }
+
+        m_player->setPosition(ms);
+        m_player->play();
+
+        m_positionTimer.start();
+        m_suppressStateChange = false;
+        m_playing = true;
+        m_loading = false;
+        emit positionChanged(ms);
+    } else {
+        // 暂停/停止时：只需设置位置（无音频缓冲需冲刷，无延迟）
+        m_player->setPosition(ms);
+        emit positionChanged(ms);
+    }
 }
 
 void PlayerEngine::setVolume(qreal volume)

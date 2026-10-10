@@ -15,8 +15,8 @@ Item {
     z: 500
 
     property string style: settings.playerStyle
-    property bool showTranslation: true
-    property bool showRoman: false
+    property bool showTranslation: settings.lyricTranslation
+    property bool showRoman: settings.lyricRoman
     property bool controlsVisible: true
 
     property int activeIndex: -1
@@ -65,6 +65,23 @@ Item {
         recompute()
     }
 
+    // 根据列表内容坐标，找到该位置对应的歌词行索引（精确扫描 delegate）
+    function indexAtScroll(list, contentPosY) {
+        var content = list.contentItem
+        var n = content.children.length
+        for (var i = 0; i < n; i++) {
+            var child = content.children[i]
+            if (child.y <= contentPosY && child.y + child.height >= contentPosY)
+                return child.index
+        }
+        return -1
+    }
+
+    // 当前列表视口中心对应的歌词行索引
+    function centerIndex(list) {
+        return page.indexAtScroll(list, list.contentY + list.height / 2)
+    }
+
     Connections {
         target: player
         function onPositionChanged() { page.recompute() }
@@ -74,13 +91,18 @@ Item {
     Connections {
         target: settings
         function onPlayerStyleChanged() { page.style = settings.playerStyle }
+        function onLyricSettingsChanged() {
+            page.showTranslation = settings.lyricTranslation
+            page.showRoman = settings.lyricRoman
+        }
     }
 
     // ===== 背景（共用；舞台接管时连模糊一起关掉）=====
+    // 封面底图（模糊 + 暗化，作为亚克力基底）
     Image {
         id: coverBg
         anchors.fill: parent
-        anchors.margins: -100
+        anchors.margins: -60
         source: (page.stageTakeover || !player.currentSong || !player.currentSong.cover)
                 ? "" : player.currentSong.cover
         sourceSize: Qt.size(900, 900)
@@ -88,28 +110,37 @@ Item {
         asynchronous: true
         visible: status === Image.Ready
     }
-    // amll/mineradio：强模糊；classic：轻模糊
+    // 亚克力基底：极模糊（封面完全看不出样子，只剩色彩）
     MultiEffect {
         source: coverBg
         anchors.fill: coverBg
         blurEnabled: true
-        blur: page.style === "classic" ? 0.3 : 0.6
-        blurMax: page.style === "classic" ? 40 : 64
-        brightness: page.style === "classic" ? -0.4 : (theme.dark ? -0.28 : -0.05)
+        blur: 0.85
+        blurMax: 80
+        brightness: page.style === "classic" ? -0.1 : 0.0
         visible: coverBg.visible
     }
+    // 亚克力半透明覆盖层（适度，让色彩透出）
     Rectangle {
         anchors.fill: parent
-        color: theme.dark ? "#dd101014" : "#ddf2f2f4"
+        color: theme.dark ? "#cc101014" : "#ccf2f2f4"
+        visible: coverBg.visible
+    }
+    // 无封面时的纯色背景
+    Rectangle {
+        anchors.fill: parent
+        color: theme.dark ? "#ee101014" : "#eef2f2f4"
         visible: !coverBg.visible
     }
+    // 边缘渐变（增强景深感）
     Rectangle {
         anchors.fill: parent
         gradient: Gradient {
-            GradientStop { position: 0.0; color: theme.dark ? "#99000000" : "#88ffffff" }
-            GradientStop { position: 0.5; color: "#33000000" }
-            GradientStop { position: 1.0; color: theme.dark ? "#bb000000" : "#88ffffff" }
+            GradientStop { position: 0.0; color: theme.dark ? "#55000000" : "#33ffffff" }
+            GradientStop { position: 0.5; color: "#11000000" }
+            GradientStop { position: 1.0; color: theme.dark ? "#55000000" : "#33ffffff" }
         }
+        visible: coverBg.visible
     }
 
     // ===== 遮罩：点击/移动唤出控件 =====
@@ -178,24 +209,6 @@ Item {
                 font.pixelSize: 12
                 visible: page.style === "amll"
             }
-            // 右侧：翻译开关
-            Row {
-                anchors.right: topBar.right
-                anchors.rightMargin: 16
-                anchors.verticalCenter: parent.verticalCenter
-                spacing: 10
-
-                Rectangle {
-                    width: 52; height: 26; radius: 13
-                    color: page.showTranslation ? theme.accentColor : "transparent"
-                    border.color: page.showTranslation ? theme.accentColor : theme.borderColor
-                    border.width: 1
-                    Text { anchors.centerIn: parent; text: "翻译"
-                           color: page.showTranslation ? "white" : theme.subTextColor; font.pixelSize: 11 }
-                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                onClicked: page.showTranslation = !page.showTranslation }
-                }
-            }
         }
     }
 
@@ -232,7 +245,7 @@ Item {
                         Image {
                             anchors.fill: parent
                             source: (player.currentSong && player.currentSong.cover) ? player.currentSong.cover : ""
-                            sourceSize: Qt.size(400, 400)
+                            sourceSize: Qt.size(600, 600)
                             fillMode: Image.PreserveAspectCrop
                             asynchronous: true
                             visible: status === Image.Ready
@@ -258,14 +271,57 @@ Item {
                     ColumnLayout {
                         Layout.fillWidth: true; spacing: 2
                         Rectangle {
+                            id: classicSeek
                             Layout.fillWidth: true; Layout.preferredHeight: 4; radius: 2; color: theme.borderColor
+                            property bool dragging: false
                             property real ratio: player.duration > 0 ? player.position / player.duration : 0
                             Rectangle {
                                 anchors.left: parent.left; anchors.top: parent.top; anchors.bottom: parent.bottom
                                 width: parent.width * parent.ratio; radius: 2; color: theme.accentColor
                             }
-                            MouseArea { anchors.fill: parent; anchors.margins: -8
-                                        onClicked: player.seekRatio(Math.max(0, Math.min(1, mouseX / parent.width))) }
+                            Rectangle {
+                                anchors.verticalCenter: parent.verticalCenter
+                                x: Math.max(0, Math.min(parent.width - 8, parent.width * parent.ratio - 4))
+                                width: 8; height: 8; radius: 4; color: "white"
+                                visible: classicSeekMa.containsMouse || classicSeek.dragging
+                                Behavior on x { NumberAnimation { duration: 60 } }
+                            }
+                            MouseArea {
+                                id: classicSeekMa
+                                anchors.fill: parent; anchors.topMargin: -10; anchors.bottomMargin: -10
+                                hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                onPressed: {
+                                    classicSeek.dragging = true
+                                    player.seekRatio(Math.max(0, Math.min(1, mouseX / classicSeek.width)))
+                                }
+                                onReleased: classicSeek.dragging = false
+                                onClicked: player.seekRatio(Math.max(0, Math.min(1, mouseX / classicSeek.width)))
+                                onPositionChanged: {
+                                    if (classicSeek.dragging)
+                                        player.seekRatio(Math.max(0, Math.min(1, mouseX / classicSeek.width)))
+                                    var r = Math.max(0, Math.min(1, mouseX / classicSeek.width))
+                                    classicTipText.text = player.formatTime(r * player.duration)
+                                    classicTip.x = Math.max(0, Math.min(classicSeek.width - classicTip.width, mouseX - classicTip.width / 2))
+                                    classicTip.visible = true
+                                }
+                                onExited: classicTip.visible = false
+                            }
+                            Rectangle {
+                                id: classicTip
+                                anchors.bottom: parent.top
+                                anchors.bottomMargin: 6
+                                width: classicTipText.width + 8
+                                height: classicTipText.height + 6
+                                radius: 4
+                                color: "#cc333333"
+                                visible: false
+                                Text {
+                                    id: classicTipText
+                                    anchors.centerIn: parent
+                                    text: ""
+                                    color: "white"; font.pixelSize: 10
+                                }
+                            }
                         }
                         RowLayout {
                             Layout.fillWidth: true
@@ -315,7 +371,7 @@ Item {
                 anchors.bottomMargin: 16
                 clip: true
                 model: player.lyricLines
-                spacing: 16
+                spacing: 28
                 boundsBehavior: Flickable.StopAtBounds
                 property int lastIdx: -1
                 onCountChanged: if (page.activeIndex >= 0) positionViewAtIndex(page.activeIndex, ListView.Center)
@@ -345,16 +401,107 @@ Item {
                         line: modelData
                         active: index === page.activeIndex
                         progress: index === page.activeIndex ? page.activeProgress : 0
-                        size: active ? 22 : 17
+                        size: active ? 26 : 20
                         textColor: theme.textColor
                         inactiveColor: theme.textColor
                         inactiveOpacity: 0.45
                         accentColor: theme.accentColor
                         showTranslation: page.showTranslation
                         showRoman: page.showRoman
-                        karaoke: false
+                        karaoke: true
                         maxW: classicList.width
-                        onClicked: page.seekLine(index)
+                    }
+                }
+                // 拖动歌词 scrub：歌词跟随手指滚动，中心线处的歌词决定目标时间
+                MouseArea {
+                    id: classicScrubMa
+                    anchors.fill: parent
+                    preventStealing: true
+                    acceptedButtons: Qt.LeftButton
+                    property real startY: 0
+                    property real startContentY: 0
+                    property bool scrubbing: false
+                    onPressed: {
+                        startY = mouseY
+                        startContentY = classicList.contentY
+                        scrubbing = false
+                    }
+                    onPositionChanged: {
+                        if (!pressed) return
+                        var dy = mouseY - startY
+                        if (!scrubbing && Math.abs(dy) > 12) {
+                            scrubbing = true
+                            classicDragTime.text = player.formatTime(player.position)
+                            classicDragIndicator.visible = true
+                        }
+                        if (!scrubbing) return
+                        // 歌词跟随手指：上拖看后面的歌词，下拖看前面的
+                        classicList.contentY = startContentY - dy
+                        // 中心线处那行歌词的时间
+                        var ci = page.centerIndex(classicList)
+                        var line = (ci >= 0 && player.lyricLines) ? player.lyricLines[ci] : null
+                        if (line && line.time != null)
+                            classicDragTime.text = player.formatTime(line.time * 1000)
+                    }
+                    onReleased: {
+                        if (scrubbing) {
+                            var ci = page.centerIndex(classicList)
+                            var line = (ci >= 0 && player.lyricLines) ? player.lyricLines[ci] : null
+                            if (line && line.time != null) {
+                                player.seek(line.time * 1000)
+                                page.recompute()
+                            }
+                        } else {
+                            var ci2 = page.indexAtScroll(classicList, startContentY + startY)
+                            if (ci2 >= 0) page.seekLine(ci2)
+                        }
+                        scrubbing = false
+                        classicDragIndicator.visible = false
+                    }
+                    onCanceled: {
+                        scrubbing = false
+                        classicDragIndicator.visible = false
+                    }
+                }
+                // 拖动歌词时的指示线（固定在歌词区中心，拖动时出现并显示目标时间）
+                // 两侧短线、中间留空（不挡歌词）；时间无底框在右端
+                Item {
+                    id: classicDragIndicator
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    y: parent.height / 2
+                    height: 2
+                    visible: false
+
+                    // 时间（右端，无底框）
+                    Text {
+                        id: classicDragTime
+                        anchors.right: parent.right
+                        anchors.rightMargin: 8
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: ""
+                        color: "white"
+                        font.pixelSize: 14
+                        font.bold: true
+                    }
+                    // 左侧短线
+                    Rectangle {
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.left: parent.left
+                        width: 120
+                        height: 2
+                        color: "white"
+                        opacity: 0.7
+                    }
+                    // 右侧短线（止于时间文字左侧）
+                    Rectangle {
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.right: parent.right
+                        anchors.rightMargin: classicDragTime.width + 16
+                        width: 120
+                        height: 2
+                        color: "white"
+                        opacity: 0.7
                     }
                 }
             }
@@ -377,28 +524,82 @@ Item {
 
                 Item {
                     Layout.alignment: Qt.AlignHCenter
-                    Layout.preferredWidth: 110
-                    Layout.preferredHeight: 110
+                    Layout.preferredWidth: 150
+                    Layout.preferredHeight: 150
+                    // 外圈光晕（不随唱片旋转）
                     Rectangle {
+                        anchors.centerIn: parent
+                        width: parent.width + 16; height: parent.height + 16
+                        radius: Math.min(width, height) / 2
+                        color: "transparent"
+                        border.width: 3
+                        border.color: theme.accentColor
+                        opacity: 0.2
+                    }
+                    // 唱片本体（旋转）：黑胶盘面包裹封面 + 中心孔
+                    Item {
                         id: disc
-                        anchors.fill: parent; radius: width / 2
-                        color: theme.cardColor; clip: true
-                        Image {
-                            anchors.fill: parent
-                            source: (player.currentSong && player.currentSong.cover) ? player.currentSong.cover : ""
-                            sourceSize: Qt.size(400, 400)
-                            fillMode: Image.PreserveAspectCrop
-                            asynchronous: true; visible: status === Image.Ready
-                        }
-                        Icon { anchors.centerIn: parent; name: "music"; iconSize: 38
-                               iconColor: theme.subTextColor
-                               visible: !(player.currentSong && player.currentSong.cover) }
+                        anchors.fill: parent
+                        // 黑胶盘面
                         Rectangle {
-                            anchors.centerIn: parent; width: 24; height: 24; radius: 12
-                            color: theme.dark ? "#1a1a1a" : "#e0e0e0"
+                            anchors.fill: parent
+                            radius: Math.min(width, height) / 2
+                            color: theme.dark ? "#0d0d0d" : "#1a1a1a"
+                        }
+                        // 唱片纹路（同心圆，低调）
+                        Rectangle {
+                            anchors.centerIn: parent; width: 144; height: 144
+                            radius: 72; color: "transparent"
+                            border.width: 1; border.color: theme.dark ? "#262626" : "#2e2e2e"
+                        }
+                        Rectangle {
+                            anchors.centerIn: parent; width: 132; height: 132
+                            radius: 66; color: "transparent"
+                            border.width: 1; border.color: theme.dark ? "#212121" : "#2a2a2a"
+                        }
+                        // 封面（唱片包裹封面：Canvas 绘制圆形裁剪）
+                        Canvas {
+                            id: discCoverCanvas
+                            anchors.centerIn: parent
+                            width: 112; height: 112
+                            property url imgSrc: (player.currentSong && player.currentSong.cover) ? player.currentSong.cover : ""
+                            
+                            // 隐藏的原图，用于 Canvas 绘制
+                            Image {
+                                id: discCoverImg
+                                source: parent.imgSrc
+                                visible: false
+                                asynchronous: true
+                                onStatusChanged: if (status === Image.Ready) parent.requestPaint()
+                            }
+                            
+                            onPaint: {
+                                var ctx = getContext("2d")
+                                ctx.clearRect(0, 0, width, height)
+                                if (discCoverImg.status !== Image.Ready) return
+                                ctx.save()
+                                // 圆形裁剪
+                                ctx.beginPath()
+                                ctx.arc(width / 2, height / 2, Math.min(width, height) / 2, 0, 2 * Math.PI)
+                                ctx.clip()
+                                // 绘制封面
+                                ctx.drawImage(discCoverImg, 0, 0, width, height)
+                                ctx.restore()
+                            }
+                        }
+                        // 无封面时的占位
+                        Icon {
+                            anchors.centerIn: parent; name: "music"; iconSize: 44
+                            iconColor: theme.dark ? "#3a3a3a" : "#2a2a2a"
+                            visible: discCoverImg.status !== Image.Ready
+                        }
+                        // 唱片中心孔
+                        Rectangle {
+                            anchors.centerIn: parent; width: 18; height: 18; radius: 9
+                            color: theme.dark ? "#050505" : "#101010"
                         }
                         RotationAnimator {
-                            target: disc; from: 0; to: 360; duration: 24000
+                            target: disc; from: 0; to: 360; duration: 36000
                             loops: Animation.Infinite; running: player.isPlaying && page.visible
                         }
                     }
@@ -429,6 +630,47 @@ Item {
                             amllList.positionViewAtIndex(activeIndex, ListView.Center)
                         }
                     }
+                    // 拖动歌词时的指示线（固定在歌词区中心，拖动时出现并显示目标时间）
+                    // 两侧短线、中间留空（不挡歌词）；时间无底框在右端
+                    Item {
+                        id: amllDragIndicator
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        y: parent.height / 2
+                        height: 2
+                        visible: false
+
+                        // 时间（右端，无底框）
+                        Text {
+                            id: amllDragTime
+                            anchors.right: parent.right
+                            anchors.rightMargin: 8
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: ""
+                            color: "white"
+                            font.pixelSize: 14
+                            font.bold: true
+                        }
+                        // 左侧短线
+                        Rectangle {
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.left: parent.left
+                            width: 120
+                            height: 2
+                            color: "white"
+                            opacity: 0.7
+                        }
+                        // 右侧短线（止于时间文字左侧）
+                        Rectangle {
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.right: parent.right
+                            anchors.rightMargin: amllDragTime.width + 16
+                            width: 120
+                            height: 2
+                            color: "white"
+                            opacity: 0.7
+                        }
+                    }
                     delegate: Item {
                         required property var modelData
                         required property int index
@@ -441,15 +683,63 @@ Item {
                             active: index === page.activeIndex
                             progress: index === page.activeIndex ? page.activeProgress : 0
                             size: active ? 30 : 22
-                        textColor: theme.textColor
-                        inactiveColor: theme.textColor
-                        inactiveOpacity: 0.35
-                        accentColor: theme.accentColor
-                        showTranslation: page.showTranslation
-                        showRoman: page.showRoman
-                        karaoke: false
-                        maxW: amllList.width
-                        onClicked: page.seekLine(index)
+                            textColor: theme.textColor
+                            inactiveColor: theme.textColor
+                            inactiveOpacity: 0.35
+                            accentColor: theme.accentColor
+                            showTranslation: page.showTranslation
+                            showRoman: page.showRoman
+                            karaoke: true
+                            maxW: amllList.width
+                        }
+                    }
+                    // 拖动歌词 scrub：歌词跟随手指滚动，中心线处的歌词决定目标时间
+                    MouseArea {
+                        id: amllScrubMa
+                        anchors.fill: parent
+                        preventStealing: true
+                        acceptedButtons: Qt.LeftButton
+                        property real startY: 0
+                        property real startContentY: 0
+                        property bool scrubbing: false
+                        onPressed: {
+                            startY = mouseY
+                            startContentY = amllList.contentY
+                            scrubbing = false
+                        }
+                        onPositionChanged: {
+                            if (!pressed) return
+                            var dy = mouseY - startY
+                            if (!scrubbing && Math.abs(dy) > 12) {
+                                scrubbing = true
+                                amllDragTime.text = player.formatTime(player.position)
+                                amllDragIndicator.visible = true
+                            }
+                            if (!scrubbing) return
+                            amllList.contentY = startContentY - dy
+                            var ci = page.centerIndex(amllList)
+                            var line = (ci >= 0 && player.lyricLines) ? player.lyricLines[ci] : null
+                            if (line && line.time != null)
+                                amllDragTime.text = player.formatTime(line.time * 1000)
+                        }
+                        onReleased: {
+                            if (scrubbing) {
+                                var ci = page.centerIndex(amllList)
+                                var line = (ci >= 0 && player.lyricLines) ? player.lyricLines[ci] : null
+                                if (line && line.time != null) {
+                                    player.seek(line.time * 1000)
+                                    page.recompute()
+                                }
+                            } else {
+                                var ci2 = page.indexAtScroll(amllList, startContentY + startY)
+                                if (ci2 >= 0) page.seekLine(ci2)
+                            }
+                            scrubbing = false
+                            amllDragIndicator.visible = false
+                        }
+                        onCanceled: {
+                            scrubbing = false
+                            amllDragIndicator.visible = false
                         }
                     }
                 }
@@ -463,14 +753,57 @@ Item {
                         Text { text: player.formatTime(player.position); color: theme.subTextColor; font.pixelSize: 11
                                Layout.preferredWidth: 44 }
                         Rectangle {
+                            id: amllSeek
                             Layout.fillWidth: true; Layout.preferredHeight: 4; radius: 2; color: theme.borderColor
+                            property bool dragging: false
                             property real ratio: player.duration > 0 ? player.position / player.duration : 0
                             Rectangle {
                                 anchors.left: parent.left; anchors.top: parent.top; anchors.bottom: parent.bottom
                                 width: parent.width * parent.ratio; radius: 2; color: theme.accentColor
                             }
-                            MouseArea { anchors.fill: parent; anchors.margins: -8
-                                        onClicked: player.seekRatio(Math.max(0, Math.min(1, mouseX / parent.width))) }
+                            Rectangle {
+                                anchors.verticalCenter: parent.verticalCenter
+                                x: Math.max(0, Math.min(parent.width - 10, parent.width * parent.ratio - 5))
+                                width: 10; height: 10; radius: 5; color: "white"
+                                visible: amllSeekMa.containsMouse || amllSeek.dragging
+                                Behavior on x { NumberAnimation { duration: 60 } }
+                            }
+                            MouseArea {
+                                id: amllSeekMa
+                                anchors.fill: parent; anchors.topMargin: -10; anchors.bottomMargin: -10
+                                hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                onPressed: {
+                                    amllSeek.dragging = true
+                                    player.seekRatio(Math.max(0, Math.min(1, mouseX / amllSeek.width)))
+                                }
+                                onReleased: amllSeek.dragging = false
+                                onClicked: player.seekRatio(Math.max(0, Math.min(1, mouseX / amllSeek.width)))
+                                onPositionChanged: {
+                                    if (amllSeek.dragging)
+                                        player.seekRatio(Math.max(0, Math.min(1, mouseX / amllSeek.width)))
+                                    var r = Math.max(0, Math.min(1, mouseX / amllSeek.width))
+                                    amllTipText.text = player.formatTime(r * player.duration)
+                                    amllTip.x = Math.max(0, Math.min(amllSeek.width - amllTip.width, mouseX - amllTip.width / 2))
+                                    amllTip.visible = true
+                                }
+                                onExited: amllTip.visible = false
+                            }
+                            Rectangle {
+                                id: amllTip
+                                anchors.bottom: parent.top
+                                anchors.bottomMargin: 6
+                                width: amllTipText.width + 8
+                                height: amllTipText.height + 6
+                                radius: 4
+                                color: "#cc333333"
+                                visible: false
+                                Text {
+                                    id: amllTipText
+                                    anchors.centerIn: parent
+                                    text: ""
+                                    color: "white"; font.pixelSize: 10
+                                }
+                            }
                         }
                         Text { text: player.formatTime(player.duration); color: theme.subTextColor; font.pixelSize: 11
                                Layout.preferredWidth: 44 }
@@ -488,6 +821,10 @@ Item {
                                         onClicked: player.togglePlay() }
                         }
                         IconButton { name: "next"; iconSize: 24; onClicked: player.next() }
+                        IconButton { name: page.favState ? "heart-filled" : "heart"
+                                     iconSize: 24
+                                     iconColor: page.favState ? "#ff4d4f" : theme.subTextColor
+                                     onClicked: library.toggleFavorite(player.currentSong) }
                         Item { Layout.fillWidth: true }
                     }
                 }

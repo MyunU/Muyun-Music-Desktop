@@ -86,6 +86,11 @@ SettingsController::SettingsController(LibraryController *library, QObject *pare
     m_playerStyle = (style == QStringLiteral("classic") || style == QStringLiteral("mineradio"))
                         ? style : QStringLiteral("amll");
 
+    m_lyricTranslation = DocumentStore::instance()->readSync(
+        QStringLiteral("general"), QStringLiteral("lyricTranslation"), true).toBool();
+    m_lyricRoman = DocumentStore::instance()->readSync(
+        QStringLiteral("general"), QStringLiteral("lyricRoman"), false).toBool();
+
     m_embedCover  = DocumentStore::instance()->readSync(
         QStringLiteral("general"), QStringLiteral("embedCover"), true).toBool();
     m_embedLyrics = DocumentStore::instance()->readSync(
@@ -133,6 +138,24 @@ void SettingsController::setPlayerStyle(const QString &style)
     DocumentStore::instance()->write(QStringLiteral("general"),
                                      QStringLiteral("playerStyle"), s);
     emit playerStyleChanged();
+}
+
+void SettingsController::setLyricTranslation(bool v)
+{
+    if (m_lyricTranslation == v) return;
+    m_lyricTranslation = v;
+    DocumentStore::instance()->write(QStringLiteral("general"),
+                                      QStringLiteral("lyricTranslation"), v);
+    emit lyricSettingsChanged();
+}
+
+void SettingsController::setLyricRoman(bool v)
+{
+    if (m_lyricRoman == v) return;
+    m_lyricRoman = v;
+    DocumentStore::instance()->write(QStringLiteral("general"),
+                                      QStringLiteral("lyricRoman"), v);
+    emit lyricSettingsChanged();
 }
 
 // ===========================================================================

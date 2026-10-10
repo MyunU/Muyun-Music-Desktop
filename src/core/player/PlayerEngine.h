@@ -182,6 +182,8 @@ private:
     /// （实测 0xC00000FD：切歌瞬间旧歌还在 Playing，时长校验误判"时长异常"→ 又 stop()）。
     /// 已在 stop() 中则直接返回，不让信号链重入。
     bool m_stopping = false;
+    /// seek 期间抑制 QMediaPlayer 状态变化信号（stop→setPosition→play 会闪 Stopped→Playing）
+    bool m_suppressStateChange = false;
     QTimer m_positionTimer;
     QString m_pendingLocalPath;
 

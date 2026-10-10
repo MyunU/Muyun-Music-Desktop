@@ -53,6 +53,10 @@ class SettingsController : public QObject
     Q_PROPERTY(QString exitAction READ exitAction WRITE setExitAction NOTIFY exitActionChanged)
     /// 全屏播放界面样式："classic" 经典 / "amll" Apple Music / "mineradio" 舞台
     Q_PROPERTY(QString playerStyle READ playerStyle WRITE setPlayerStyle NOTIFY playerStyleChanged)
+    /// 全屏歌词页是否显示翻译（默认开）
+    Q_PROPERTY(bool lyricTranslation READ lyricTranslation WRITE setLyricTranslation NOTIFY lyricSettingsChanged)
+    /// 全屏歌词页是否显示罗马音（默认关）
+    Q_PROPERTY(bool lyricRoman READ lyricRoman WRITE setLyricRoman NOTIFY lyricSettingsChanged)
     /// 下载完成后是否把封面/歌词内嵌进音频文件（默认开）
     Q_PROPERTY(bool embedCover READ embedCover WRITE setEmbedCover NOTIFY embedChanged)
     Q_PROPERTY(bool embedLyrics READ embedLyrics WRITE setEmbedLyrics NOTIFY embedChanged)
@@ -115,6 +119,12 @@ public:
     QString playerStyle() const { return m_playerStyle; }
     void setPlayerStyle(const QString &style);
 
+    // ---- 歌词显示选项 ----
+    bool lyricTranslation() const { return m_lyricTranslation; }
+    void setLyricTranslation(bool v);
+    bool lyricRoman() const { return m_lyricRoman; }
+    void setLyricRoman(bool v);
+
     // ---- 下载内嵌 ----
     bool embedCover() const { return m_embedCover; }
     void setEmbedCover(bool v);
@@ -135,6 +145,7 @@ signals:
     void lxLoadingChanged();
     void exitActionChanged();
     void playerStyleChanged();
+    void lyricSettingsChanged();
     void embedChanged();
 
 private:
@@ -160,6 +171,8 @@ private:
     bool m_lxPendingReload = false;
     QString m_exitAction = QStringLiteral("ask");
     QString m_playerStyle = QStringLiteral("amll");
+    bool m_lyricTranslation = true;
+    bool m_lyricRoman = false;
     bool m_embedCover = true;
     bool m_embedLyrics = true;
     QTimer m_cacheTimer;

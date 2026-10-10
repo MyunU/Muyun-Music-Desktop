@@ -48,7 +48,15 @@ PlayerController::PlayerController(QObject *parent) : QObject(parent)
     m_engine = new PlayerEngine(this);
 
     connect(m_engine, &PlayerEngine::positionChanged, this,
-            [this]() { emit positionChanged(); updateCurrentLyric(); });
+            [this]() {
+                // seek 乐观值：引擎追上目标位置（允许 100ms 误差）后清除
+                if (m_pendingSeekMs >= 0 && m_engine->position() >= m_pendingSeekMs - 100) {
+                    m_pendingSeekMs = -1;
+                    m_seekClearTimer.stop();
+                }
+                emit positionChanged();
+                updateCurrentLyric();
+            });
     connect(m_engine, &PlayerEngine::durationChanged, this,
             [this]() {
                 emit durationChanged();
@@ -106,6 +114,12 @@ PlayerController::PlayerController(QObject *parent) : QObject(parent)
     connect(&m_songWatchdog, &QTimer::timeout, this,
             &PlayerController::onSongWatchdogTimeout);
 
+    // seek 乐观值超时清除（2s 兜底，正常情况引擎追上前就清了）
+    m_seekClearTimer.setSingleShot(true);
+    m_seekClearTimer.setInterval(2000);
+    connect(&m_seekClearTimer, &QTimer::timeout, this,
+            [this]() { m_pendingSeekMs = -1; });
+
     // 预缓存：切歌/歌单变化 → 把接下来几首静默下载到缓存目录
     m_preloader = new AudioPreloader(this);
     connect(this, &PlayerController::currentSongChanged, this,
@@ -123,7 +137,11 @@ PlayerController::PlayerController(QObject *parent) : QObject(parent)
 
 QVariantMap PlayerController::currentSongMap() const { return m_currentSong.toMap(); }
 bool PlayerController::isPlaying() const { return m_engine->isPlaying(); }
-qint64 PlayerController::position() const { return m_engine->position(); }
+qint64 PlayerController::position() const
+{
+    if (m_pendingSeekMs >= 0) return m_pendingSeekMs;
+    return m_engine->position();
+}
 qint64 PlayerController::duration() const { return m_engine->duration(); }
 qreal PlayerController::volume() const { return m_engine->volume(); }
 bool PlayerController::muted() const { return m_engine->isMuted(); }
@@ -563,7 +581,7 @@ void PlayerController::pause() { m_engine->pause(); disarmSongWatchdog(); m_dura
 void PlayerController::resume() { m_engine->resume(); emit isPlayingChanged(); }
 void PlayerController::stop() { m_engine->stop(); disarmSongWatchdog(); m_durationCheckArmed = false; emit isPlayingChanged(); }
 
-void PlayerController::seek(qint64 ms) { m_engine->seek(ms); emit positionChanged(); }
+void PlayerController::seek(qint64 ms) { m_pendingSeekMs = ms; m_seekClearTimer.start(); m_engine->seek(ms); emit positionChanged(); }
 
 void PlayerController::seekRatio(qreal ratio)
 {

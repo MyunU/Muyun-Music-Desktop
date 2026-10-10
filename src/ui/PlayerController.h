@@ -295,6 +295,11 @@ private:
 
     QTimer m_positionTimer;
 
+    // seek 期间乐观返回目标位置（QMediaPlayer setPosition 是异步的，几百毫秒才落点；
+    // 期间 UI 若直接读引擎位置会显示旧值）；引擎追上后或 2s 超时自动清除
+    qint64 m_pendingSeekMs = -1;
+    QTimer m_seekClearTimer;
+
     // 预缓存：切歌后把接下来几首静默下载到缓存目录（见 AudioPreloader）
     AudioPreloader *m_preloader = nullptr;
     void restartPreloader();
