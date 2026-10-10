@@ -1,8 +1,8 @@
 {
   "_comment": "更新提示用的版本清单。发布版：改 version/notes 与下面两个 url，并把同版本号的安装包传到 Releases。版本号规则：修 bug 末位 +1、加功能中间 +1、项目大改动首位 +1。",
-  "version": "1.2.0",
-  "pubDate": "2026-10-09",
-  "notes": "1.2.0 优化及 bug 修复\n· 全屏歌词页拖动歌词即时跳转\n· Apple Music 唱片封面圆形裁剪\n· 歌词翻译/罗马音独立开关\n· 全屏歌词背景改亚克力质感\n· 经典模式歌词行距字号优化\n· 封面清晰度提升",
-  "pageUrl": "https://github.com/MyunU/Muyun-Music-Desktop/releases/tag/v1.2.0",
-  "downloadUrl": "https://github.com/MyunU/Muyun-Music-Desktop/releases/download/v1.2.0/MuyunMusic-1.2.0.exe"
+  "version": "1.2.1",
+  "pubDate": "2026-10-10",
+  "notes": "1.2.1 性能优化\n· 内存占用降低约 23%（启动 130MB → 稳定 100MB）",
+  "pageUrl": "https://github.com/MyunU/Muyun-Music-Desktop/releases/tag/v1.2.1",
+  "downloadUrl": "https://github.com/MyunU/Muyun-Music-Desktop/releases/download/v1.2.1/MuyunMusic-1.2.1.exe"
 }
