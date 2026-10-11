@@ -21,6 +21,9 @@ SongLyric parseLrc(const QString &lrcText);
 /// 把翻译/罗马音歌词合并进主歌词（按时间对齐）
 void mergeTranslation(SongLyric &lyric, const QString &translationText, bool isRoman = false);
 
+/// 检测并合并主 LRC 文件中的翻译行（相邻行时间接近且语言不同时合并）
+void mergeInlineTranslation(SongLyric &lyric);
+
 /// 去除歌词中的元数据标签（ti/ar/al/by/offset 等）
 QString stripMetadata(const QString &lrcText);
 

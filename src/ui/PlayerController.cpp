@@ -12,6 +12,7 @@
 #include <QtConcurrent>
 #include <QFutureWatcher>
 #include <QThread>
+#include <QTimer>
 #include <QUrl>
 #include <QFileInfo>
 #include <QRandomGenerator>
@@ -281,6 +282,7 @@ void PlayerController::setQualityId(const QString &id)
     // 切换音质后重新解析当前歌曲。⚠ 不走 resolveAndPlay()（那里会把 m_wantedQuality 重置成
     // m_quality——虽然这里也是 q，但保持单一路径、避免重复清标志/重复 emit）。
     if (!m_currentSong.id.isEmpty() && !m_currentSong.isLocal()) {
+        ++m_playGeneration;   // 代际递增：旧 watcher（旧音质）回调发现不匹配直接丢弃
         m_playRetry = 0;
         m_wasPlaying = false;
         resolveAndPlayAt(m_quality);
@@ -714,6 +716,7 @@ void PlayerController::shufflePlaylist()
 
 void PlayerController::resolveAndPlay()
 {
+    ++m_playGeneration;   // 代际递增：旧 watcher 回调发现不匹配直接丢弃，防切源回调风暴
     m_wantedQuality = m_quality;   // 常规播放发起：用户想要的档 = 当前选择（缓存只命中这一档）
     m_durationCheckArmed = true;   // 发起播放：武装时长校验（开播校验一次后自动 disarm）
     // ⚠ 换曲瞬间就作废上一首的实测档并通知刷新：否则新曲走下载期间（无缓存、要几秒），
@@ -806,8 +809,9 @@ void PlayerController::resolveAndPlayAt(AudioQuality startQ)
     m_playTriedQ = startQ;
 
     auto *watcher = new QFutureWatcher<QPair<QString, AudioQuality>>(this);
+    const int gen = m_playGeneration;   // 捕获当前代际，旧 watcher 回调发现代际不匹配直接丢弃
     connect(watcher, &QFutureWatcher<QPair<QString, AudioQuality>>::finished,
-            this, [this, watcher, song]() {
+            this, [this, watcher, song, gen]() {
                 const auto result = watcher->result();
                 watcher->deleteLater();
                 m_loading = false;
@@ -815,6 +819,8 @@ void PlayerController::resolveAndPlayAt(AudioQuality startQ)
 
                 // 歌曲可能已被切换，忽略过期结果
                 if (m_currentSong.identityKey() != song.identityKey()) return;
+                // 代际不匹配（已重新切源/换歌）→ 丢弃旧 watcher 的结果，防回调风暴
+                if (gen != m_playGeneration) return;
 
                 if (result.first.isEmpty()) {
                     // 该音质取不到链接 → 降一档再试；到底仍失败才报错
@@ -985,6 +991,11 @@ void PlayerController::onEndOfMedia()
 
 void PlayerController::onEngineError(const QString &message)
 {
+    // 重入保护：错误回调里调 resolveAndPlayAt → 新引擎错误又触发回调 → 无限递归。
+    // 正在处理中则直接返回，等当前轮 resolveAndPlayAt 完成后再处理下一个错误。
+    if (m_errorHandling) return;
+    m_errorHandling = true;
+
     // ⚠ 先删坏缓存——**无论是否已开播**（这是 1.1.7 仍"播放失败、手清缓存才好"的根因）：
     //   缓存命中坏文件时，QMediaPlayer 打开即失败、**从未进入 Playing** → m_wasPlaying 一直是
     //   false → 若只在下面 m_wasPlaying 分支里删缓存，坏文件永远不会被删；而降档重试走
@@ -1026,6 +1037,7 @@ void PlayerController::onEngineError(const QString &message)
         if (dur > 0 && pos >= dur - 3000) {
             // 贴末尾 → 视为播完，静默前进
             ++m_failStreak;
+            m_errorHandling = false;
             int idx = nextIndexByMode(false);
             if (idx == m_currentIndex || idx == m_lastFinishedIndex)
                 idx = (idx + 1) % m_playlist.size();
@@ -1050,10 +1062,12 @@ void PlayerController::onEngineError(const QString &message)
             if (wasPlaying) {
                 emit playFailed(QStringLiteral("当前音质无法播放，降档重试…"));
             }
+            m_errorHandling = false;
             resolveAndPlayAt(lower);
             return;
         }
     }
+    m_errorHandling = false;
     advanceOnPlayFailure(message.isEmpty() ? QStringLiteral("播放失败") : message);
 }
 
@@ -1128,6 +1142,8 @@ void PlayerController::loadLyric()
                 if (!emb.lyrics.isEmpty())
                     lyric = LyricParser::parseLrc(emb.lyrics);
             }
+            // 检测并合并主 LRC 中的内联翻译行（中英文交替出现在同一个 LRC 里的情况）
+            LyricParser::mergeInlineTranslation(lyric);
             return lyric;
         }
         // 歌词接口偶发失败（实测 rawLen=0 概率出现），按"解析后无行"判定，最多重试 3 次
@@ -1143,6 +1159,8 @@ void PlayerController::loadLyric()
         }
         lyric = LyricParser::parseLrc(rawFinal.rawLrc);
         lyric.rawLrc = rawFinal.rawLrc;
+        // 先检测并合并主 LRC 中的内联翻译行（中英文交替出现在同一个 LRC 里的情况）
+        LyricParser::mergeInlineTranslation(lyric);
         if (!rawFinal.rawTranslation.isEmpty()) {
             LyricParser::mergeTranslation(lyric, rawFinal.rawTranslation, false);
             lyric.rawTranslation = rawFinal.rawTranslation;

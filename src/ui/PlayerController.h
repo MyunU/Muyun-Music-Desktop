@@ -270,6 +270,12 @@ private:
     /// 降档递归时保持不变（这样 lower 递归里 q==起点档的判断仍指向"用户真正想要的那档"）。
     AudioQuality m_wantedQuality = AudioQuality::K320;
     bool m_loading = false;
+    /// 播放代际计数器：每次 resolveAndPlay() 递增。旧 watcher 回调发现代际不匹配直接丢弃，
+    /// 防止频繁切源时旧 watcher 回调风暴（旧 watcher 完成→降档递归→再创建 watcher→回调风暴）。
+    int m_playGeneration = 0;
+    /// onEngineError 重入保护：错误回调里调 resolveAndPlayAt → 新引擎错误又触发回调 →
+    /// 无限递归。正在处理中则直接返回，等当前轮结束。
+    bool m_errorHandling = false;
     SongLyric m_lyric;
     bool m_lyricLoading = false;
     QString m_currentLyricText;

@@ -1,8 +1,8 @@
 {
   "_comment": "更新提示用的版本清单。发布版：改 version/notes 与下面两个 url，并把同版本号的安装包传到 Releases。版本号规则：修 bug 末位 +1、加功能中间 +1、项目大改动首位 +1。",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "pubDate": "2026-10-10",
-  "notes": "1.2.1 性能优化\n· 内存占用降低约 23%（启动 130MB → 稳定 100MB）",
-  "pageUrl": "https://github.com/MyunU/Muyun-Music-Desktop/releases/tag/v1.2.1",
-  "downloadUrl": "https://github.com/MyunU/Muyun-Music-Desktop/releases/download/v1.2.1/MuyunMusic-1.2.1.exe"
+  "notes": "1.2.2 bug修复\n· 修复频繁切换音源导致程序未响应\n· 修复顶栏歌词翻译显示异常",
+  "pageUrl": "https://github.com/MyunU/Muyun-Music-Desktop/releases/tag/v1.2.2",
+  "downloadUrl": "https://github.com/MyunU/Muyun-Music-Desktop/releases/download/v1.2.2/MuyunMusic-1.2.2.exe"
 }

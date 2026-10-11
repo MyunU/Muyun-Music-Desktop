@@ -16,6 +16,25 @@ struct RawLine {
     QVector<QPair<double, QString>> words;
 };
 
+/// 检测文本是否主要是中文（中文字符占字母数字字符比例 > 50%）
+bool isMostlyChinese(const QString &text)
+{
+    int chineseCount = 0;
+    int totalCount = 0;
+    for (QChar c : text) {
+        if (c.isLetterOrNumber()) {
+            ++totalCount;
+            const uint cp = c.unicode();
+            if ((cp >= 0x4E00 && cp <= 0x9FFF)    // CJK 统一汉字
+                || (cp >= 0x3400 && cp <= 0x4DBF) // CJK 扩展 A
+                || (cp >= 0x3000 && cp <= 0x30FF) // CJK 标点
+                || (cp >= 0xFF00 && cp <= 0xFFEF)) // 全角字符
+                ++chineseCount;
+        }
+    }
+    return totalCount > 0 && (double)chineseCount / totalCount > 0.5;
+}
+
 QVector<RawLine> splitLines(const QString &text, bool parseWords)
 {
     QVector<RawLine> out;
@@ -193,7 +212,9 @@ void mergeTranslation(SongLyric &lyric, const QString &translationText, bool isR
         int best = -1;
         double bestDiff = 1e9;
         for (int i = cursor; i < lyric.lines.size(); ++i) {
-            if (lyric.lines.at(i).time - rl.time > kTolSec) break;    // 行按时间升序，越界即可停
+            // 修复：检查绝对值差（旧代码只检查 lyric.time - rl.time，
+            // 当 rl.time > lyric.time 时差值为负，永远不会触发 break，导致扫描越界）
+            if (std::fabs(lyric.lines.at(i).time - rl.time) > kTolSec) break;
             if (!slot(lyric.lines[i]).isEmpty()) continue;            // 绝不抢已填的行
             const double diff = std::fabs(lyric.lines.at(i).time - rl.time);
             if (diff < bestDiff) { bestDiff = diff; best = i; }
@@ -203,6 +224,74 @@ void mergeTranslation(SongLyric &lyric, const QString &translationText, bool isR
         markFilled();
         cursor = best + 1;                                            // 顺序单调，禁止交叉抢占
     }
+}
+
+/// 检测并合并主 LRC 文件中的翻译行。
+/// 场景：有些音源把中英文歌词写在同一个 LRC 文件里，交替出现：
+///   [00:01.00] English line
+///   [00:01.50] 中文翻译
+///   [00:05.00] Another English line
+///   [00:05.50] 另一个中文翻译
+/// 或者中文在前：
+///   [00:01.00] 中文歌词
+///   [00:01.50] English translation
+/// mergeTranslation 不会处理这种格式（因为 rawTranslation 为空）。
+/// 本函数检测相邻行时间接近且语言不同的情况，确保英文作为主歌词（text），中文作为翻译（translation）。
+void mergeInlineTranslation(SongLyric &lyric)
+{
+    if (lyric.lines.size() < 2) return;
+
+    QVector<LyricLine> result;
+    result.reserve(lyric.lines.size());
+
+    int i = 0;
+    while (i < lyric.lines.size()) {
+        LyricLine &line = lyric.lines[i];
+
+        // 已有翻译的行直接保留
+        if (!line.translation.isEmpty()) {
+            result.append(line);
+            ++i;
+            continue;
+        }
+
+        // 检查下一行是否是翻译行
+        if (i + 1 < lyric.lines.size()) {
+            const LyricLine &next = lyric.lines[i + 1];
+            const double timeDiff = std::fabs(next.time - line.time);
+
+            // 条件：时间接近（< 1s）+ 文本不同 + 语言不同（一行中文一行非中文）
+            if (timeDiff < 1.0
+                && !next.text.trimmed().isEmpty()
+                && next.text != line.text
+                && isMostlyChinese(next.text) != isMostlyChinese(line.text)) {
+
+                bool lineChinese = isMostlyChinese(line.text);
+                bool nextChinese = isMostlyChinese(next.text);
+
+                LyricLine merged;
+                if (lineChinese && !nextChinese) {
+                    // 当前行是中文，下一行是英文 → 英文作为主歌词，中文作为翻译
+                    merged = next;              // 英文行作为主行
+                    merged.translation = line.text; // 中文作为翻译
+                } else {
+                    // 当前行是英文，下一行是中文 → 英文作为主歌词，中文作为翻译
+                    merged = line;              // 英文行作为主行
+                    merged.translation = next.text; // 中文作为翻译
+                }
+
+                result.append(merged);
+                lyric.hasTranslation = true;
+                i += 2; // 跳过两行（已合并）
+                continue;
+            }
+        }
+
+        result.append(line);
+        ++i;
+    }
+
+    lyric.lines = result;
 }
 
 int lineIndexAt(const SongLyric &lyric, double timeSec)

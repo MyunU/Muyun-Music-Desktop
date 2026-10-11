@@ -695,7 +695,7 @@ Window {
                                 color: theme.subTextColor
                                 font.pixelSize: 12
                                 elide: Text.ElideRight
-                                visible: player.currentLyricTranslation.length > 0
+                                visible: settings.lyricTranslation && player.currentLyricTranslation.length > 0
                             }
                         }
                     }
