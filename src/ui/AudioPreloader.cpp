@@ -12,11 +12,15 @@
 
 namespace Muyun {
 
-AudioPreloader::AudioPreloader(QObject *parent) : QObject(parent) {}
+AudioPreloader::AudioPreloader(QObject *parent) : QObject(parent)
+{
+    m_token = std::make_shared<ResolutionToken>();
+}
 
 void AudioPreloader::restart(const QVector<Song> &playlist, int currentIndex, AudioQuality quality)
 {
     ++m_epoch;                          // 作废在途解析/下载回调
+    m_token->bump();                    // 让在途 sdk->resolveUrl 早退（用户 #39）
     m_playlist = playlist;
     m_currentIndex = currentIndex;
     m_quality = quality;
@@ -28,6 +32,7 @@ void AudioPreloader::restart(const QVector<Song> &playlist, int currentIndex, Au
 void AudioPreloader::stop()
 {
     ++m_epoch;
+    m_token->bump();                    // 让在途 sdk->resolveUrl 早退
     m_activeIndex = -1;
 }
 
@@ -46,10 +51,17 @@ void AudioPreloader::pump()
         m_activeIndex = idx;
         const Song song = s;
         const AudioQuality q = m_quality;
-        QtConcurrent::run([this, epoch, idx, song, q]() {
+        // 快照 + 令牌指针：切歌/stop 时 bump → worker 检查点早退（用户 #39）
+        const quint64 tokSnap = m_token->snapshot();
+        const ResolutionToken *tokPtr = m_token.get();
+        QtConcurrent::run([this, epoch, idx, song, q, tokPtr, tokSnap]() {
+            // 检查点：worker 启动前先看令牌。
+            // 早退不回调：restart/stop 已经把 m_activeIndex 置 -1 并启动了新的 pump，
+            // 不需要旧 worker 走一遍 onResolved→advance 的推进逻辑。
+            if (tokPtr && tokPtr->isStale(tokSnap)) return;
             MusicSdk *sdk = MusicSdk::instance();
             AudioQuality actual = q;
-            const QString url = sdk->resolveUrl(song, q, &actual);
+            const QString url = sdk->resolveUrl(song, q, &actual, tokPtr);
             QMetaObject::invokeMethod(this, [this, epoch, idx, url, actual]() {
                 if (epoch != m_epoch) return;      // 已作废
                 onResolved(idx, url, actual);

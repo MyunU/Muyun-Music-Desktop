@@ -11,6 +11,7 @@
 
 #include <QtConcurrent>
 #include <QFutureWatcher>
+#include <QGuiApplication>
 #include <QThread>
 #include <QTimer>
 #include <QUrl>
@@ -128,8 +129,55 @@ PlayerController::PlayerController(QObject *parent) : QObject(parent)
     connect(this, &PlayerController::playlistChanged, this,
             &PlayerController::restartPreloader);
 
+    // 初始化取源令牌：切歌/停止/pause/切后台会 bump()，让在途 worker 早退
+    m_resolutionToken = std::make_shared<ResolutionToken>();
+
+    // 后台检测：应用被切到其他窗口（ApplicationInactive）→ 立即释放正在跑的取源 worker；
+    // 回前台后如仍停在同首歌且还在 loading → 重新发起取源。用户 #39：「退出后台时马上释放」。
+    connect(qApp, &QGuiApplication::applicationStateChanged, this,
+            [this](Qt::ApplicationState st) { onApplicationStateChanged(st); });
+
     restoreState();
     restartPreloader();
+}
+
+// ---------------------------------------------------------------------------
+// 取源取消令牌（用户 #39）
+// ---------------------------------------------------------------------------
+// 语义：只有"正在播放这首歌"时才允许继续获取。切歌/停止/pause/切后台/失败推进
+// 时立刻 bump 令牌代数，让 QtConcurrent 里正在跑的 sdk->resolveUrl / sdk->findMusic /
+// sdk->resolveLyric 在下一个检查点立即返回（不再打下一档音质/下一平台的网络请求）。
+// 用户明确要求"不加超时强退"——这是主动协作式取消，不是看门狗强杀。
+void PlayerController::cancelActiveResolution()
+{
+    if (!m_resolutionToken) {
+        // 从未创建过令牌（本地歌直接播放路径等）→ 无需处理
+        return;
+    }
+    m_resolutionToken->bump();
+}
+
+void PlayerController::onApplicationStateChanged(Qt::ApplicationState state)
+{
+    // 只在 Inactive 时释放（Suspended 也是 Inactive 的一种，Windows 上没有）；
+    // Active 时如果之前切后台释放过、且当前处于 loading 状态 → 回前台重启取源。
+    const bool backgrounded = (state != Qt::ApplicationActive);
+    if (backgrounded && !m_backgrounded) {
+        // 首次进入后台：释放正在跑的取源（worker 下一次检查点即退出）
+        m_backgrounded = true;
+        if (m_loading) {
+            cancelActiveResolution();
+            // 不重置 m_loading：用户没主动切歌/stop，只是切后台；回前台时按 loading 状态重启
+        }
+    } else if (!backgrounded && m_backgrounded) {
+        // 回前台：如果之前被我们因切后台 bump 了令牌导致取源早退（m_loading 仍为 true），
+        // 重新发起取源；若加载早已完成（loading=false 且引擎已在播），不动。
+        m_backgrounded = false;
+        if (m_loading && !m_currentSong.id.isEmpty()) {
+            // 递增代际、重建令牌、重新走 resolveAndPlay（会走完整取源流程）
+            resolveAndPlay();
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -566,7 +614,10 @@ void PlayerController::playAll(const QVariantList &songs, const QString &playlis
 
 void PlayerController::togglePlay()
 {
-    if (m_engine->isPlaying()) { m_engine->pause(); emit isPlayingChanged(); }
+    if (m_engine->isPlaying()) {
+        // 通过 pause() 走一遍释放：切歌/暂停时立即作废在途取源（用户 #39）
+        pause();
+    }
     else if (!m_currentSong.id.isEmpty()) {
         if (m_engine->hasSource()) {
             m_engine->resume();
@@ -579,9 +630,25 @@ void PlayerController::togglePlay()
     else if (!m_playlist.isEmpty()) playIndex(0);
 }
 
-void PlayerController::pause() { m_engine->pause(); disarmSongWatchdog(); m_durationCheckArmed = false; emit isPlayingChanged(); }
+// 停止/pause：除了停引擎，还要立即作废正在跑的取源 worker（用户 #39：
+// 「其他状态下我们应该马上释放资源」）。bump 令牌后旧 worker 在下一个检查点即退出。
+void PlayerController::pause()
+{
+    cancelActiveResolution();
+    m_engine->pause();
+    disarmSongWatchdog();
+    m_durationCheckArmed = false;
+    emit isPlayingChanged();
+}
 void PlayerController::resume() { m_engine->resume(); emit isPlayingChanged(); }
-void PlayerController::stop() { m_engine->stop(); disarmSongWatchdog(); m_durationCheckArmed = false; emit isPlayingChanged(); }
+void PlayerController::stop()
+{
+    cancelActiveResolution();
+    m_engine->stop();
+    disarmSongWatchdog();
+    m_durationCheckArmed = false;
+    emit isPlayingChanged();
+}
 
 void PlayerController::seek(qint64 ms) { m_pendingSeekMs = ms; m_seekClearTimer.start(); m_engine->seek(ms); emit positionChanged(); }
 
@@ -717,6 +784,13 @@ void PlayerController::shufflePlaylist()
 void PlayerController::resolveAndPlay()
 {
     ++m_playGeneration;   // 代际递增：旧 watcher 回调发现不匹配直接丢弃，防切源回调风暴
+    // 切歌/换曲 → **bump 旧令牌**（不是替换！），让正在跑的旧 worker 在下一个检查点早退。
+    // ⚠ 关键：绝不能 `m_resolutionToken = std::make_shared<...>()`——旧 worker 持有
+    //   旧令牌的裸指针，替换后旧对象析构 → 悬垂指针；且新令牌是不同对象，旧 worker
+    //   的检查点看到的仍是旧对象（代数没变），不会退出。bump 才是正解：同一个对象
+    //   代数递增，旧快照立刻失效，新 worker 拿到的是 bump 之后的新快照。
+    // （用户 #39：切歌后旧 worker 不再"疯狂获取"占线程/网络资源）
+    if (m_resolutionToken) m_resolutionToken->bump();
     m_wantedQuality = m_quality;   // 常规播放发起：用户想要的档 = 当前选择（缓存只命中这一档）
     m_durationCheckArmed = true;   // 发起播放：武装时长校验（开播校验一次后自动 disarm）
     // ⚠ 换曲瞬间就作废上一首的实测档并通知刷新：否则新曲走下载期间（无缓存、要几秒），
@@ -795,6 +869,13 @@ void PlayerController::resolveAndPlayAt(AudioQuality startQ)
                 m_actualQuality = m_wantedQuality;
                 m_actualQualityKnown = true;
                 emit currentQualityChanged();
+                // ⚠ 缓存命中也是"不用加载了"：清 m_loading（上一首取源时置 true 的状态）
+                //   否则切到一首有缓存的歌 → playFile 直接播了 → 但 m_loading 还是 true →
+                //   播放条转圈不停（用户 #39 反馈"新歌已播但加载圈还在"的根因之一）。
+                if (m_loading) {
+                    m_loading = false;
+                    emit isLoadingChanged();
+                }
                 m_engine->playFile(cached);
                 return;
             }
@@ -849,27 +930,39 @@ void PlayerController::resolveAndPlayAt(AudioQuality startQ)
     MusicSdk *sdk = MusicSdk::instance();
     // 该歌曲的取源平台记忆（主线程查，worker 线程不碰共享 map）
     const QString preferPlat = m_songPlatform.value(song.identityKey());
-    watcher->setFuture(QtConcurrent::run([sdk, song, startQ, preferPlat]() {
+    // 快照：worker 开始时的令牌代数。切歌/停止/pause/切后台会 bump → 快照失效 → 早退
+    // （用户 #39：切歌后旧 worker 立即释放，不再占线程/网络）
+    const quint64 tokSnap = m_resolutionToken ? m_resolutionToken->snapshot() : 0;
+    const ResolutionToken *tokPtr = m_resolutionToken.get();
+    watcher->setFuture(QtConcurrent::run([sdk, song, startQ, preferPlat, tokPtr, tokSnap]() {
+        // 检查点：worker 启动前先看令牌（切歌/停止/pause/切后台 → 立即返回，一个请求都不发）
+        if (tokPtr && tokPtr->isStale(tokSnap)) return qMakePair(QString(), startQ);
+        // 退出收尾：检查 shuttingDown，避免 worker 在退出时继续执行导致 waitForDone 卡死
+        if (HttpClient::shuttingDown()) return qMakePair(QString(), startQ);
         AudioQuality actual = startQ;
         Song playSong = song;
         const QString ownCode = song.lx.source.isEmpty()
                                     ? platformSourceCode(song.platform) : song.lx.source;
         // 用户为这首歌指定了取源平台且与原平台不同 → 跨平台找同名歌，从指定平台拉
         if (!preferPlat.isEmpty() && preferPlat != ownCode) {
+            if (HttpClient::shuttingDown()) return qMakePair(QString(), startQ);
             FindMusicRequest req;
             req.name = song.name;
             req.singer = song.artist;
             req.albumName = song.album;
             req.interval = Format::duration(song.duration);
             req.source = ownCode;
-            const QVector<Song> cands = sdk->findMusic(req, 8);
+            const QVector<Song> cands = sdk->findMusic(req, 8, tokPtr);
             for (const auto &c : cands) {
                 const QString cc = c.lx.source.isEmpty()
                                        ? platformSourceCode(c.platform) : c.lx.source;
                 if (cc == preferPlat) { playSong = c; break; }
             }
         }
-        const QString url = sdk->resolveUrl(playSong, startQ, &actual);
+        if (HttpClient::shuttingDown()) return qMakePair(QString(), startQ);
+        // 检查点：跨平台找完、真正打 resolveUrl 前再看一次
+        if (tokPtr && tokPtr->isStale(tokSnap)) return qMakePair(QString(), startQ);
+        const QString url = sdk->resolveUrl(playSong, startQ, &actual, tokPtr);
         return qMakePair(url, actual);
     }));
 }
@@ -1114,6 +1207,9 @@ void PlayerController::loadLyric()
 
     const Song song = m_currentSong;
     auto *watcher = new QFutureWatcher<SongLyric>(this);
+    // 歌词 worker 也走同一个令牌：切歌/停止/pause/切后台时早退（用户 #39）
+    const quint64 tokSnap = m_resolutionToken ? m_resolutionToken->snapshot() : 0;
+    const ResolutionToken *tokPtr = m_resolutionToken.get();
     connect(watcher, &QFutureWatcher<SongLyric>::finished, this, [this, watcher, song]() {
         const SongLyric lyric = watcher->result();
         watcher->deleteLater();
@@ -1125,7 +1221,9 @@ void PlayerController::loadLyric()
         updateCurrentLyric();
     });
     MusicSdk *sdk = MusicSdk::instance();
-    watcher->setFuture(QtConcurrent::run([sdk, song]() {
+    watcher->setFuture(QtConcurrent::run([sdk, song, tokPtr, tokSnap]() {
+        // 检查点：worker 启动前先看令牌
+        if (tokPtr && tokPtr->isStale(tokSnap)) return SongLyric();
         SongLyric lyric;
         if (song.isLocal()) {
             // 本地歌曲：优先外挂 .lrc
@@ -1149,13 +1247,19 @@ void PlayerController::loadLyric()
         // 歌词接口偶发失败（实测 rawLen=0 概率出现），按"解析后无行"判定，最多重试 3 次
         SongLyric rawFinal;
         for (int attempt = 0; attempt < 3 && !HttpClient::shuttingDown(); ++attempt) {
-            rawFinal = sdk->resolveLyric(song);
+            // 检查点：每次尝试前看令牌
+            if (tokPtr && tokPtr->isStale(tokSnap)) break;
+            rawFinal = sdk->resolveLyric(song, tokPtr);
             if (!rawFinal.rawLrc.isEmpty()) {
                 // 确认能解析出至少一行歌词才算成功
                 const SongLyric probe = LyricParser::parseLrc(rawFinal.rawLrc);
                 if (!probe.lines.isEmpty()) break;
             }
-            if (attempt < 2) QThread::msleep(400 * (attempt + 1)); // 400/800ms 递增退避
+            if (attempt < 2) {
+                // 检查点：退避前看令牌
+                if (tokPtr && tokPtr->isStale(tokSnap)) break;
+                QThread::msleep(400 * (attempt + 1)); // 400/800ms 递增退避
+            }
         }
         lyric = LyricParser::parseLrc(rawFinal.rawLrc);
         lyric.rawLrc = rawFinal.rawLrc;

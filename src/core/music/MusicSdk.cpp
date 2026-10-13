@@ -20,6 +20,13 @@ namespace Muyun {
 
 static MusicSdk *s_instance = nullptr;
 
+// 检查点辅助：token 为空视为永不取消（保持旧行为），否则比较快照与当前代数。
+// 语义："这次取源已被上层 bump()，请尽早退出，别打下一档/下一平台的网络请求"。
+static inline bool resolutionCancelled(const ResolutionToken *tok, quint64 snap)
+{
+    return tok && tok->isStale(snap);
+}
+
 MusicSdk::MusicSdk(QObject *parent) : QObject(parent)
 {
     registerSources();
@@ -178,8 +185,13 @@ void MusicSdk::rememberFailure(const QString &key)
     m_failedAt.insert(key, QDateTime::currentMSecsSinceEpoch());
 }
 
-QString MusicSdk::resolveUrl(const Song &song, AudioQuality quality, AudioQuality *actualQuality)
+QString MusicSdk::resolveUrl(const Song &song, AudioQuality quality, AudioQuality *actualQuality,
+                             const ResolutionToken *token)
 {
+    // 快照：一旦上层 bump()，后续所有检查点都会命中 isStale → 立即返回。
+    // 无 token（旧调用方）视为永不取消，行为与改造前完全一致。
+    const quint64 snap = token ? token->snapshot() : 0;
+
     // 1) 优先用 LX 自定义音源脚本解析（当已加载脚本且歌曲带 lx 元信息）
     // ⚠ 整段用读锁护住 m_lxEngine：取源期间禁止 loadLxScript 换实例（delete+new），否则 UAF。
     QReadLocker rl(&m_lxEngineLock);
@@ -227,6 +239,8 @@ QString MusicSdk::resolveUrl(const Song &song, AudioQuality quality, AudioQualit
         const QStringList declared = m_lxEngine->declaredQualitys(lxSong.lx.source);
         const auto chain = qualityFallbackChain(quality);
         for (auto q : chain) {
+            // 检查点：切歌/停止/pause/后台 → 立即返回，不再问下一档
+            if (resolutionCancelled(token, snap)) return QString();
             const QString reqId = LxScriptEngine::protocolQualityId(qualityId(q));
             if (!declared.isEmpty() && !declared.contains(reqId)) continue;
             // #10：这档刚失败过（60s 内）→ 跳过，别再打一次网络
@@ -265,6 +279,8 @@ QString MusicSdk::resolveUrl(const Song &song, AudioQuality quality, AudioQualit
     // 沿音质降级链逐级尝试（#10：同一档刚失败过就跳过，不重复打网络）
     const auto chain = qualityFallbackChain(quality);
     for (auto q : chain) {
+        // 检查点：每次要打新一档网络前先看 token
+        if (resolutionCancelled(token, snap)) return QString();
         const QString fkey = code + QLatin1Char('@') + qualityId(q);
         if (recentlyFailed(fkey)) continue;
         const QString url = src->getMusicUrl(song, q);
@@ -283,6 +299,7 @@ QString MusicSdk::resolveUrl(const Song &song, AudioQuality quality, AudioQualit
     //   用歌名在本平台搜出合法条目，走 LX/内置再试；**候选必须歌名与原曲匹配**
     //   （双向包含），防止搜索返回同名异曲/翻唱顶替。
     if (!song.name.isEmpty()) {
+        if (resolutionCancelled(token, snap)) return QString();
         const SearchResult local = search(code, song.name, 1, 8);
         const QString sName = song.name.trimmed();
         for (const auto &c : local.songs) {
@@ -294,9 +311,11 @@ QString MusicSdk::resolveUrl(const Song &song, AudioQuality quality, AudioQualit
             if (cName.isEmpty()) continue;
             if (cName != sName && !cName.contains(sName) && !sName.contains(cName))
                 continue;                                           // 歌名不匹配，跳过
+            // 检查点：递归前再看一次，防止取到候选后立刻被切歌
+            if (resolutionCancelled(token, snap)) return QString();
             AudioQuality cQ = quality;
             // 递归一次：候选条目元数据合法，走 LX/内置取链；条目不同不会无限递归。
-            const QString u = resolveUrl(c, quality, &cQ);
+            const QString u = resolveUrl(c, quality, &cQ, token);
             if (!u.isEmpty()) {
                 if (actualQuality) *actualQuality = cQ;
                 return u;
@@ -313,14 +332,19 @@ QString MusicSdk::resolveUrl(const Song &song, AudioQuality quality, AudioQualit
     req.interval = Format::duration(song.duration);
     req.source = code;
 
-    const QVector<Song> candidates = findMusic(req, 8);
+    // 检查点：findMusic 会打多个平台的搜索请求，最重的分支——先看 token
+    if (resolutionCancelled(token, snap)) return QString();
+    const QVector<Song> candidates = findMusic(req, 8, token);
     for (const auto &c : candidates) {
+        // 检查点：每个候选都要走一遍音质降级链，最坏 6 次网络；打前先看
+        if (resolutionCancelled(token, snap)) return QString();
         const QString cCode = c.lx.source.isEmpty() ? platformSourceCode(c.platform)
                                                     : c.lx.source;
         if (cCode == code) continue;
         auto *other = source(cCode);
         if (!other) continue;
         for (auto q : chain) {
+            if (resolutionCancelled(token, snap)) return QString();
             const QString url = other->getMusicUrl(c, q);
             if (!url.isEmpty()) {
                 if (actualQuality) *actualQuality = q;
@@ -331,10 +355,14 @@ QString MusicSdk::resolveUrl(const Song &song, AudioQuality quality, AudioQualit
     return QString();
 }
 
-QString MusicSdk::resolveUrlAtQuality(const Song &song, AudioQuality quality)
+QString MusicSdk::resolveUrlAtQuality(const Song &song, AudioQuality quality,
+                                      const ResolutionToken *token)
 {
     // 与 resolveUrl 的区别：只试这一档音质、只用这首歌自带的 source，
     // 不沿降级链、不跨平台兜底。上层（下载器）自己组织尝试顺序。
+    // token 检查点：单档请求本身只有一次网络，加个入口检查避免取消后仍打一次。
+    const quint64 snap = token ? token->snapshot() : 0;
+    if (resolutionCancelled(token, snap)) return QString();
     {
         QReadLocker rl(&m_lxEngineLock);   // 护住 m_lxEngine，防异步切音源换实例
         // 同 resolveUrl：老版本收藏的歌 hasLx=false，构造 lx 元数据让 LX 脚本参与
@@ -377,6 +405,8 @@ QString MusicSdk::resolveUrlAtQuality(const Song &song, AudioQuality quality)
             // 脚本没给链接时，仍然允许内置音源用同一首歌的元信息试一次
         }
     }
+    // 检查点：LX 分支跑完后、走内置前再看一次
+    if (resolutionCancelled(token, snap)) return QString();
     const QString code = song.lx.source.isEmpty() ? platformSourceCode(song.platform)
                                                   : song.lx.source;
     auto *src = source(code);
@@ -384,8 +414,9 @@ QString MusicSdk::resolveUrlAtQuality(const Song &song, AudioQuality quality)
     return src->getMusicUrl(song, quality);
 }
 
-SongLyric MusicSdk::resolveLyric(const Song &song)
+SongLyric MusicSdk::resolveLyric(const Song &song, const ResolutionToken *token)
 {
+    const quint64 snap = token ? token->snapshot() : 0;
     // LX 脚本优先：歌曲带 lx 元信息时先问脚本要歌词（local 源 lyric action，
     // HANDOFF 待办 #9 已接）。脚本没给/给的不是合法歌词就走内置五源。
     {
@@ -413,6 +444,7 @@ SongLyric MusicSdk::resolveLyric(const Song &song)
 
     // 兜底：本音源取不到歌词（如酷我、咪咕）时，
     // 跨平台找同名同歌手歌曲，从其它音源补齐歌词。
+    if (resolutionCancelled(token, snap)) return lyric;
     FindMusicRequest req;
     req.name = song.name;
     req.singer = song.artist;
@@ -420,8 +452,9 @@ SongLyric MusicSdk::resolveLyric(const Song &song)
     req.interval = Format::duration(song.duration);
     req.source = code;
 
-    const QVector<Song> candidates = findMusic(req, 5);
+    const QVector<Song> candidates = findMusic(req, 5, token);
     for (const auto &c : candidates) {
+        if (resolutionCancelled(token, snap)) return lyric;
         const QString otherCode = c.lx.source.isEmpty() ? platformSourceCode(c.platform)
                                                         : c.lx.source;
         if (otherCode == code) continue;
@@ -620,10 +653,13 @@ bool markersCompatible(const QSet<QString> &a, const QSet<QString> &b)
 
 } // namespace
 
-QVector<Song> MusicSdk::findMusic(const FindMusicRequest &req, int limitPerPlatform)
+QVector<Song> MusicSdk::findMusic(const FindMusicRequest &req, int limitPerPlatform,
+                                  const ResolutionToken *token)
 {
     QVector<Song> result;
     if (req.name.isEmpty()) return result;
+
+    const quint64 snap = token ? token->snapshot() : 0;
 
     const QString fMusicName = filterStr(req.name);
     const QString fSinger = filterStr(sortSingers(req.singer));
@@ -641,6 +677,8 @@ QVector<Song> MusicSdk::findMusic(const FindMusicRequest &req, int limitPerPlatf
     // 候选池：排除来源平台自身
     QVector<Song> candidates;
     for (const auto &code : m_platformOrder) {
+        // 检查点：每个平台搜索都是一次网络请求（最长 20s），取消则立即返回
+        if (resolutionCancelled(token, snap)) return result;
         if (code == req.source) continue;
         auto *src = source(code);
         if (!src) continue;

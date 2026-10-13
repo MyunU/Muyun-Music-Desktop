@@ -10,10 +10,18 @@
 #include <QStringList>
 #include <QVector>
 #include <QTimer>
+#include <memory>
 
 namespace Muyun {
 
 class AudioPreloader;   // 预缓存（切歌后把接下来几首静默下载到缓存目录）
+class ResolutionToken;  // 取源取消令牌（定义见 core/music/MusicSdk.h）
+
+/// 取源任务取消令牌（定义见 core/music/MusicSdk.h）：切歌/停止/pause/切后台/
+/// 失败推进时 bump()，让正在 QtConcurrent 里跑的 resolveUrl/findMusic 早退，
+/// 避免旧 worker 把降级链 / 跨平台 / 重搜全部跑完（用户 #39 反馈的"新歌已经在播，
+/// 但旧 worker 还在疯狂获取，播放条显示加载中"的根因）。
+using ResolutionTokenPtr = std::shared_ptr<ResolutionToken>;
 
 /**
  * @brief 播放器控制器（暴露给 QML）
@@ -273,6 +281,20 @@ private:
     /// 播放代际计数器：每次 resolveAndPlay() 递增。旧 watcher 回调发现代际不匹配直接丢弃，
     /// 防止频繁切源时旧 watcher 回调风暴（旧 watcher 完成→降档递归→再创建 watcher→回调风暴）。
     int m_playGeneration = 0;
+    /// 取源取消令牌：每次 resolveAndPlay() 创建新令牌；切歌/stop/pause/切后台/失败推进
+    /// 调 cancelActiveResolution() bump 代数，让正在 QtConcurrent 里跑的 sdk->resolveUrl /
+    /// sdk->findMusic / sdk->resolveLyric 在下一个检查点立即返回，不再打下一档/下一平台
+    /// 的网络请求。**这是用户 #39 反馈的核心**：切歌后旧 worker 不再"疯狂获取"占资源，
+    /// 资源只在"正在播放这首歌"时被占用。用户明确要求"不要加超时强退"（负责），所以走
+    /// 主动 bump 而不是看门狗强杀。
+    ResolutionTokenPtr m_resolutionToken;
+    /// 立即作废当前取源令牌：切歌/停止/pause/切后台/失败推进时调用，让旧 worker 早退。
+    /// 幂等：没令牌也没关系。
+    void cancelActiveResolution();
+    /// 后台检测：applicationStateChanged 非 Active 时释放正在跑的取源，回前台再启动
+    /// （用户 #39：「退出后台时马上释放」）。切后台前先记住当时想播放的歌，切回时重启。
+    void onApplicationStateChanged(Qt::ApplicationState state);
+    bool m_backgrounded = false;   ///< 切到后台状态标记（用于回前台判断）
     /// onEngineError 重入保护：错误回调里调 resolveAndPlayAt → 新引擎错误又触发回调 →
     /// 无限递归。正在处理中则直接返回，等当前轮结束。
     bool m_errorHandling = false;

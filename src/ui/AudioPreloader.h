@@ -3,8 +3,10 @@
 #include <QObject>
 #include <QVector>
 #include <QString>
+#include <memory>
 
 #include "core/Types.h"
+#include "core/music/MusicSdk.h"   // ResolutionToken（预缓存切歌时让在途 worker 早退）
 
 namespace Muyun {
 
@@ -15,6 +17,9 @@ namespace Muyun {
 ///   - 跳过本地歌与已缓存歌；取不到链接/下载失败就静默跳过该首；
 ///   - 缓存文件不主动清理——由用户手动清除或启动时 3 天自动清扫
 ///     （PlayerEngine::sweepAudioCache）。
+///
+/// **取消令牌**（用户 #39）：restart/stop 除了 bump m_epoch 作废回调，也 bump m_token，
+/// 让 QtConcurrent 里正在跑的 sdk->resolveUrl 早退，不再占线程/网络。
 class AudioPreloader : public QObject
 {
     Q_OBJECT
@@ -38,6 +43,8 @@ private:
     int m_nextIndex = -1;      ///< 下一个待缓存的列表索引
     int m_activeIndex = -1;    ///< 正在解析/下载的列表索引（-1 = 空闲）
     quint64 m_epoch = 0;       ///< 代际：restart/stop 递增，作废在途回调
+    /// 取源取消令牌：restart/stop 时 bump，让正在跑的 sdk->resolveUrl 早退
+    std::shared_ptr<ResolutionToken> m_token;
 };
 
 } // namespace Muyun

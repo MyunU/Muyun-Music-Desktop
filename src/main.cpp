@@ -6579,11 +6579,18 @@ int main(int argc, char *argv[])
     // 旧代码直接 QThreadPool::waitForDone()：worker 里在途的音源解析/歌词/下载请求
     // 若卡在网络，退出就无限干等（每次超时 20s 起、降级链还要串好几档）。
     // 现在先置"正在退出"让在途请求 ≤200ms 内中止，再停播放内核，最后收工。
+    // ⚠ 再等 10s 超时兜底：若某 worker 卡死（如换曲时旧 watcher 未取消 + 网络挂起），
+    //    无限 waitForDone 会卡死程序。10s 足够正常任务收尾，超时强退防止用户"未响应"。
     Muyun::HttpClient::beginShutdown();
     Muyun::HttpClient::instance()->cancelAll();
     if (player) player->stop();   // 停解码线程/声卡，避免其回调在销毁期访问已析构对象
     // 等待后台任务（音源解析/首页加载）结束，避免退出时的线程警告
-    QThreadPool::globalInstance()->waitForDone();
+    // 10s 超时：超时后强退，防止卡在"正在退出"状态
+    const bool poolDone = QThreadPool::globalInstance()->waitForDone(10000);
+    if (!poolDone) {
+        // 超时强退：有 worker 卡死，直接退出避免"未响应"
+        std::_Exit(ret);
+    }
     store->flushAll();
     return ret;
 }
