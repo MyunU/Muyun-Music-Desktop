@@ -76,6 +76,9 @@ private:
 
     static QByteArray findId3Frame(const QByteArray &data, const char *frameId);
     static QString decodeText(const QByteArray &raw);
+    /// USLT 帧结构：encoding(1) + language(3) + descriptor(0-terminated) + [syncDescriptor(0-terminated)] + lyrics
+    /// 不能直接用 decodeText（会把 language/descriptor 也当作文本返回）
+    static QString decodeUsltText(const QByteArray &frame);
     static QImage parseId3Picture(const QByteArray &frame);
 };
 

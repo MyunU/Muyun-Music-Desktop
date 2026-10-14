@@ -159,9 +159,23 @@ QVector<Song> LocalMusicScanner::collectSongs(const QString &folder, const QStri
             QDir().mkpath(cacheDir);
             const QString fn = cacheDir + QStringLiteral("/")
                                + QString::number(qHash(path), 16) + QStringLiteral(".jpg");
-            if (!QFileInfo::exists(fn))
-                tags.cover.save(fn, "JPG", 85);
-            s.cover = QUrl::fromLocalFile(fn).toString();
+            if (QFileInfo::exists(fn)) {
+                // 缓存文件已存在：校验是否有效图片（防止上次写入失败留下坏文件）
+                QImage check(fn);
+                if (check.isNull()) {
+                    QFile::remove(fn);  // 坏文件，删除后重新导出
+                }
+            }
+            if (!QFileInfo::exists(fn)) {
+                if (!tags.cover.save(fn, "JPG", 85)) {
+                    // 保存失败（磁盘满/权限等），不设 cover，避免指向不存在的文件
+                    // （用户报"封面小概率无效"的根因之一）
+                } else {
+                    s.cover = QUrl::fromLocalFile(fn).toString();
+                }
+            } else {
+                s.cover = QUrl::fromLocalFile(fn).toString();
+            }
         }
         out.append(s);
     }

@@ -555,8 +555,12 @@ void PlayerController::playSong(const QVariantMap &song, const QVariantList &lis
     emit currentIndexChanged();
     emit currentSongChanged();
 
-    loadLyric();
+    // ⚠ resolveAndPlay 先于 loadLyric：resolveAndPlay 会 bump 令牌，
+    //   若 loadLyric 先跑，其 worker 启动时看到 bump 后的令牌 → isStale 立即早退 →
+    //   返回空歌词（用户 #42："本地歌曲歌词需手动点加载"的根因）。
+    //   resolveAndPlay 放前面让 bump 先发生，loadLyric 拿到的快照就是 bump 后的新代数。
     resolveAndPlay();
+    loadLyric();
     maybeResolveCover();
     armSongWatchdog();   // 用户点歌 → 重新武装单首时限
     saveState();
@@ -574,8 +578,9 @@ void PlayerController::startAt(int index, bool armWatchdog)
     m_currentSong = m_playlist.at(index);
     emit currentIndexChanged();
     emit currentSongChanged();
-    loadLyric();
+    // ⚠ resolveAndPlay 先于 loadLyric（同 playSong：bump 令牌后再取快照）
     resolveAndPlay();
+    loadLyric();
     maybeResolveCover();
     if (armWatchdog) armSongWatchdog();   // 用户换歌/播完接续 → 重新武装单首时限
     saveState();
@@ -698,8 +703,9 @@ void PlayerController::removeFromQueue(int index)
         emit currentIndexChanged();
         emit currentSongChanged();
         // 删除的是当前曲：切播队列里的新当前曲，避免 UI 与声音不一致
-        loadLyric();
+        // ⚠ resolveAndPlay 先于 loadLyric（同 playSong/startAt：bump 令牌后再取快照）
         resolveAndPlay();
+        loadLyric();
     } else if (m_playlist.isEmpty()) {
         // 队列删空：停止播放并清空当前曲。
         // 必须清 m_currentSong——否则正在异步解析中的旧任务完成后

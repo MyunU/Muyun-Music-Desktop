@@ -264,6 +264,90 @@ QString TagReader::decodeText(const QByteArray &raw)
     }
 }
 
+QString TagReader::decodeUsltText(const QByteArray &frame)
+{
+    // USLT 帧结构（ID3v2.3/2.4）：
+    //   encoding(1) + language(3) + contentDescriptor(0-terminated)
+    //   [+ syncDescriptor(0-terminated, ID3v2.4 only)] + lyrics
+    //
+    // ⚠ 不能直接用 decodeText：它会把 language/descriptor 也当作文本返回，
+    //   导致歌词前面多出 "chi\0" 等垃圾字节（用户报"本地歌曲歌词无效"的根因）。
+    if (frame.size() < 5) return QString();  // 至少 encoding + language
+    const quint8 encoding = static_cast<quint8>(frame[0]);
+    qsizetype pos = 4;  // 跳过 encoding(1) + language(3)
+
+    // 读 contentDescriptor（0-terminated，用与 encoding 一致的编码）
+    auto readNullTerminated = [&](qsizetype &p) -> QByteArray {
+        int zero = frame.indexOf('\0', p);
+        if (zero < 0) return frame.mid(p);
+        const QByteArray result = frame.mid(p, zero - p);
+        p = zero + 1;
+        return result;
+    };
+
+    readNullTerminated(pos);  // 跳过 contentDescriptor
+
+    // ID3v2.4 可能有 syncDescriptor，但 ID3v2.3 没有。
+    // 区分方法：ID3v2.3 的 USLT 在 contentDescriptor 后直接是 lyrics，
+    // ID3v2.4 在 contentDescriptor 后可能有一个 syncDescriptor。
+    // 由于 TagWriter 写的是 v2.4 但不带 syncDescriptor，我们按"跳过一个额外
+    // 0-terminated 字段"处理。如果 lyrics 本身以 \0 开头（极罕见），会多跳一次，
+    // 但 LRC 格式不会以 \0 开头，所以安全。
+    // ⚠ 更稳妥的做法是读 ID3 头的 major version 判断，但 findId3Frame 只返回
+    //   帧数据不返回版本号。这里用启发式：如果剩余数据在第一个 \0 后还有内容，
+    //   说明有 syncDescriptor；否则没有。
+    //   但 TagWriter 写的 lyrics 本身不含 \0（UTF-8 编码），所以这个启发式安全。
+    //
+    // 实际上 TagWriter 写的 USLT 结构是：encoding + language + \0 + lyrics
+    // 没有 syncDescriptor。所以这里只需要跳过 contentDescriptor 就够。
+    // 但为了兼容其他工具写入的带 syncDescriptor 的 USLT，我们尝试跳过：
+    //   如果下一个字节是 \0，说明 syncDescriptor 是空字符串，跳过它。
+    //   否则可能是 lyrics 本身，不跳。
+    //
+    // 简化处理：TagWriter 写的 USLT 没有 syncDescriptor，直接跳过 contentDescriptor
+    // 后的第一个 \0 即可。如果未来需要兼容带 syncDescriptor 的 USLT，再扩展。
+    // （当前版本只读自己写的文件，其他工具写的文件走外挂 .lrc 或联网取歌词）
+
+    // pos 现在指向 lyrics 的开头
+    if (pos >= frame.size()) return QString();
+    const QByteArray lyricsData = frame.mid(pos);
+
+    // 用与 encoding 一致的编码解码 lyrics
+    switch (encoding) {
+    case 0x00:
+        return QString::fromLatin1(lyricsData).trimmed();
+    case 0x01: {
+        // UTF-16 with BOM
+        if (lyricsData.size() >= 2) {
+            const quint8 b0 = static_cast<quint8>(lyricsData[0]);
+            const quint8 b1 = static_cast<quint8>(lyricsData[1]);
+            if (b0 == 0xFF && b1 == 0xFE)
+                return QString::fromUtf16(
+                    reinterpret_cast<const char16_t *>(lyricsData.constData() + 2),
+                    static_cast<qsizetype>((lyricsData.size() - 2) / 2)).trimmed();
+            if (b0 == 0xFE && b1 == 0xFF) {
+                QString out;
+                for (qsizetype i = 2; i + 1 < lyricsData.size(); i += 2)
+                    out.append(QChar(static_cast<quint16>(
+                        (static_cast<quint8>(lyricsData[i]) << 8) |
+                        static_cast<quint8>(lyricsData[i + 1]))));
+                return out.trimmed();
+            }
+        }
+        return QString::fromUtf16(
+            reinterpret_cast<const char16_t *>(lyricsData.constData()),
+            static_cast<qsizetype>(lyricsData.size() / 2)).trimmed();
+    }
+    case 0x02:
+        return QString::fromUtf16(
+            reinterpret_cast<const char16_t *>(lyricsData.constData()),
+            static_cast<qsizetype>(lyricsData.size() / 2)).trimmed();
+    case 0x03:
+    default:
+        return QString::fromUtf8(lyricsData).trimmed();
+    }
+}
+
 QImage TagReader::parseId3Picture(const QByteArray &frame)
 {
     // APIC: encoding(1) + mime(...\0) + type(1) + description(...\0) + data
@@ -313,7 +397,12 @@ bool TagReader::readId3v2(QFile &f, LocalTags &tags)
 
     auto text = [&](const char *id) {
         const QByteArray frame = findId3Frame(data, id);
-        return frame.isEmpty() ? QString() : decodeText(frame).trimmed();
+        if (frame.isEmpty()) return QString();
+        // USLT 是复杂帧（encoding + language + descriptor + lyrics），
+        // 不能直接用 decodeText（会把 language/descriptor 当作文本返回）。
+        if (id[0] == 'U' && id[1] == 'S' && id[2] == 'L' && id[3] == 'T')
+            return decodeUsltText(frame);
+        return decodeText(frame).trimmed();
     };
 
     tags.title = text("TIT2");
