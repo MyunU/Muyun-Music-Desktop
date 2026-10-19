@@ -2,7 +2,7 @@
   "_comment": "更新提示用的版本清单。发布版：改 version/notes 与下面两个 url，并把同版本号的安装包传到 Releases。版本号规则：修 bug 末位 +1、加功能中间 +1、项目大改动首位 +1。",
   "version": "1.2.5",
   "pubDate": "2026-10-19",
-  "notes": "1.2.5 更新\n· 修复部分歌曲评论获取不到\n· 新增歌曲评论（热门/最新、翻页、楼中楼、点赞数）\n· 修复评论面板滚轮穿透",
+  "notes": "1.2.5 更新\n· 新增歌曲评论（热门/最新、翻页、楼中楼、点赞数）",
   "pageUrl": "https://github.com/MyunU/Muyun-Music-Desktop/releases/tag/v1.2.5",
   "downloadUrl": "https://github.com/MyunU/Muyun-Music-Desktop/releases/download/v1.2.5/MuyunMusic-1.2.5.exe"
 }
