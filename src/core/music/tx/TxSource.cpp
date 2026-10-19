@@ -49,6 +49,40 @@ QString TxSource::qualityPrefix(AudioQuality q)
     }
 }
 
+QString TxSource::resolveSongId(const QString &songmid)
+{
+    if (songmid.isEmpty()) return QString();
+
+    QVariantMap param;
+    param[QStringLiteral("song_type")] = 0;
+    param[QStringLiteral("song_mid")] = songmid;
+
+    QVariantMap req;
+    req[QStringLiteral("module")] = QStringLiteral("music.pf_song_detail_svr");
+    req[QStringLiteral("method")] = QStringLiteral("get_song_detail_yqq");
+    req[QStringLiteral("param")] = param;
+
+    QVariantMap comm;
+    comm[QStringLiteral("ct")] = QStringLiteral("19");
+    comm[QStringLiteral("cv")] = QStringLiteral("1859");
+    comm[QStringLiteral("uin")] = QStringLiteral("0");
+
+    QVariantMap body;
+    body[QStringLiteral("comm")] = comm;
+    body[QStringLiteral("req")] = req;
+
+    const HttpResponse resp = musicuRequest(body);
+    if (!resp.ok) return QString();
+    QJsonParseError err;
+    const QJsonDocument doc = QJsonDocument::fromJson(resp.body, &err);
+    if (err.error != QJsonParseError::NoError) return QString();
+    const QVariantMap data = doc.object().toVariantMap()
+                                 .value(QStringLiteral("req")).toMap()
+                                 .value(QStringLiteral("data")).toMap()
+                                 .value(QStringLiteral("track_info")).toMap();
+    return data.value(QStringLiteral("id")).toString();
+}
+
 SearchResult TxSource::searchSongs(const QString &keyword, int page, int limit)
 {
     SearchResult result;
@@ -444,6 +478,9 @@ SearchResult TxSource::getToplist(const QString &id, int page, int limit)
         LxSongMeta lx;
         lx.source = QStringLiteral("tx");
         lx.songmid = s.id;
+        // 评论接口需要数字 BizId（lx.songId），榜单详情返回的 id 字段可用；
+        // 缺它则 lx.songId 为空 → getComments 回退到 song.id（mid 串）→ 请求必失败。
+        lx.songId = m.value(QStringLiteral("id")).toString();
         lx.albumMid = s.albumId;
         lx.strMediaMid = m.value(QStringLiteral("file")).toMap()
                              .value(QStringLiteral("media_mid")).toString();
@@ -515,6 +552,8 @@ Playlist TxSource::getPlaylistDetail(const QString &id)
         LxSongMeta lx;
         lx.source = QStringLiteral("tx");
         lx.songmid = s.id;
+        // 评论接口需要数字 BizId（lx.songId）；歌单详情返回 id 字段可用。
+        lx.songId = m.value(QStringLiteral("id")).toString();
         lx.albumMid = s.albumId;
         const QVariantMap file = m.value(QStringLiteral("file")).toMap();
         lx.strMediaMid = file.value(QStringLiteral("media_mid")).toString();
@@ -701,5 +740,79 @@ QVector<PlaylistSummary> TxSource::explorePlaylists(const QString &cat, const QS
     }
     return out;
 }
+
+CommentPage TxSource::getComments(const Song &song, int page, int limit, bool hot)
+{
+    // QQ 评论走 musicu.fcg，module=music.globalComment.CommentRead。
+    // 热门=GetHotCommentList（带 HotType=1），最新=GetNewCommentList。
+    // BizId=数字 songId（lx.songId）；song.id 是 mid 字符串用不了。与搜索一样无需 sign。
+    CommentPage out;
+    // lx.songId 缺失时（洛雪同步/老收藏常缺）按 songmid 实时解析数字 id——
+    // 参照 lx-music 的 tx/comment.js（getSongId 回退 get_song_detail_yqq）。
+    // 直接回退到 song.id（mid 串）必失败 → 面板永远"暂无评论"。
+    QString songId = song.lx.songId;
+    if (songId.isEmpty()) {
+        const QString songmid = song.lx.songmid.isEmpty() ? song.id : song.lx.songmid;
+        songId = resolveSongId(songmid);
+    }
+    if (songId.isEmpty()) return out;
+
+    QVariantMap param;
+    param[QStringLiteral("BizType")] = 1;            // 1 = 歌曲
+    param[QStringLiteral("BizId")] = songId;
+    param[QStringLiteral("PageSize")] = limit;
+    param[QStringLiteral("PageNum")] = page - 1;     // 0-indexed
+    if (hot) param[QStringLiteral("HotType")] = 1;
+
+    QVariantMap req;
+    req[QStringLiteral("module")] = QStringLiteral("music.globalComment.CommentRead");
+    req[QStringLiteral("method")] = hot ? QStringLiteral("GetHotCommentList")
+                                        : QStringLiteral("GetNewCommentList");
+    req[QStringLiteral("param")] = param;
+
+    QVariantMap comm;
+    comm[QStringLiteral("ct")] = QStringLiteral("24");
+    comm[QStringLiteral("cv")] = QStringLiteral("0");
+    comm[QStringLiteral("uin")] = QStringLiteral("0");
+
+    QVariantMap body;
+    body[QStringLiteral("comm")] = comm;
+    body[QStringLiteral("req")] = req;
+
+    const HttpResponse resp = musicuRequest(body);
+    if (!resp.ok) return out;
+    QJsonParseError err;
+    const QJsonDocument doc = QJsonDocument::fromJson(resp.body, &err);
+    if (err.error != QJsonParseError::NoError) return out;
+    const QVariantMap root = doc.object().toVariantMap();
+    const QVariantMap data = root.value(QStringLiteral("req")).toMap()
+                                   .value(QStringLiteral("data")).toMap();
+    if (data.isEmpty()) return out;
+
+    // 评论列表在 data.CommentList.Comments[]（CommentList 是对象，内含 Comments 数组）
+    const QVariantMap commentList = data.value(QStringLiteral("CommentList")).toMap();
+    // 总数在 CommentList.Total（参考 lx-music）；TotalCmNum 仅部分响应存在，作兜底
+    out.total = commentList.value(QStringLiteral("Total")).toInt();
+    if (out.total <= 0) out.total = data.value(QStringLiteral("TotalCmNum")).toInt();
+    const QVariantList list = commentList.value(QStringLiteral("Comments")).toList();
+    for (const auto &item : list) {
+        const QVariantMap m = item.toMap();
+        Comment c;
+        c.id = m.value(QStringLiteral("CmId")).toString();
+        c.text = m.value(QStringLiteral("Content")).toString();
+        c.userName = m.value(QStringLiteral("Nick")).toString();
+        c.userAvatar = m.value(QStringLiteral("Avatar")).toString();
+        c.likedCount = m.value(QStringLiteral("PraiseNum")).toInt();
+        c.replyNum = m.value(QStringLiteral("ReplyCnt")).toInt();
+        c.location = m.value(QStringLiteral("Location")).toString();
+        const qint64 t = m.value(QStringLiteral("PubTime")).toLongLong();
+        if (t > 0) { c.time = t * 1000; c.timeStr = Format::dateTime(c.time); }
+        if (!c.text.isEmpty() || !c.userName.isEmpty()) out.comments.append(c);
+    }
+    out.page = page;
+    out.maxPage = out.total > 0 ? (out.total + limit - 1) / limit : 1;
+    return out;
+}
+
 
 } // namespace Muyun

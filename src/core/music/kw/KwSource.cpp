@@ -653,4 +653,64 @@ QVector<PlaylistSummary> KwSource::explorePlaylists(const QString &cat, const QS
     return out;
 }
 
+CommentPage KwSource::getComments(const Song &song, int page, int limit, bool hot)
+{
+    // 酷我评论走 ncomment.kuwo.cn/com.s（Dalvik UA + f=web + prod=kwplayer_ar_10.5.2.0）。
+    // 旧 comment.kuwo.cn/com.s 桌面 UA 返回 code 600，这套才是现行可用的（参考 lx-music）。
+    // sid=歌曲 rid（lx.songmid）。热门=get_rec_comment（hot_comments），最新=get_comment（comments）。
+    CommentPage out;
+    const QString sid = song.lx.songmid.isEmpty() ? song.id : song.lx.songmid;
+    if (sid.isEmpty()) return out;
+
+    const int start = limit * (page - 1);
+    const QString type = hot ? QStringLiteral("get_rec_comment")
+                              : QStringLiteral("get_comment");
+    const QString url = QStringLiteral(
+        "http://ncomment.kuwo.cn/com.s?f=web&type=%1&aapiver=1&prod=kwplayer_ar_10.5.2.0"
+        "&digest=15&sid=%2&start=%3&msgflag=1&count=%4&newver=3&uid=0")
+        .arg(type)
+        .arg(QString::fromUtf8(QUrl::toPercentEncoding(sid)))
+        .arg(start)
+        .arg(limit);
+
+    HttpOptions opt;
+    opt.headers[QStringLiteral("User-Agent")] = QStringLiteral("Dalvik/2.1.0 (Linux; U; Android 9;)");
+    opt.timeoutMs = 20000;
+    const HttpResponse resp = HttpClient::instance()->get(url, opt);
+    if (!resp.ok) return out;
+
+    const QVariantMap root = kwParseRoot(QString::fromUtf8(resp.body));
+    if (root.isEmpty()) return out;
+    // code 是字符串 "200"
+    if (root.value(QStringLiteral("code")).toString() != QStringLiteral("200")) return out;
+
+    const QString listKey = hot ? QStringLiteral("hot_comments") : QStringLiteral("comments");
+    const QString totalKey = hot ? QStringLiteral("hot_comments_counts")
+                                 : QStringLiteral("comments_counts");
+    out.total = root.value(totalKey).toString().toInt();
+    const QVariantList list = root.value(listKey).toList();
+    for (const auto &item : list) {
+        const QVariantMap m = item.toMap();
+        Comment c;
+        c.id = m.value(QStringLiteral("id")).toString();
+        c.text = decodeHtml(m.value(QStringLiteral("msg")).toString());
+        c.userName = m.value(QStringLiteral("u_name")).toString();
+        c.userAvatar = m.value(QStringLiteral("u_pic")).toString();
+        c.likedCount = m.value(QStringLiteral("like_num")).toInt();
+        const qint64 t = m.value(QStringLiteral("time")).toLongLong();
+        if (t > 0) { c.time = t * 1000; c.timeStr = Format::dateTime(c.time); }
+        // 楼中楼：child_comments 首条
+        const QVariantList children = m.value(QStringLiteral("child_comments")).toList();
+        if (!children.isEmpty()) {
+            const QVariantMap sub = children.first().toMap();
+            c.replyText = decodeHtml(sub.value(QStringLiteral("msg")).toString());
+            c.replyUser = sub.value(QStringLiteral("u_name")).toString();
+        }
+        if (!c.text.isEmpty() || !c.userName.isEmpty()) out.comments.append(c);
+    }
+    out.page = page;
+    out.maxPage = out.total > 0 ? (out.total + limit - 1) / limit : 1;
+    return out;
+}
+
 } // namespace Muyun

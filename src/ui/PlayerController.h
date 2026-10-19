@@ -82,6 +82,9 @@ public:
 
     QVariantMap currentSongMap() const;
     Song currentSong() const { return m_currentSong; }
+    /// 当前歌曲的身份 key（identityKey）：评论面板用它比对 commentsReady 带回的 songKey，
+    /// 切歌后旧请求结果按此丢弃。QML 拿到的是 map（不含 identityKey），故单开一个入口。
+    Q_INVOKABLE QString currentSongKey() const { return m_currentSong.identityKey(); }
     bool isPlaying() const;
     bool isLoading() const { return m_loading; }
     /// 单首取音频看门狗是否在计时（自检用：验证"选歌武装 / 出声或停止解除"）
@@ -155,6 +158,11 @@ public:
     /// 单独重新获取当前歌曲歌词（不影响播放进度）
     Q_INVOKABLE void reloadLyric();
 
+    /// 加载当前歌曲的评论（page 从 1 起；hot=true 热门，false 最新）。
+    /// 同步阻塞调用走 QtConcurrent，完成后用 commentsReady 把结果交回 QML。
+    /// 评论面板据此渲染。未实现评论端点的平台返回空列表（面板显示"暂无评论"）。
+    Q_INVOKABLE void loadComments(int page = 1, bool hot = true);
+
     /// 供 QML 显示的格式化时间
     Q_INVOKABLE QString formatTime(qint64 ms) const;
 
@@ -217,6 +225,10 @@ signals:
     void lyricChanged();
     void lyricLoadingChanged();
     void currentLyricChanged();
+    /// 评论加载完成：songKey 供面板比对当前歌（切歌后旧结果丢弃）；
+    /// comments 为 Comment::toMap() 列表；total/page/maxPage 供分页；hot 标记热门/最新。
+    void commentsReady(const QString &songKey, const QVariantList &comments,
+                       int total, int page, int maxPage, bool hot);
     void effectsChanged();
     /// 音效是否真正生效（管线接管/回退）——驱动入口按钮高亮与面板状态行
     void effectsRuntimeChanged();
@@ -327,6 +339,10 @@ private:
     // 期间 UI 若直接读引擎位置会显示旧值）；引擎追上后或 2s 超时自动清除
     qint64 m_pendingSeekMs = -1;
     QTimer m_seekClearTimer;
+
+    // 评论请求代数：每次 loadComments 递增。旧 worker 完成时若代数已变（用户又点了
+    // 热门/最新/翻页/切歌），结果丢弃，避免把旧请求的数据盖到当前面板上。
+    int m_commentsGeneration = 0;
 
     // 预缓存：切歌后把接下来几首静默下载到缓存目录（见 AudioPreloader）
     AudioPreloader *m_preloader = nullptr;

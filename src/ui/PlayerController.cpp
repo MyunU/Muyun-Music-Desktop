@@ -1292,6 +1292,38 @@ void PlayerController::reloadLyric()
     updateCurrentLyric();
 }
 
+void PlayerController::loadComments(int page, bool hot)
+{
+    // 取当前歌曲评论：getComments 是同步阻塞的（HTTP 取数），放 QtConcurrent 跑，
+    // 完成后用 commentsReady 把 Comment::toMap() 列表交回 QML。评论面板据此渲染。
+    const Song song = m_currentSong;
+    const QString songKey = song.identityKey();
+    const int gen = ++m_commentsGeneration;
+
+    // 无当前歌曲 / 本地歌曲：没有评论接口可取，直接回空（让面板清掉 loading）
+    if (songKey.isEmpty() || song.isLocal()) {
+        emit commentsReady(songKey, QVariantList(), 0, page, 1, hot);
+        return;
+    }
+
+    auto *watcher = new QFutureWatcher<CommentPage>(this);
+    connect(watcher, &QFutureWatcher<CommentPage>::finished, this,
+            [this, watcher, songKey, gen, hot, page]() {
+                const CommentPage cp = watcher->result();
+                watcher->deleteLater();
+                // 旧请求被新一轮（切热门/最新/翻页/切歌）取代 → 丢弃，不覆盖当前面板
+                if (gen != m_commentsGeneration) return;
+                QVariantList list;
+                list.reserve(cp.comments.size());
+                for (const auto &c : cp.comments) list.append(c.toMap());
+                emit commentsReady(songKey, list, cp.total, cp.page, cp.maxPage, hot);
+            });
+    MusicSdk *sdk = MusicSdk::instance();
+    watcher->setFuture(QtConcurrent::run([sdk, song, page, hot]() {
+        return sdk->getComments(song, page, 20, hot);
+    }));
+}
+
 void PlayerController::saveState()
 {
     auto *store = DocumentStore::instance();

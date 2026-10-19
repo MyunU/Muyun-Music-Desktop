@@ -621,4 +621,91 @@ Playlist MgSource::getPlaylistDetail(const QString &id)
     return pl;
 }
 
+CommentPage MgSource::getComments(const Song &song, int page, int limit, bool hot)
+{
+    // 咪咕评论走 app.c.nf.migu.cn/MIGUM3.0/user/comment/stack/v1.0（参考 lx-music）。
+    // resourceId=歌曲 songId（lx.songId）。热门=queryType=2（hotComments + hotCommentStart 分页），
+    // 最新=queryType=1（comments，commentId 游标分页——每页末条 id 作为下一页游标，与 lx-music 一致）。
+    CommentPage out;
+    const QString songId = song.lx.songId.isEmpty() ? song.id : song.lx.songId;
+    if (songId.isEmpty()) return out;
+
+    // 最新评论游标：第 N 页需要第 N-1 页末条 commentId；没有则失败（跳页/首次进面板后直接翻页做不到，
+    // 与 lx-music 的 lastCommentIds 行为一致）
+    QString cursor;
+    if (!hot) {
+        QMutexLocker lock(&m_cursorMtx);
+        if (page > 1)
+            cursor = m_latestCursor.value(
+                songId + QLatin1Char('@') + QString::number(page - 1));
+    }
+    if (!hot && page > 1 && cursor.isEmpty()) return out;
+
+    QString url;
+    if (hot) {
+        url = QStringLiteral(
+            "https://app.c.nf.migu.cn/MIGUM3.0/user/comment/stack/v1.0?pageSize=%1&queryType=2"
+            "&resourceId=%2&resourceType=2&hotCommentStart=%3")
+            .arg(limit)
+            .arg(QString::fromUtf8(QUrl::toPercentEncoding(songId)))
+            .arg((page - 1) * limit);
+    } else {
+        url = QStringLiteral(
+            "https://app.c.nf.migu.cn/MIGUM3.0/user/comment/stack/v1.0?pageSize=%1&queryType=1"
+            "&resourceId=%2&resourceType=2&commentId=%3")
+            .arg(limit)
+            .arg(QString::fromUtf8(QUrl::toPercentEncoding(songId)))
+            .arg(QString::fromUtf8(QUrl::toPercentEncoding(cursor)));
+    }
+
+    HttpOptions opt;
+    opt.headers[QStringLiteral("User-Agent")] = QStringLiteral(
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 13_2_3 like Mac OS X) AppleWebKit/605.1.15 "
+        "(KHTML, like Gecko) Version/13.0.3 Mobile/15E148 Safari/604.1");
+    opt.timeoutMs = 20000;
+    const HttpResponse resp = HttpClient::instance()->get(url, opt);
+    if (!resp.ok) return out;
+    QJsonParseError err;
+    const QJsonDocument doc = QJsonDocument::fromJson(resp.body, &err);
+    if (err.error != QJsonParseError::NoError) return out;
+    const QVariantMap root = doc.object().toVariantMap();
+    if (root.value(QStringLiteral("code")).toString() != QStringLiteral("000000")) return out;
+    const QVariantMap data = root.value(QStringLiteral("data")).toMap();
+
+    out.total = hot ? data.value(QStringLiteral("cfgHotCount")).toString().toInt()
+                    : data.value(QStringLiteral("commentNums")).toString().toInt();
+    const QString listKey = hot ? QStringLiteral("hotComments") : QStringLiteral("comments");
+    const QVariantList list = data.value(listKey).toList();
+    for (const auto &item : list) {
+        const QVariantMap m = item.toMap();
+        Comment c;
+        c.id = m.value(QStringLiteral("commentId")).toString();
+        c.text = m.value(QStringLiteral("commentInfo")).toString();
+        c.timeStr = m.value(QStringLiteral("commentTime")).toString();
+        const QVariantMap user = m.value(QStringLiteral("user")).toMap();
+        c.userName = user.value(QStringLiteral("nickName")).toString();
+        c.userAvatar = user.value(QStringLiteral("middleIcon")).toString();
+        if (c.userAvatar.isEmpty())
+            c.userAvatar = user.value(QStringLiteral("bigIcon")).toString();
+        if (c.userAvatar.isEmpty())
+            c.userAvatar = user.value(QStringLiteral("smallIcon")).toString();
+        c.likedCount = m.value(QStringLiteral("opNumItem")).toMap()
+                           .value(QStringLiteral("thumbNum")).toInt();
+        c.replyNum = m.value(QStringLiteral("replyTotalCount")).toInt();
+        if (!c.text.isEmpty() || !c.userName.isEmpty()) out.comments.append(c);
+    }
+    // 最新评论：本页末条 commentId 存为下一页游标
+    if (!hot && !list.isEmpty()) {
+        const QString lastId = list.last().toMap().value(QStringLiteral("commentId")).toString();
+        if (!lastId.isEmpty()) {
+            QMutexLocker lock(&m_cursorMtx);
+            m_latestCursor[songId + QLatin1Char('@') + QString::number(page)] = lastId;
+        }
+    }
+    out.page = page;
+    // 热门与最新都按总数算页数（最新有游标后支持翻页）
+    out.maxPage = out.total > 0 ? (out.total + limit - 1) / limit : 1;
+    return out;
+}
+
 } // namespace Muyun

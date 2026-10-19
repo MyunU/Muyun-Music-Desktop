@@ -7,7 +7,9 @@ import QtQuick.Layouts
 Item {
     id: drawer
     anchors.fill: parent
-    z: 300
+    /// 抽屉层级（默认 300）。从全屏歌词页 z:500 内打开的抽屉需设 600 才能盖住它。
+    property int drawerZ: 300
+    z: drawerZ
 
     property bool opened: false
     property string title: ""
@@ -62,6 +64,8 @@ Item {
         MouseArea {
             anchors.fill: parent
             onClicked: drawer.close()
+            // 吃掉遮罩区的鼠标滚轮，否则事件穿透到下层（如主内容 ListView）跟着滚
+            onWheel: wheel.accepted = true
         }
     }
 

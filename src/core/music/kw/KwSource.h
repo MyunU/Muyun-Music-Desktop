@@ -36,6 +36,11 @@ public:
                                               int page, int limit,
                                               bool *hasMore = nullptr) override;
 
+    /// 歌曲评论：ncomment.kuwo.cn/com.s（Dalvik UA + f=web + prod=kwplayer_ar_），
+    /// sid=歌曲 rid（lx.songmid）。热门=get_rec_comment，最新=get_comment。参考 lx-music。
+    CommentPage getComments(const Song &song, int page = 1, int limit = 20,
+                            bool hot = true) override;
+
 private:
     static QString decodeHtml(const QString &text);
     static QString normalizeCover(const QString &path);

@@ -34,10 +34,17 @@ public:
                                               int page, int limit,
                                               bool *hasMore = nullptr) override;
 
+    /// 歌曲评论（musicu.fcg `music.comment.getcomment`/`GetComment`，bizid=数字 songId）
+    CommentPage getComments(const Song &song, int page = 1, int limit = 20,
+                            bool hot = true) override;
+
 private:
     HttpResponse musicuRequest(const QVariantMap &body,
                                const QString &referer = QStringLiteral("https://y.qq.com"));
     static QString qualityPrefix(AudioQuality q);
+    /// 按 songmid（mid 串）调 musicu `music.pf_song_detail_svr/get_song_detail_yqq`
+    /// 解析数字 songId（评论接口 BizId 需要数字 id；lx.songId 缺失时用，参考 lx-music）。
+    QString resolveSongId(const QString &songmid);
 };
 
 } // namespace Muyun

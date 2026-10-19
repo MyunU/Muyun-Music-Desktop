@@ -2,6 +2,9 @@
 
 #include "core/music/MusicSource.h"
 
+#include <QHash>
+#include <QMutex>
+
 namespace Muyun {
 
 /**
@@ -35,9 +38,18 @@ public:
                                               int page, int limit,
                                               bool *hasMore = nullptr) override;
 
+    /// 歌曲评论：app.c.nf.migu.cn/MIGUM3.0/user/comment/stack/v1.0，
+    /// resourceId=歌曲 songId（lx.songId）。热门=queryType=2，最新=queryType=1（commentId 游标翻页）。参考 lx-music。
+    CommentPage getComments(const Song &song, int page = 1, int limit = 20,
+                            bool hot = true) override;
+
 private:
     static QString makeSign(const QString &keyword, const QString &timestamp);
     static QVariantMap requestResource(const QString &copyrightId);
+    /// 最新评论游标缓存：key = "<songId>@<page>" → 该页最后一条评论的 commentId。
+    /// 下一页用前一页末条 id 当游标（与 lx-music 的 lastCommentIds 一致）。
+    QHash<QString, QString> m_latestCursor;
+    QMutex m_cursorMtx;
 };
 
 } // namespace Muyun

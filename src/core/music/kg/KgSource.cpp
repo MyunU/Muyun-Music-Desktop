@@ -9,6 +9,7 @@
 #include <QRegularExpression>
 #include <QSet>
 #include <QUrl>
+#include <QDateTime>
 #include <algorithm>
 
 namespace Muyun {
@@ -800,6 +801,85 @@ Playlist KgSource::getPlaylistDetail(const QString &id)
         pl.songs.append(s);
     }
     return pl;
+}
+
+QString KgSource::commentSignature(const QString &params)
+{
+    // kugou 评论签名（参考 lx-music kg/util.js 的 signatureParams，platform=android）：
+    // md5(keyparam + 排序后按 & 拆分的参数直接拼接 + keyparam)，keyparam=OIlwieks28dk2k092lksi2UIkp
+    static const QString kKey = QStringLiteral("OIlwieks28dk2k092lksi2UIkp");
+    QStringList parts = params.split(QLatin1Char('&'));
+    parts.sort();
+    const QString joined = parts.join(QString());
+    return Crypto::md5Hex((kKey + joined + kKey).toUtf8());
+}
+
+CommentPage KgSource::getComments(const Song &song, int page, int limit, bool hot)
+{
+    // 酷狗评论走 m.comment.service.kugou.com/r/v1/rank/<newest|topliked>，需 commentSignature 签名。
+    // hash=歌曲 FileHash（lx.hash）。热门=topliked，最新=newest。
+    CommentPage out;
+    // 评论接口只需要一个能标识歌曲的 hash，优先 lx.hash（128k 兜底），
+    // 它为空时（歌曲只有 FLAC/HQ、无 128k MP3）沿音质链取首个非空 hash——
+    // 否则这类歌曲 lx.hash 空 → getComments 直接 return，评论永远取不到。
+    const QString hash = hashForQuality(song, AudioQuality::K128);
+    if (hash.isEmpty()) return out;
+
+    const qint64 timestamp = QDateTime::currentMSecsSinceEpoch();
+    const QString params = QStringLiteral(
+        "dfid=0&mid=16249512204336365674023395779019&clienttime=%1&uuid=0&extdata=%2"
+        "&appid=1005&code=fc4be23b4e972707f36b8a828a93ba8a&schash=%2&clientver=11409&p=%3"
+        "&clienttoken=&pagesize=%4&ver=10&kugouid=0")
+        .arg(timestamp)
+        .arg(hash)
+        .arg(page)
+        .arg(limit);
+    const QString sig = commentSignature(params);
+    const QString url =
+        QStringLiteral("http://m.comment.service.kugou.com/r/v1/rank/%1?%2&signature=%3")
+            .arg(hot ? QStringLiteral("topliked") : QStringLiteral("newest"))
+            .arg(params)
+            .arg(sig);
+
+    HttpOptions opt;
+    opt.headers[QStringLiteral("User-Agent")] = QStringLiteral(
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/107.0.0.0 Safari/537.36 Edg/107.0.1418.24");
+    opt.timeoutMs = 20000;
+    const HttpResponse resp = HttpClient::instance()->get(url, opt);
+    if (!resp.ok) return out;
+    QJsonParseError err;
+    const QJsonDocument doc = QJsonDocument::fromJson(resp.body, &err);
+    if (err.error != QJsonParseError::NoError) return out;
+    const QVariantMap root = doc.object().toVariantMap();
+    if (root.value(QStringLiteral("err_code")).toInt() != 0) return out;
+
+    out.total = root.value(QStringLiteral("count")).toInt();
+    const QVariantList list = root.value(QStringLiteral("list")).toList();
+    for (const auto &item : list) {
+        const QVariantMap m = item.toMap();
+        Comment c;
+        c.id = m.value(QStringLiteral("id")).toString();
+        c.text = m.value(QStringLiteral("content")).toString();
+        c.userName = m.value(QStringLiteral("user_name")).toString();
+        c.userAvatar = m.value(QStringLiteral("user_pic")).toString();
+        const QVariantMap like = m.value(QStringLiteral("like")).toMap();
+        c.likedCount = like.value(QStringLiteral("likenum")).toInt();
+        c.replyNum = m.value(QStringLiteral("reply_num")).toInt();
+        c.location = m.value(QStringLiteral("location")).toString();
+        // addtime 是日期字符串（如 "2024-01-01 12:00:00"），直接当 timeStr 显示
+        c.timeStr = m.value(QStringLiteral("addtime")).toString();
+        // 楼中楼：pcontent/puser（被引用的父评论）
+        const QString pcontent = m.value(QStringLiteral("pcontent")).toString();
+        if (!pcontent.isEmpty()) {
+            c.replyText = pcontent;
+            c.replyUser = m.value(QStringLiteral("puser")).toString();
+        }
+        if (!c.text.isEmpty() || !c.userName.isEmpty()) out.comments.append(c);
+    }
+    out.page = page;
+    out.maxPage = out.total > 0 ? (out.total + limit - 1) / limit : 1;
+    return out;
 }
 
 } // namespace Muyun

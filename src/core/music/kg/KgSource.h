@@ -38,12 +38,19 @@ public:
                                               int page, int limit,
                                               bool *hasMore = nullptr) override;
 
+    /// 歌曲评论：m.comment.service.kugou.com/r/v1/rank/<newest|topliked>，需 commentSignature 签名。
+    /// hash=歌曲 FileHash（lx.hash）。参考 lx-music。
+    CommentPage getComments(const Song &song, int page = 1, int limit = 20,
+                            bool hot = true) override;
+
 private:
     /// 按音质挑选对应的 hash
     static QString hashForQuality(const Song &song, AudioQuality quality);
     /// 调用 getdata 接口，返回整段 JSON
     static QVariantMap fetchPlayData(const QString &hash);
     static QString machineId();
+    /// kugou 评论签名：md5(androidKey + 排序参数拼接 + androidKey)，androidKey=OIlwieks28dk2k092lksi2UIkp
+    static QString commentSignature(const QString &params);
 };
 
 } // namespace Muyun

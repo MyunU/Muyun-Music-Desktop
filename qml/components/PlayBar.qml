@@ -543,5 +543,12 @@ Rectangle {
             tip: "桌面歌词"
             onClicked: root.toggleDesktopLyrics()
         }
+
+        // 评论
+        IconButton {
+            name: "comment"
+            tip: "评论"
+            onClicked: root.openComments()
+        }
     }
 }

@@ -2289,6 +2289,8 @@ Window {
 
     function openQueueDrawer() { queueDrawer.open() }
 
+    function openComments() { commentsPanel.open() }
+
     function openSettings(section) {
         if (section !== undefined) settingsPanel.section = section
         settingsPanel.open()
@@ -2425,6 +2427,7 @@ Window {
     LyricsPage {
         id: lyricsPage
         objectName: "lyricsPageObj"
+        onRequestComments: root.openComments()
         onClosed: {
             // 全屏歌词页关闭后重建输入法上下文：本页是无输入控件的大 Item，期间
             // Qt 摘掉整窗 IME；仅 reset/commit 不够（焦点项不重发 focusIn，Qt 不重建）。
@@ -2437,6 +2440,12 @@ Window {
                 searchInput.forceActiveFocus()
             }
         }
+    }
+
+    // 歌曲评论面板（右侧抽屉，drawerZ:600 盖在全屏歌词页之上）
+    CommentsPanel {
+        id: commentsPanel
+        anchors.fill: parent
     }
 
     // 桌面歌词：由 C++ DesktopLyricsController 承载的独立置顶窗
@@ -2504,6 +2513,7 @@ Window {
     // 不是关窗——这是设计行为，别把"搜索时 Esc 没反应"当 bug 报。
     readonly property bool escClaimed: settingsPanel.visible || effectsPanel.visible
         || queueDrawer.visible || sourceDrawer.visible || downloadDrawer.visible
+        || commentsPanel.visible
         || newPlaylistDialog.visible || deletePlaylistDialog.visible
         || lxModeDialog.visible || exitDialog.visible || appUpdateDialog.visible
         || searchInput.activeFocus || root.focusInsidePopup

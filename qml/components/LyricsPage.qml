@@ -34,6 +34,9 @@ Item {
     // 关闭完成（动画播完、visible=false）后通知外层，用于重建输入法上下文
     signal closed()
 
+    // 请求打开评论面板（评论按钮在三种样式的控制栏里，面板本体在 Main.qml）
+    signal requestComments()
+
     function recompute() {
         var lines = player.lyricLines
         if (!lines || lines.length === 0) { activeIndex = -1; activeProgress = 0; return }
@@ -345,6 +348,9 @@ Item {
                         IconButton { name: page.favState ? "heart-filled" : "heart"
                                      iconColor: page.favState ? "#ff4d4f" : theme.subTextColor
                                      onClicked: library.toggleFavorite(player.currentSong) }
+                        IconButton { name: "comment"; iconSize: 20
+                                     tip: "评论"
+                                     onClicked: page.requestComments() }
                         Item { Layout.fillWidth: true }
                     }
                 }
@@ -825,6 +831,9 @@ Item {
                                      iconSize: 24
                                      iconColor: page.favState ? "#ff4d4f" : theme.subTextColor
                                      onClicked: library.toggleFavorite(player.currentSong) }
+                        IconButton { name: "comment"; iconSize: 24
+                                     tip: "评论"
+                                     onClicked: page.requestComments() }
                         Item { Layout.fillWidth: true }
                     }
                 }
@@ -1025,6 +1034,9 @@ Item {
                                         onClicked: player.togglePlay() }
                         }
                         IconButton { name: "next"; iconSize: 24; iconColor: "white"; onClicked: player.next() }
+                        IconButton { name: "comment"; iconSize: 24; iconColor: "white"
+                                     tip: "评论"
+                                     onClicked: page.requestComments() }
                         Item { Layout.fillWidth: true }
                     }
                 }
