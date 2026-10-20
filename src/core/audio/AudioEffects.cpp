@@ -373,6 +373,9 @@ void AudioEffects::process(float *data, int frameCount)
     const bool anyEffect = m_eqEnabled || m_reverbEnabled
                            || m_spatialEnabled || m_loudnessEnabled;
 
+    // 无效果启用时直接返回，避免不必要的处理
+    if (!anyEffect) return;
+
     // ── AGC（four-56 重写）──────────────────────────────────────────────────
     // 反馈量 = **上一块"限幅前"的输出**峰值/RMS（下面积累的 sqPre/peakPre）。
     // 为什么不是输入侧：链路里 dry 滑杆本身就会降干声电平（混响一开音乐就小声，AGC 必须"看得见"）。
@@ -532,8 +535,6 @@ void AudioEffects::process(float *data, int frameCount)
         const double v = rms * std::exp(-t * 2.2);
         m_spectrum[b] = m_spectrum.at(b) * 0.7 + v * 0.3;
     }
-
-    Q_UNUSED(anyEffect)
 }
 
 // ===========================================================================
@@ -550,8 +551,6 @@ void AudioEffects::reset()
     m_currentGain = 1.0;
     m_gainCur = 1.0;
     m_agcSq = 0.0; m_agcPeak = 0.0; m_agcN = 0;
-    m_rmsAccum = 0.0;
-    m_rmsCount = 0;
     m_spatialPhase = 0.0;      // 相位归零：跳点后摆动从正中开始，不会"瞬移"到半路
     m_level = 0.0;
 }

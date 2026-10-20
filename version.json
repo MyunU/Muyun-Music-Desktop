@@ -1,8 +1,8 @@
 {
   "_comment": "更新提示用的版本清单。发布版：改 version/notes 与下面两个 url，并把同版本号的安装包传到 Releases。版本号规则：修 bug 末位 +1、加功能中间 +1、项目大改动首位 +1。",
-  "version": "1.2.5",
-  "pubDate": "2026-10-19",
-  "notes": "1.2.5 更新\n· 新增歌曲评论（热门/最新、翻页、楼中楼、点赞数）",
-  "pageUrl": "https://github.com/MyunU/Muyun-Music-Desktop/releases/tag/v1.2.5",
-  "downloadUrl": "https://github.com/MyunU/Muyun-Music-Desktop/releases/download/v1.2.5/MuyunMusic-1.2.5.exe"
+  "version": "1.2.6",
+  "pubDate": "2026-10-20",
+  "notes": "1.2.6 更新\n· 新增搜索历史记录（超出自动换行、长歌名自动省略）\n· 新增搜索关联词联想\n· 修复日文、韩文等歌词译文与原文错位\n· 修复桌面歌词不跟随显示翻译开关\n· 修复搜索下拉框滚轮穿透到下层界面\n· 修复搜索框点击后无法输入\n· 修复搜索联想有时空白\n· 修复取播放链接偶发崩溃",
+  "pageUrl": "https://github.com/MyunU/Muyun-Music-Desktop/releases/tag/v1.2.6",
+  "downloadUrl": "https://github.com/MyunU/Muyun-Music-Desktop/releases/download/v1.2.6/MuyunMusic-1.2.6.exe"
 }

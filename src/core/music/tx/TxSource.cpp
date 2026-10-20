@@ -7,6 +7,7 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QByteArray>
+#include <QDateTime>
 #include <QRandomGenerator>
 #include <QSet>
 
@@ -34,6 +35,21 @@ HttpResponse TxSource::musicuRequest(const QVariantMap &body, const QString &ref
         printf("[TX-REQ] %s\n[TX-RESP] %s\n", payload.left(300).constData(),
                resp.body.left(400).constData());
     return resp;
+}
+
+// ── 搜索限流熔断 ────────────────────────────────────────────────────────────
+// QQ musicu 搜索对未签名请求限流很严（实测约 10 次后开始返回 req.code=2001、
+// 歌曲列表恒空，静置数分钟自愈）。联想每敲一个字就查一次，不熔断必然打满。
+bool TxSource::searchBlocked() const
+{
+    QMutexLocker lk(&m_searchMtx);
+    return QDateTime::currentMSecsSinceEpoch() < m_searchBlockedUntilMs;
+}
+
+void TxSource::markSearchBlocked()
+{
+    QMutexLocker lk(&m_searchMtx);
+    m_searchBlockedUntilMs = QDateTime::currentMSecsSinceEpoch() + kSearchCooldownMs;
 }
 
 QString TxSource::qualityPrefix(AudioQuality q)
@@ -87,6 +103,8 @@ SearchResult TxSource::searchSongs(const QString &keyword, int page, int limit)
 {
     SearchResult result;
     if (limit <= 0) limit = 30;
+    // 熔断中：不打网络（QQ 已限流，再打只会延长封禁），直接回空让上层走兜底
+    if (searchBlocked()) return result;
 
     QVariantMap param;
     param[QStringLiteral("query")] = keyword;
@@ -118,6 +136,14 @@ SearchResult TxSource::searchSongs(const QString &keyword, int page, int limit)
     const QJsonDocument doc = QJsonDocument::fromJson(resp.body, &err);
     if (err.error != QJsonParseError::NoError) return result;
     const QVariantMap root = doc.object().toVariantMap();
+
+    // ⚠ req.code=2001 = 被限流拦下（要求登录，feedbackURL 指向登录页），
+    //   此时歌曲列表恒空。记下冷却期，后续请求直接短路，避免越打越封。
+    if (root.value(QStringLiteral("req")).toMap()
+            .value(QStringLiteral("code")).toInt() == 2001) {
+        markSearchBlocked();
+        return result;
+    }
 
     const QVariantMap reqData = root.value(QStringLiteral("req")).toMap()
                                     .value(QStringLiteral("data")).toMap();

@@ -5,6 +5,7 @@
 #include <QQmlContext>
 #include <QQuickStyle>
 #include <QQuickWindow>
+#include <QQuickView>
 #include <QQuickItem>
 #include <QMouseEvent>
 
@@ -3084,6 +3085,247 @@ int main(int argc, char *argv[])
             LK(fits && grow, "E 桌面歌词窗高容得下原文+译文（各字号都不裁剪、且不随字号缩小）");
             dl.setSizePx(28);
         }
+        // F) 主 LRC 内联翻译行合并（用户 2026-10-20 报：非英文歌的译文被识别成两行）。
+        //    旧实现 isMostlyChinese 把日文假名当汉字、且只认"中文↔非中文"对 → 日/韩文
+        //    原文+译文不合并 → 两行。这里锁死日/韩/中/英四种组合的主行归属。
+        {
+            auto inlinePair = [&all](const QString &lrc, const QString &wantMain,
+                                     const QString &wantTrans, const char *name) {
+                auto *ly = new Muyun::SongLyric(Muyun::LyricParser::parseLrc(lrc));
+                Muyun::LyricParser::mergeInlineTranslation(*ly);
+                const bool mainOk = ly->lines.size() >= 1
+                                    && ly->lines.at(0).text == wantMain;
+                const bool transOk = ly->lines.size() >= 1
+                                     && ly->lines.at(0).translation == wantTrans;
+                LK(mainOk && transOk && ly->hasTranslation,
+                   "F %s：第一行=%s 译文=%s",
+                   name, u8(ly->lines.at(0).text), u8(ly->lines.at(0).translation));
+                delete ly;
+            };
+            // 常规排法：原文在前、译文紧随（两对同语言 → 脚本 2:2 打平 → 主导取首行脚本）
+            inlinePair(QStringLiteral("[00:01.00]君の名前を呼ぶよ\n[00:01.50]呼唤你的名字\n"
+                                      "[00:05.00]そばにいるよ\n[00:05.50]在你身边"),
+                       QStringLiteral("君の名前を呼ぶよ"), QStringLiteral("呼唤你的名字"),
+                       "日文原文+中文译文");
+            inlinePair(QStringLiteral("[00:01.00]サクラ サクラ\n[00:01.50]樱花 樱花\n"
+                                      "[00:05.00]ハル ハル\n[00:05.50]春天 春天"),
+                       QStringLiteral("サクラ サクラ"), QStringLiteral("樱花 樱花"),
+                       "假名居多的日文+中文译文");
+            inlinePair(QStringLiteral("[00:01.00]너를 좋아해\n[00:01.50]我喜欢你\n"
+                                      "[00:05.00]행복해져\n[00:05.50]变得幸福"),
+                       QStringLiteral("너를 좋아해"), QStringLiteral("我喜欢你"),
+                       "韩文原文+中文译文");
+            inlinePair(QStringLiteral("[00:01.00]Hello my friend\n[00:01.50]你好我的朋友\n"
+                                      "[00:05.00]Forever young\n[00:05.50]永远年轻"),
+                       QStringLiteral("Hello my friend"), QStringLiteral("你好我的朋友"),
+                       "英文原文+中文译文");
+            inlinePair(QStringLiteral("[00:01.00]你好我的朋友\n[00:01.50]Hello my friend\n"
+                                      "[00:05.00]永远年轻\n[00:05.50]Forever young"),
+                       QStringLiteral("你好我的朋友"), QStringLiteral("Hello my friend"),
+                       "中文原文+英文译文（主行必须是中文）");
+            inlinePair(QStringLiteral("[00:01.00]あなたのことが好きです\n[00:01.50]I love you\n"
+                                      "[00:05.00]そばにいたい\n[00:05.50]I want to be with you"),
+                       QStringLiteral("あなたのことが好きです"), QStringLiteral("I love you"),
+                       "日文原文+英文译文（主行必须是日文）");
+            // 主导脚本路径：原文占多数的歌，主行必须归原文脚本
+            inlinePair(QStringLiteral("[00:01.00]Hello my friend\n[00:01.50]你好我的朋友\n"
+                                      "[00:05.00]Forever young\n[00:09.00]Never give up"),
+                       QStringLiteral("Hello my friend"), QStringLiteral("你好我的朋友"),
+                       "英文主导（拉丁多）时英文作主行");
+            inlinePair(QStringLiteral("[00:01.00]你好我的朋友\n[00:01.50]Hello my friend\n"
+                                      "[00:05.00]永远年轻\n[00:09.00]不会放弃"),
+                       QStringLiteral("你好我的朋友"), QStringLiteral("Hello my friend"),
+                       "中文主导（汉字多）时中文作主行");
+            // 酷我式排法：原文 → 译文 + 下一行原文（同时间戳）。译文必须挂到**前一行**原文，
+            //   不是后一行（旧实现按"相邻两行"配对会整首错位一格）
+            {
+                auto *ly = new Muyun::SongLyric(Muyun::LyricParser::parseLrc(
+                    "[00:01.54]夢ならば\n[00:02.88]如果只是一场梦\n[00:02.88]どれほどよかったでしょう\n"
+                    "[00:06.88]那该有多好\n[00:06.88]未だにあなたのことを夢にみる"));
+                Muyun::LyricParser::mergeInlineTranslation(*ly);
+                LK(ly->lines.size() == 3
+                   && ly->lines.at(0).text == QStringLiteral("夢ならば")
+                   && ly->lines.at(0).translation == QStringLiteral("如果只是一场梦")
+                   && ly->lines.at(1).text == QStringLiteral("どれほどよかったでしょう")
+                   && ly->lines.at(1).translation == QStringLiteral("那该有多好"),
+                   "F 酷我式（译文与下一行原文同时间戳）：三行各自配对不乱位（行数=%d）",
+                   int(ly->lines.size()));
+                delete ly;
+            }
+        }
+        // G) 时间轴后的元数据行必须剥掉（酷我/酷狗/网易日文歌常见：[00:00.000] 作词 : 米津玄師）
+        //    不剥的话它们会变成"中文原文"去并相邻日文行 → 日文行拿元数据当译文、真译文错位
+        {
+            auto *ly = new Muyun::SongLyric(Muyun::LyricParser::parseLrc(
+                "[00:00.000] 作词 : 米津玄師\n[00:00.212] 作曲 : 米津玄師\n"
+                "[00:00.851]夢ならばどれほどよかったでしょう\n"
+                "[00:06.650]未だにあなたのことを夢にみる"));
+            Muyun::LyricParser::mergeInlineTranslation(*ly);
+            LK(ly->lines.size() == 2
+               && ly->lines.at(0).text == QStringLiteral("夢ならばどれほどよかったでしょう"),
+               "G 时间轴元数据行已剥除（行数=%d 第一行=%s）",
+               int(ly->lines.size()), u8(ly->lines.at(0).text));
+            delete ly;
+        }
+        {
+            auto *ly = new Muyun::SongLyric(Muyun::LyricParser::parseLrc(
+                "[00:00.000] 作词 : 米津玄師\n[00:00.212] 制作人 : 米津玄師\n"
+                "[00:00.851]夢ならばどれほどよかったでしょう\n[00:01.200]如果这一切都是梦境该有多好\n"
+                "[00:06.650]未だにあなたのことを夢にみる\n[00:07.000]至今仍能与你在梦中相遇"));
+            Muyun::LyricParser::mergeInlineTranslation(*ly);
+            LK(ly->lines.size() == 2
+               && ly->lines.at(0).text == QStringLiteral("夢ならばどれほどよかったでしょう")
+               && ly->lines.at(0).translation == QStringLiteral("如果这一切都是梦境该有多好"),
+               "G 元数据不抢位：第一行=%s 译文=%s",
+               u8(ly->lines.at(0).text), u8(ly->lines.at(0).translation));
+            delete ly;
+        }
+        // H) 间奏的拉丁文拟声歌词不能当译文（网易中文歌常见 "Re So So Si Do Si La"）
+        //    它们与前后原文行都不同时间戳，不该被挂成译文
+        {
+            auto *ly = new Muyun::SongLyric(Muyun::LyricParser::parseLrc(
+                "[00:41.349]随记忆一直晃到现在\n[00:44.613]Re So So Si Do Si La\n"
+                "[00:47.805]So La Si Si Si Si La Si La So\n[00:51.813]吹着前奏望着天空"));
+            Muyun::LyricParser::mergeInlineTranslation(*ly);
+            LK(ly->lines.size() == 4
+               && ly->lines.at(1).text == QStringLiteral("Re So So Si Do Si La")
+               && ly->lines.at(1).translation.isEmpty()
+               && ly->lines.at(0).translation.isEmpty(),
+               "H 拉丁拟声歌词不当译文（行数=%d 第二行=%s 其译文=%s）",
+               int(ly->lines.size()), u8(ly->lines.at(1).text), u8(ly->lines.at(1).translation));
+            delete ly;
+        }
+        // I) 同时间戳的行必须保持文件顺序（酷我式：译文 + 下一行原文同时间戳）。
+        //    parseLrc 若用非稳定排序，同时间戳的两行会被调换 → 译文挂到后一句上、整首错位。
+        {
+            const QStringList orig = { QStringLiteral("夢ならば"), QStringLiteral("どれほどよかったでしょう"),
+                                       QStringLiteral("未だにあなたのことを夢にみる"), QStringLiteral("忘れた物を取りに帰るように"),
+                                       QStringLiteral("古びた思い出の埃を払う"), QStringLiteral("戻らない幸せがあることを"),
+                                       QStringLiteral("最後にあなたが教えてくれた"), QStringLiteral("言えずに隠してた昏い過去も") };
+            const QStringList trans = { QStringLiteral("如果只是一场梦"), QStringLiteral("那该有多好"),
+                                        QStringLiteral("你依旧出现在我梦里"), QStringLiteral("就像取回遗忘的东西一样"),
+                                        QStringLiteral("把陈旧回忆上的尘埃拂去"), QStringLiteral("有些幸福再也无法重来"),
+                                        QStringLiteral("这是最后你告诉我的"), QStringLiteral("藏在心里的黑暗过去") };
+            QStringList out;
+            out << QStringLiteral("[00:01.54]%1").arg(orig.at(0));
+            double t = 1.54;
+            for (int k = 1; k < orig.size(); ++k) {
+                t += 1.34;
+                const int mm = int(t) / 60, ss = int(t) % 60;
+                const int cs = int((t - int(t)) * 100 + 0.5);
+                const QString tag = QStringLiteral("[%1:%2.%3]")
+                                        .arg(mm, 2, 10, QLatin1Char('0'))
+                                        .arg(ss, 2, 10, QLatin1Char('0'))
+                                        .arg(cs, 2, 10, QLatin1Char('0'));
+                out << tag + trans.at(k - 1) << tag + orig.at(k);
+            }
+            t += 1.34;   // 结尾那句原文的译文单独占一行（真实酷我歌词就是这样）
+            out << QStringLiteral("[%1:%2.%3]%4")
+                       .arg(int(t) / 60, 2, 10, QLatin1Char('0'))
+                       .arg(int(t) % 60, 2, 10, QLatin1Char('0'))
+                       .arg(int((t - int(t)) * 100 + 0.5), 2, 10, QLatin1Char('0'))
+                       .arg(trans.at(orig.size() - 1));
+            auto *ly = new Muyun::SongLyric(Muyun::LyricParser::parseLrc(out.join(QLatin1Char('\n'))));
+            Muyun::LyricParser::mergeInlineTranslation(*ly);
+            bool ok = (ly->lines.size() == orig.size());
+            for (int k = 0; ok && k < orig.size(); ++k)
+                ok = ly->lines.at(k).text == orig.at(k) && ly->lines.at(k).translation == trans.at(k);
+            LK(ok, "I 同时间戳保持文件顺序（行数=%d 首行译文=%s 末行译文=%s）",
+               int(ly->lines.size()), u8(ly->lines.at(0).translation),
+               u8(ly->lines.at(orig.size() - 1).translation));
+            delete ly;
+        }
+        // J) 用户 2026-10-20 报"日文译文和正文显示反了"：译文与原文同时间戳、两种脚本行数打平。
+        //    ① 无歌名 → 退到"最早时间戳组里最后一行是原文"；② 有日文歌名 → 直接定日文为原文。
+        {
+            auto *ly = new Muyun::SongLyric(Muyun::LyricParser::parseLrc(
+                "[00:01.00]可是令人完全安心的\n[00:01.00]恋のようだ\n"
+                "[00:05.00]我觉得还能再见你一面\n[00:05.00]まだ会える気がする"));
+            Muyun::LyricParser::mergeInlineTranslation(*ly);
+            LK(ly->lines.size() == 2
+               && ly->lines.at(0).text == QStringLiteral("恋のようだ")
+               && ly->lines.at(0).translation == QStringLiteral("可是令人完全安心的")
+               && ly->lines.at(1).text == QStringLiteral("まだ会える気がする")
+               && ly->lines.at(1).translation == QStringLiteral("我觉得还能再见你一面"),
+               "J 译文在前+打平（无歌名）：第一行=%s 译文=%s",
+               u8(ly->lines.at(0).text), u8(ly->lines.at(0).translation));
+            delete ly;
+        }
+        {
+            Muyun::Song s;
+            s.name = QStringLiteral("恋のようだ");
+            s.artist = QStringLiteral("米津玄師");
+            auto *ly = new Muyun::SongLyric(Muyun::LyricParser::parseLrc(
+                "[00:01.00]恋のようだ\n[00:01.00]可是令人完全安心的\n"
+                "[00:05.00]まだ会える気がする\n[00:05.00]我觉得还能再见你一面"));
+            Muyun::LyricParser::mergeInlineTranslation(*ly, &s);
+            LK(ly->lines.size() == 2
+               && ly->lines.at(0).text == QStringLiteral("恋のようだ")
+               && ly->lines.at(0).translation == QStringLiteral("可是令人完全安心的")
+               && ly->lines.at(1).text == QStringLiteral("まだ会える気がする")
+               && ly->lines.at(1).translation == QStringLiteral("我觉得还能再见你一面"),
+               "J 原文在前+打平（日文歌名提示）：第一行=%s 译文=%s",
+               u8(ly->lines.at(0).text), u8(ly->lines.at(0).translation));
+            delete ly;
+        }
+        // K) 用户 2026-10-20 再报"日文译文和正文显示反了"：原文与译文**同时间戳**、
+        //    原文在前。旧结构判据"最早时间戳组最后一行"取到的是译文（中文）→ 主导判成
+        //    中文 → 整首反位。现用"歌词有假名→原文必日文"强信号锁定，不再依赖位置。
+        {
+            auto *ly = new Muyun::SongLyric(Muyun::LyricParser::parseLrc(
+                "[00:00.851]夢ならばどれほどよかったでしょう\n[00:00.851]如果这一切都是梦境该有多好\n"
+                "[00:06.650]未だにあなたのことを夢にみる\n[00:06.650]至今仍能与你在梦中相遇"));
+            Muyun::LyricParser::mergeInlineTranslation(*ly);
+            LK(ly->lines.size() == 2
+               && ly->lines.at(0).text == QStringLiteral("夢ならばどれほどよかったでしょう")
+               && ly->lines.at(0).translation == QStringLiteral("如果这一切都是梦境该有多好")
+               && ly->lines.at(1).text == QStringLiteral("未だにあなたのことを夢にみる")
+               && ly->lines.at(1).translation == QStringLiteral("至今仍能与你在梦中相遇"),
+               "K 原文在前+同时间戳：第一行=%s 译文=%s（不可反位）",
+               u8(ly->lines.at(0).text), u8(ly->lines.at(0).translation));
+            delete ly;
+        }
+        // K2) 日文歌含纯汉字行（"心臓"无假名）：classifyScript 把它误算成中文，使
+        //    counts[中文]=3 > counts[日文]=1。旧计数判据据此把中文当原文 → 日文假名行
+        //    "君の名前を呼ぶよ" 被当成"心脏"的译文（反位）。强信号（有假名→日文）绕过
+        //    计数锁定日文为主行：假名行作主行+中文译文，纯汉字行各自留主行（不反位即可）。
+        {
+            auto *ly = new Muyun::SongLyric(Muyun::LyricParser::parseLrc(
+                "[00:01.00]心臓\n[00:01.00]心脏\n"
+                "[00:05.00]君の名前を呼ぶよ\n[00:05.00]呼唤你的名字"));
+            Muyun::LyricParser::mergeInlineTranslation(*ly);
+            // 找到假名行，断言它是主行且译文是中文（旧代码这里会反位：假名行成"心脏"的译文）
+            int kanaIdx = -1;
+            for (int i = 0; i < ly->lines.size(); ++i)
+                if (ly->lines.at(i).text == QStringLiteral("君の名前を呼ぶよ")) { kanaIdx = i; break; }
+            bool kanaNotReversed = kanaIdx >= 0
+                && ly->lines.at(kanaIdx).translation == QStringLiteral("呼唤你的名字");
+            // 纯汉字日文行"心臓"仍作主行（不被降成某行的译文）
+            bool kanjiKeptAsMain = false;
+            for (const auto &l : ly->lines)
+                if (l.text == QStringLiteral("心臓")) { kanjiKeptAsMain = true; break; }
+            LK(kanaNotReversed && kanjiKeptAsMain,
+               "K2 日文含纯汉字行不反位：假名行主=%s 译=%s 纯汉字行作主行=%d",
+               kanaIdx >= 0 ? u8(ly->lines.at(kanaIdx).text) : "(无)",
+               kanaIdx >= 0 ? u8(ly->lines.at(kanaIdx).translation) : "(无)",
+               int(kanjiKeptAsMain));
+            delete ly;
+        }
+        // K3) 韩文同时间戳、原文在前：同样靠"有谚文→韩文"锁定
+        {
+            auto *ly = new Muyun::SongLyric(Muyun::LyricParser::parseLrc(
+                "[00:01.00]너를 좋아해\n[00:01.00]我喜欢你\n"
+                "[00:05.00]행복해져\n[00:05.00]变得幸福"));
+            Muyun::LyricParser::mergeInlineTranslation(*ly);
+            LK(ly->lines.size() == 2
+               && ly->lines.at(0).text == QStringLiteral("너를 좋아해")
+               && ly->lines.at(0).translation == QStringLiteral("我喜欢你")
+               && ly->lines.at(1).text == QStringLiteral("행복해져")
+               && ly->lines.at(1).translation == QStringLiteral("变得幸福"),
+               "K3 韩文原文在前+同时间戳：第一行=%s 译文=%s",
+               u8(ly->lines.at(0).text), u8(ly->lines.at(0).translation));
+            delete ly;
+        }
 #undef LK
         printf("[%s] 歌词译文配对自检结束\n", all ? "PASS" : "FAIL");
         return finishSelfTest(all ? 0 : 4);
@@ -4556,6 +4798,349 @@ int main(int argc, char *argv[])
             QTimer::singleShot(s.first, &app, [s, run]() { s.second(); (*run)(); });
         };
         QTimer::singleShot(1500, &app, [run]() { (*run)(); });
+    }
+#endif // MUYUN_SELFTES
+
+    // 歌词翻译开关即时生效自检（用户 2026-10-20 报：设置里开翻译要重启才生效）：
+    // 切翻译/罗马音后，全屏歌词页 showTranslation/showRoman 必须即时刷新
+    // （QML 绑定 + Connections 反应链），不许等重启。顶栏/桌面歌词的即时性由
+    // --test-lyric-inline 带真实歌词复验（本自检无当前歌，顶栏无译文可看）。
+    // 用法：MuyunMusic.exe --test-lyric-toggle   （不写用户设置，跑完还原）
+#ifdef MUYUN_SELFTES
+    if (args.contains(QStringLiteral("--test-lyric-toggle"))) {
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        printf("=== 歌词翻译开关即时生效自检 ===\n");
+        fflush(stdout);
+        const bool origTrans = settings->lyricTranslation();
+        const bool origRoman = settings->lyricRoman();
+        bool all = true;
+        auto dump = [mainWin](const char *tag) {
+            QObject *pg = mainWin ? mainWin->findChild<QObject*>("lyricsPageObj") : nullptr;
+            const bool st = pg ? pg->property("showTranslation").toBool() : false;
+            const bool sr = pg ? pg->property("showRoman").toBool() : false;
+            printf("[%s] 页showTranslation=%d 页showRoman=%d\n", tag, int(st), int(sr));
+            fflush(stdout);
+        };
+        auto expect = [&all](bool ok, const char *tag, int got, int want) {
+            printf("[%s] %s：实际=%d 期望=%d\n", ok ? "PASS" : "FAIL", tag, got, want);
+            fflush(stdout);
+            if (!ok) all = false;
+        };
+        QTimer::singleShot(1500, &app, [=]() {
+            dump("初始");
+            settings->setLyricTranslation(!origTrans);   // 模拟设置里点翻译开关
+        });
+        QTimer::singleShot(2100, &app, [=]() {
+            QObject *pg = mainWin ? mainWin->findChild<QObject*>("lyricsPageObj") : nullptr;
+            const bool st = pg ? pg->property("showTranslation").toBool() : false;
+            expect(st == !origTrans, "切翻译后页 showTranslation 即时刷新", int(st), int(!origTrans));
+            settings->setLyricTranslation(origTrans);     // 还原
+            settings->setLyricRoman(!origRoman);          // 再验罗马音
+        });
+        QTimer::singleShot(2700, &app, [=]() {
+            QObject *pg = mainWin ? mainWin->findChild<QObject*>("lyricsPageObj") : nullptr;
+            const bool sr = pg ? pg->property("showRoman").toBool() : false;
+            expect(sr == !origRoman, "切罗马音后页 showRoman 即时刷新", int(sr), int(!origRoman));
+            settings->setLyricRoman(origRoman);           // 还原
+            dump("还原后");
+            printf("歌词翻译开关即时生效自检结束\n");
+            fflush(stdout);
+            finishSelfTest(all ? 0 : 4);
+        });
+    }
+#endif // MUYUN_SELFTES
+
+    // 内联翻译行视觉自检（用户 2026-10-20 报：非英文歌译文被识别成两行 + 翻译开关要重启才生效）：
+    // 造一首本地歌 + 多语言内联翻译 LRC（英/日/韩/中四组），开经典全屏歌词页截图：
+    //   shot1 = 翻译开；shot2 = 设置里关翻译（应即时消失）；shot3 = 再开（应即时回来）。
+    // 用法：MuyunMusic.exe --test-lyric-inline <音频文件> [截图目录]
+#ifdef MUYUN_SELFTES
+    if (args.contains(QStringLiteral("--test-lyric-inline"))) {
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        const int ai = args.indexOf(QStringLiteral("--test-lyric-inline"));
+        const QString audio = (ai + 1 < args.size() && !args.at(ai + 1).startsWith(QStringLiteral("--")))
+                              ? args.at(ai + 1) : QString();
+        if (audio.isEmpty() || !QFileInfo::exists(audio)) {
+            printf("[FATAL] 需要一个音频文件参数\n");
+            return 1;
+        }
+        // 截图目录：默认 %TEMP%/muyun-lyrictest
+        QString shotDir = qEnvironmentVariable("MUYUN_LYRIC_SHOTS");
+        if (shotDir.isEmpty()) {
+            const QString t = QDir::tempPath() + QStringLiteral("/muyun-lyrictest");
+            if (!QDir().mkpath(t)) { printf("[FATAL] 建截图目录失败 %s\n", qPrintable(t)); return 1; }
+            shotDir = t;
+        } else if (!QDir().mkpath(shotDir)) {
+            printf("[FATAL] 建截图目录失败 %s\n", qPrintable(shotDir)); return 1;
+        }
+        // 1) 素材：复制音频 + 写多语言内联翻译 LRC（同目录同名 .lrc）
+        const QString songDir = shotDir + QStringLiteral("/song");
+        if (!QDir().mkpath(songDir)) { printf("[FATAL] 建素材目录失败\n"); return 1; }
+        const QString songPath = songDir + QStringLiteral("/测试歌曲.mp3");
+        if (!QFile::copy(audio, songPath) && !QFile::exists(songPath)) {
+            printf("[FATAL] 复制音频素材失败\n"); return 1;
+        }
+        const QString lrcPath = songDir + QStringLiteral("/测试歌曲.lrc");
+        {
+            QFile f(lrcPath);
+            if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                // 日文歌内联翻译（酷我式：原文 + 译文紧随，三组同语言对 → 主导脚本=日文）
+                f.write("[00:01.00]夢ならば\n[00:01.50]如果只是一场梦\n"
+                        "[00:04.00]どれほどよかったでしょう\n[00:04.50]那该有多好\n"
+                        "[00:07.00]未だにあなたのことを夢にみる\n[00:07.50]你依旧出现在我梦里\n"
+                        "[00:10.00]忘れた物を取りに帰るように\n[00:10.50]就像取回遗忘的东西一样\n");
+                f.close();
+            } else { printf("[FATAL] 写 LRC 失败\n"); return 1; }
+        }
+        // 2) 构造本地歌曲并播放（loadLyric 会读同目录 .lrc）
+        Muyun::Song s;
+        s.platform = Muyun::Platform::Local;
+        s.localPath = songPath;
+        s.id = QString::number(qHash(songPath), 16);   // 扫描器会给本地歌一个非空 id（空 id 的 loadLyric 直接早退）
+        s.name = QStringLiteral("测试歌曲");
+        s.artist = QStringLiteral("自检");
+        s.duration = 180;
+        const QVariantMap sm = s.toMap();
+        QVariantList list; list << sm;
+        player->playSong(sm, list, QString(), QStringLiteral("自检"));
+        const QString origStyle = settings->playerStyle();
+        const bool origTrans = settings->lyricTranslation();
+        auto shot = [mainWin, shotDir](const char *name) {
+            if (!mainWin) return;
+            const QString p = shotDir + QStringLiteral("/") + name + QStringLiteral(".png");
+            mainWin->grabWindow().save(p);
+            printf("    截图 %s\n", qPrintable(p));
+            fflush(stdout);
+        };
+        // 数据级断言：合并结果 + 顶栏译文可见性随开关即时变化
+        auto checkData = [mainWin, player](const char *tag, bool wantTransVisible) {
+            const QVariantList lines = player->lyricLines();
+            printf("[%s] lyricLines=%d：", tag, int(lines.size()));
+            for (int k = 0; k < lines.size() && k < 6; ++k) {
+                const QVariantMap m = lines.at(k).toMap();
+                printf("|%s→%s", qPrintable(m.value(QStringLiteral("text")).toString()),
+                       qPrintable(m.value(QStringLiteral("translation")).toString()));
+            }
+            printf("\n");
+            QObject *tb = mainWin ? mainWin->findChild<QObject*>("topBarTransTextObj") : nullptr;
+            const bool tv = tb ? tb->property("visible").toBool() : false;
+            const bool ok = (tv == wantTransVisible);
+            printf("[%s] 顶栏译文可见=%d（期望 %d，当前曲=%s）\n",
+                   ok ? "PASS" : "FAIL", int(tv), int(wantTransVisible),
+                   qPrintable(player->currentLyricTranslation()));
+            fflush(stdout);
+            return ok;
+        };
+        bool all = true;
+        QTimer::singleShot(1300, &app, [=]() {
+            settings->setPlayerStyle(QStringLiteral("classic"));
+            settings->setLyricTranslation(true);   // 先把翻译置开，再开页
+        });
+        QTimer::singleShot(1900, &app, [=]() {
+            QMetaObject::invokeMethod(mainWin, "openLyricsPage");
+        });
+        QTimer::singleShot(2600, &app, [=]() {
+            player->seek(2000);                    // 让第一/二组都落在视口附近
+            printf("== 翻译开 ==\n"); fflush(stdout);
+        });
+        QTimer::singleShot(3300, &app, [=, &all]() {
+            shot("lyric_inline_on");
+            if (!checkData("翻译开", true)) all = false;
+        });
+        QTimer::singleShot(3800, &app, [=]() {
+            printf("== 设置里关翻译（应即时生效）==\n"); fflush(stdout);
+            settings->setLyricTranslation(false);
+        });
+        QTimer::singleShot(4300, &app, [=, &all]() {
+            shot("lyric_inline_off");
+            if (!checkData("翻译关", false)) all = false;
+        });
+        QTimer::singleShot(4800, &app, [=]() {
+            printf("== 设置里再开翻译（应即时回来）==\n"); fflush(stdout);
+            settings->setLyricTranslation(true);
+        });
+        QTimer::singleShot(5300, &app, [=, &all]() {
+            shot("lyric_inline_back");
+            if (!checkData("翻译再开", true)) all = false;
+        });
+        // 桌面歌词也要随翻译开关即时变化（修复前它完全忽略设置，永远显示译文）
+        auto findDeskTrans = []() -> QObject * {
+            for (QWindow *w : QGuiApplication::allWindows()) {
+                auto *qw = qobject_cast<QQuickView *>(w);   // 桌面歌词用 QQuickView 承载
+                if (!qw) continue;
+                if (QObject *o = qw->rootObject()->findChild<QObject*>("deskTransTextObj"))
+                    return o;
+            }
+            return nullptr;
+        };
+        auto checkDesk = [&all, findDeskTrans](const char *tag, bool want) {
+            QObject *dt = findDeskTrans();
+            const bool tv = dt ? dt->property("visible").toBool() : false;
+            const bool ok = (dt != nullptr) && (tv == want);   // 找不到控件也算失败（防假通过）
+            printf("[%s] 桌面歌词译文可见=%d（期望 %d，控件%s）\n", ok ? "PASS" : "FAIL",
+                   int(tv), int(want), dt ? "在" : "不在");
+            fflush(stdout);
+            if (!ok) all = false;
+        };
+        // 桌面歌词窗的 QML 根对象是异步就绪的，且其绑定要等一轮事件循环；
+        // 这里轮询到值稳定再断言，避免时序抖动造成假失败（实测偶发）。
+        auto waitDeskStable = [](QObject *dt, bool want, int maxMs) {
+            QElapsedTimer t; t.start();
+            for (;;) {
+                const bool v = dt ? dt->property("visible").toBool() : false;
+                if (v == want || t.elapsed() > maxMs) return v == want && dt != nullptr;
+                for (int k = 0; k < 20; ++k)
+                    QCoreApplication::processEvents(QEventLoop::AllEvents, 0);
+            }
+        };
+        QTimer::singleShot(5600, &app, [=]() {
+            deskLyrics->show();                       // 创建桌面歌词窗（QML 根对象异步就绪）
+        });
+        QTimer::singleShot(6400, &app, [=, &all]() {
+            for (int k = 0; k < 50; ++k)
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 0);
+            QObject *dt = findDeskTrans();
+            const bool ok = dt && waitDeskStable(dt, true, 1500);
+            printf("[%s] 桌面歌词·翻译开：可见=%d（期望 1，控件%s）\n", ok ? "PASS" : "FAIL",
+                   int(dt ? dt->property("visible").toBool() : false), dt ? "在" : "不在");
+            fflush(stdout);
+            if (!ok) all = false;
+        });
+        QTimer::singleShot(8400, &app, [=, &all]() {
+            settings->setLyricTranslation(false);     // 关翻译 → 桌面歌词译文应即时消失
+            for (int k = 0; k < 50; ++k)
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 0);
+            checkDesk("桌面歌词·翻译关", false);
+        });
+        QTimer::singleShot(9400, &app, [=, &all]() {
+            settings->setLyricTranslation(true);      // 再开 → 应即时回来
+            for (int k = 0; k < 50; ++k)
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 0);
+            checkDesk("桌面歌词·翻译再开", true);
+        });
+        QTimer::singleShot(10400, &app, [=, &all]() {
+            deskLyrics->hide();
+            settings->setLyricTranslation(origTrans);
+            settings->setPlayerStyle(origStyle);
+            QMetaObject::invokeMethod(mainWin, "closeLyricsPage");
+            player->stop();
+            printf("内联翻译行视觉自检结束（截图目录 %s）%s\n", qPrintable(shotDir),
+                   all ? "[PASS]" : "[FAIL]");
+            fflush(stdout);
+            finishSelfTest(all ? 0 : 4);
+        });
+    }
+#endif // MUYUN_SELFTES
+
+    // 在线歌词合并诊断（用户 2026-10-20 报：日文歌译文与正文显示反了）：
+    // 搜歌 → resolveLyric → **逐字复刻 PlayerController::loadLyric 的合并链** →
+    // 打印原始 rawLrc/rawTranslation 与合并后每行的 正文/译文/罗马音，定位主行归属错在哪一步。
+    // 用法：MuyunMusic.exe --test-lyric-online [关键词]（需网络 + 已导入 LX 脚本）
+#ifdef MUYUN_SELFTES
+    if (args.contains(QStringLiteral("--test-lyric-online"))) {
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        const int oi = args.indexOf(QStringLiteral("--test-lyric-online"));
+        const QString kw = (oi + 1 < args.size() && !args.at(oi + 1).startsWith(QStringLiteral("--")))
+                           ? args.at(oi + 1) : QStringLiteral("Lemon");
+        printf("=== 在线歌词合并诊断（关键词=%s）===\n", qPrintable(kw));
+        fflush(stdout);
+        QString srcDir = DocumentStore::instance()->rootPath() + QStringLiteral("/lx-sources");
+        QDir d(srcDir);
+        const QStringList js = d.entryList({QStringLiteral("*.js")}, QDir::Files);
+        if (js.isEmpty()) { printf("[FATAL] no LX scripts\n"); return 1; }
+        QString err;
+        MusicSdk::instance()->loadLxScript(d.absoluteFilePath(js.first()), &err);
+        SearchResult r = MusicSdk::instance()->searchAll(kw, 1, 5);
+        if (r.songs.isEmpty()) { printf("[FATAL] search empty\n"); return 2; }
+        auto lineCount = [](const QString &lrc) {
+            if (lrc.trimmed().isEmpty()) return 0;
+            SongLyric t = LyricParser::parseLrc(lrc);
+            return int(t.lines.size());
+        };
+        auto dumpRaw = [](const char *tag, const QString &lrc) {
+            printf("    -- %s 前 6 行 --\n", tag);
+            const QStringList ls = lrc.split(QLatin1Char('\n'));
+            for (int i = 0; i < ls.size() && i < 6; ++i)
+                printf("       %s\n", u8(ls.at(i)));
+        };
+        int idx = 0;
+        for (const Song &song : r.songs) {
+            ++idx;
+            SongLyric raw = MusicSdk::instance()->resolveLyric(song);
+            printf("[%d] %s - %s（platform=%s）\n", idx,
+                   u8(song.artist), u8(song.name),
+                   u8(Muyun::platformId(song.platform)));
+            printf("    rawLrc=%d 行  rawTranslation=%d 行  rawRoman=%d 行\n",
+                   lineCount(raw.rawLrc), lineCount(raw.rawTranslation), lineCount(raw.rawRoman));
+            dumpRaw("rawLrc", raw.rawLrc);
+            if (!raw.rawTranslation.isEmpty()) dumpRaw("rawTranslation", raw.rawTranslation);
+            // 把原始 LRC 落盘，便于逐行看结构（诊断用）
+            {
+                const QString dir = QDir::tempPath() + QStringLiteral("/muyun-lyrictest");
+                QDir().mkpath(dir);
+                const QString fn = dir + QStringLiteral("/%1-%2.lrc").arg(idx).arg(Muyun::platformId(song.platform));
+                QFile f(fn);
+                if (f.open(QIODevice::WriteOnly)) { f.write(raw.rawLrc.toUtf8()); f.close(); }
+            }
+            if (raw.rawLrc.trimmed().isEmpty()) { printf("\n"); continue; }
+            // —— 与 loadLyric 完全一致的合并链 ——
+            SongLyric ly = LyricParser::parseLrc(raw.rawLrc);
+            ly.rawLrc = raw.rawLrc;
+            LyricParser::dropLeadingTitleLine(ly, song);
+            LyricParser::mergeInlineTranslation(ly);
+            if (!raw.rawTranslation.isEmpty()) {
+                LyricParser::mergeTranslation(ly, raw.rawTranslation, false);
+                ly.hasTranslation = true;
+            }
+            if (!raw.rawRoman.isEmpty()) {
+                LyricParser::mergeTranslation(ly, raw.rawRoman, true);
+                ly.hasRoman = true;
+            }
+            printf("    合并后 %d 行：\n", int(ly.lines.size()));
+            for (int i = 0; i < ly.lines.size() && i < 8; ++i) {
+                const LyricLine &l = ly.lines.at(i);
+                printf("      %d) 正文=[%s] 译文=[%s] 罗马音=[%s]\n", i,
+                       u8(l.text), u8(l.translation), u8(l.roman));
+            }
+            printf("\n");
+            fflush(stdout);
+        }
+        printf("=== 在线歌词合并诊断结束 ===\n");
+        return finishSelfTest(0);
+    }
+#endif // MUYUN_SELFTES
+
+    // 本地 LRC 合并诊断：读一个 .lrc → 复刻 loadLyric 的合并链 → 打印每行 正文/译文/罗马音。
+    // 用法：MuyunMusic.exe --test-lyric-file <路径> [歌名]（歌名给了才剥"歌名 - 歌手"行）
+#ifdef MUYUN_SELFTES
+    if (args.contains(QStringLiteral("--test-lyric-file"))) {
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        const int fi = args.indexOf(QStringLiteral("--test-lyric-file"));
+        const QString path = (fi + 1 < args.size() && !args.at(fi + 1).startsWith(QStringLiteral("--")))
+                             ? args.at(fi + 1) : QString();
+        if (path.isEmpty() || !QFileInfo::exists(path)) {
+            printf("[FATAL] 需要一个存在的 .lrc 路径\n");
+            return 1;
+        }
+        Song song;
+        if (fi + 2 < args.size() && !args.at(fi + 2).startsWith(QStringLiteral("--")))
+            song.name = args.at(fi + 2);
+        QFile f(path);
+        if (!f.open(QIODevice::ReadOnly)) { printf("[FATAL] 打不开 %s\n", u8(path)); return 1; }
+        const QString lrc = QString::fromUtf8(f.readAll());
+        f.close();
+        printf("=== 本地 LRC 合并诊断：%s ===\n", u8(path));
+        SongLyric ly = LyricParser::parseLrc(lrc);
+        LyricParser::dropLeadingTitleLine(ly, song);
+        LyricParser::mergeInlineTranslation(ly);
+        printf("合并后 %d 行：\n", int(ly.lines.size()));
+        for (int i = 0; i < ly.lines.size() && i < 20; ++i) {
+            const LyricLine &l = ly.lines.at(i);
+            printf("  %d) t=%.2f 正文=[%s] 译文=[%s] 罗马音=[%s]\n", i, l.time,
+                   u8(l.text), u8(l.translation), u8(l.roman));
+        }
+        printf("=== 本地 LRC 合并诊断结束 ===\n");
+        return finishSelfTest(0);
     }
 #endif // MUYUN_SELFTES
 

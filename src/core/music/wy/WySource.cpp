@@ -1014,6 +1014,22 @@ QVector<PlaylistSummary> WySource::explorePlaylists(const QString &cat,
                                                     bool *hasMore)
 {
     QVector<PlaylistSummary> out;
+    const QString cacheKey = QStringLiteral("%1|%2|%3|%4").arg(cat, order).arg(page).arg(limit);
+
+    // 检查缓存（5 分钟内有效）
+    {
+        QMutexLocker lk(&m_cacheMtx);
+        auto it = m_playlistCache.find(cacheKey);
+        if (it != m_playlistCache.end()) {
+            const qint64 now = QDateTime::currentMSecsSinceEpoch();
+            if (now - it->timestamp < 5 * 60 * 1000) {
+                if (hasMore) *hasMore = it->hasMore;
+                return it->playlists;
+            }
+            m_playlistCache.erase(it);
+        }
+    }
+
     QVariantMap data;
     data[QStringLiteral("cat")] = cat.isEmpty() ? QStringLiteral("全部") : cat;
     data[QStringLiteral("order")] = order;      // hot / new
@@ -1071,6 +1087,17 @@ QVector<PlaylistSummary> WySource::explorePlaylists(const QString &cat,
         p.platform = Platform::Netease;
         if (!p.id.isEmpty()) out.append(p);
     }
+
+    // 写入缓存
+    {
+        QMutexLocker lk(&m_cacheMtx);
+        PlaylistCacheEntry entry;
+        entry.playlists = out;
+        entry.hasMore = hasMore ? *hasMore : false;
+        entry.timestamp = QDateTime::currentMSecsSinceEpoch();
+        m_playlistCache.insert(cacheKey, entry);
+    }
+
     return out;
 }
 

@@ -464,6 +464,73 @@ Window {
                                     Layout.margins: 10
                                 }
 
+                                // ---------- 历史搜索（下拉框内，热搜上方，自动换行） ----------
+                                RowLayout {
+                                    visible: searchInput.text.length === 0 && searcher.searchHistory.length > 0
+                                    Layout.preferredWidth: 496
+                                    Layout.topMargin: 6
+                                    Layout.leftMargin: 8
+                                    spacing: 6
+
+                                    Text {
+                                        text: "历史搜索"
+                                        color: theme.subTextColor
+                                        font.pixelSize: 11
+                                    }
+                                    Item { Layout.fillWidth: true }
+                                    Text {
+                                        text: "清空"
+                                        color: theme.subTextColor
+                                        font.pixelSize: 11
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: searcher.clearHistory()
+                                        }
+                                    }
+                                }
+                                Flow {
+                                    visible: searchInput.text.length === 0 && searcher.searchHistory.length > 0
+                                    Layout.preferredWidth: 496
+                                    Layout.leftMargin: 8
+                                    Layout.bottomMargin: 6
+                                    spacing: 6
+                                    Repeater {
+                                        model: searcher.searchHistory
+                                        delegate: Rectangle {
+                                            required property var modelData
+                                            height: 22
+                                            // 宽度按文字自然宽度，最长 200（implicitWidth 才是未省略的自然宽度）
+                                            width: Math.min(historyTagText.implicitWidth + 16, 200)
+                                            radius: 11
+                                            color: theme.bgColor
+                                            border.color: theme.borderColor
+                                            border.width: 1
+                                            clip: true      // 兜底：万一仍溢出也不串到相邻标签
+                                            Text {
+                                                id: historyTagText
+                                                anchors.centerIn: parent
+                                                // ⚠ 必须给 Text 限宽，否则 elide 不生效：
+                                                //   长歌名会按全宽渲染，溢出标签背景并压到相邻标签上
+                                                width: Math.min(implicitWidth, 184)
+                                                text: modelData
+                                                color: theme.textColor
+                                                font.pixelSize: 11
+                                                elide: Text.ElideRight
+                                                maximumLineCount: 1
+                                            }
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: {
+                                                    searchInput.focus = false
+                                                    doSearch(modelData)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
                                 // ---------- 热搜模式（左右分栏） ----------
                                 RowLayout {
                                     visible: searchInput.text.length === 0
@@ -654,6 +721,15 @@ Window {
                                         }
                                     }
                                 }
+                            }
+                            // 统一拦截滚轮，防止穿透到下层歌单界面
+                            // 写法同 CommentsPanel：吃 wheel、放行点击（含下层内容）
+                            MouseArea {
+                                anchors.fill: parent
+                                propagateComposedEvents: true
+                                onWheel: wheel.accepted = true
+                                onPressed: mouse.accepted = false
+                                onReleased: mouse.accepted = false
                             }
                         }
                     }

@@ -60,6 +60,7 @@ Item {
                 visible: text.length > 0
             }
             Text {
+                objectName: "deskTransTextObj"   // 自检定位用（--test-lyric-inline）
                 anchors.horizontalCenter: parent.horizontalCenter
                 width: parent.width
                 horizontalAlignment: Text.AlignHCenter
@@ -69,7 +70,8 @@ Item {
                 elide: Text.ElideRight
                 style: Text.Outline
                 styleColor: "#cc000000"
-                visible: text.length > 0
+                // 与主窗顶栏/全屏页一致：翻译开关关了就不显示译文（改动即时生效）
+                visible: settings.lyricTranslation && text.length > 0
             }
             Text {
                 anchors.horizontalCenter: parent.horizontalCenter

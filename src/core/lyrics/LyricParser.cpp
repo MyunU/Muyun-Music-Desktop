@@ -16,23 +16,50 @@ struct RawLine {
     QVector<QPair<double, QString>> words;
 };
 
-/// 检测文本是否主要是中文（中文字符占字母数字字符比例 > 50%）
-bool isMostlyChinese(const QString &text)
+/// 行文本的书写系统分类（用于内联翻译行合并：区分原文/译文的脚本，识别非中文歌词）
+enum class Script { None = 0, Latin, Chinese, Japanese, Korean, Other };
+
+/// 统计一行文本的主要书写系统：
+///  - 含假名（平/片假名）→ 日文（汉字+假名混排判日文，旧实现把假名当汉字导致日文歌
+///    原文与中文译文"都是中文" → 不合并 → 译文被识别成两行，用户 2026-10-20 报）
+///  - 含谚文 → 韩文
+///  - 含汉字 → 中文
+///  - 含其它字母（拉丁/西里尔/希腊…）→ 拉丁/其它
+/// 标点（CJK 标点 0x3000-0x303F、全角 0xFF00-0xFFEF）不算任何脚本，避免"の/サ"被算成汉字
+Script classifyScript(const QString &text)
 {
-    int chineseCount = 0;
-    int totalCount = 0;
+    int han = 0, kana = 0, hangul = 0, latin = 0, other = 0;
     for (QChar c : text) {
-        if (c.isLetterOrNumber()) {
-            ++totalCount;
-            const uint cp = c.unicode();
-            if ((cp >= 0x4E00 && cp <= 0x9FFF)    // CJK 统一汉字
-                || (cp >= 0x3400 && cp <= 0x4DBF) // CJK 扩展 A
-                || (cp >= 0x3000 && cp <= 0x30FF) // CJK 标点
-                || (cp >= 0xFF00 && cp <= 0xFFEF)) // 全角字符
-                ++chineseCount;
+        if (!c.isLetter()) continue;
+        const uint cp = c.unicode();
+        if ((cp >= 0x4E00 && cp <= 0x9FFF)      // CJK 统一汉字（中日共用字形，日文靠假名区分）
+            || (cp >= 0x3400 && cp <= 0x4DBF)   // CJK 扩展 A
+            || (cp >= 0xF900 && cp <= 0xFAFF)) { // CJK 兼容汉字
+            ++han; continue;
         }
+        if ((cp >= 0x3040 && cp <= 0x309F)      // 平假名
+            || (cp >= 0x30A0 && cp <= 0x30FF)   // 片假名
+            || (cp >= 0x31F0 && cp <= 0x31FF)) { // 片假名语音扩展
+            ++kana; continue;
+        }
+        if (cp >= 0xAC00 && cp <= 0xD7A3) { ++hangul; continue; }  // 谚文音节
+        if ((cp >= 0x0041 && cp <= 0x005A) || (cp >= 0x0061 && cp <= 0x007A)
+            || (cp >= 0x00C0 && cp <= 0x024F)   // 拉丁扩展
+            || (cp >= 0x0370 && cp <= 0x03FF)   // 希腊
+            || (cp >= 0x0400 && cp <= 0x04FF)   // 西里尔
+            || (cp >= 0x1E00 && cp <= 0x1EFF)
+            || (cp >= 0xFF21 && cp <= 0xFF3A)   // 全角 Ａ-Ｚ
+            || (cp >= 0xFF41 && cp <= 0xFF5A)) { // 全角 ａ-ｚ
+            ++latin; continue;
+        }
+        if (c.isLetter()) ++other;
     }
-    return totalCount > 0 && (double)chineseCount / totalCount > 0.5;
+    if (kana > 0) return Script::Japanese;
+    if (hangul > 0) return Script::Korean;
+    if (han > 0) return Script::Chinese;
+    if (latin > 0) return Script::Latin;
+    if (other > 0) return Script::Other;   // 其余字母文字（泰/阿/天城文…）单独一类，不与拉丁混
+    return Script::None;
 }
 
 QVector<RawLine> splitLines(const QString &text, bool parseWords)
@@ -101,7 +128,10 @@ QVector<RawLine> splitLines(const QString &text, bool parseWords)
         }
     }
 
-    std::sort(out.begin(), out.end(), [](const RawLine &a, const RawLine &b) {
+    // 必须用**稳定排序**：同时间戳的行（酷我式内联翻译里"译文 + 下一行原文"就是同时间戳）
+    // 要保持文件里的先后顺序，否则 std::sort 会把译文和下一句原文调换 →
+    // 译文被当成后一句的译文，整首错位（用户 2026-10-20 报"日文译文与正文显示反了"）
+    std::stable_sort(out.begin(), out.end(), [](const RawLine &a, const RawLine &b) {
         return a.time < b.time;
     });
     return out;
@@ -114,10 +144,24 @@ QString stripMetadata(const QString &lrcText)
     static const QRegularExpression metaRx(
         QStringLiteral("^\\[(ti|ar|al|by|offset|kana|re|ve|au|length):.*\\]$"),
         QRegularExpression::CaseInsensitiveOption);
+    // 时间标签（可多个），用来取出时间轴之后的正文
+    static const QRegularExpression timeTagRx(
+        QStringLiteral("^(?:\\[\\d{1,3}:\\d{1,2}(?:[.:]\\d{1,3})?\\])+"));
+    // 时间轴后的"标签 : 值"元数据行——酷我/酷狗/网易的日文·中文歌极常见：
+    //   [00:00.000] 作词 : 米津玄師 ｜ [00:00.636] 制作人 : 米津玄師 ｜ [00:00.00] 詞：米津玄師
+    // 它们不是歌词。留着会被 mergeInlineTranslation 当成"中文原文"去并相邻的日文行
+    // → 日文行拿到元数据当译文、真译文错位挂到元数据行上（用户 2026-10-20 报"日文译文与正文显示反了"）。
+    static const QRegularExpression metaLabelRx(QStringLiteral(
+        "^\\s*(?:作词|作詞|作曲|编曲|編曲|制作人|製作人|监制|監製|混音|混音工程|母带|母帶|录音|錄音|录音助理|錄音助理|录音工程|錄音工程|吉他|贝斯|貝斯|键盘|鍵盤|鼓手|鼓|和声|和聲|合声|合聲|合声编写|合聲編寫|合唱|演唱|歌手|翻唱|原唱|配音|独白|念白|出品|发行|發行|"
+        "企划|企劃|统筹|統籌|策划|策劃|词|詞|曲|编|編|唱|歌|Produced by|Written by|Writer|Composer|Lyricist|Arranged by|Arranger|Guitar by|Bass by|Keyboard by|Synthesizer|Drums by|Background Vocals by|Vocal by|Chorus by|Mixed by|Mastered by|Recorded by|Rap by|Strings by|Piano by|Chorus|Engineer|Engineers|Recording Engineer|Recording Engineers|Mix Engineer|Vocal & Rap Arrangement|Digital Editor|OP|SP)\\s*[:：]"));
     QStringList kept;
     const QStringList lines = lrcText.split(QLatin1Char('\n'));
     for (const QString &l : lines) {
-        if (!metaRx.match(l.trimmed()).hasMatch()) kept.append(l);
+        const QString t = l.trimmed();
+        if (metaRx.match(t).hasMatch()) continue;                       // [ti:...] 式
+        const QString body = t.mid(timeTagRx.match(t).capturedLength()).trimmed();
+        if (metaLabelRx.match(body).hasMatch()) continue;               // 时间轴后的标签行
+        kept.append(l);
     }
     return kept.join(QLatin1Char('\n'));
 }
@@ -227,71 +271,152 @@ void mergeTranslation(SongLyric &lyric, const QString &translationText, bool isR
 }
 
 /// 检测并合并主 LRC 文件中的翻译行。
-/// 场景：有些音源把中英文歌词写在同一个 LRC 文件里，交替出现：
-///   [00:01.00] English line
-///   [00:01.50] 中文翻译
-///   [00:05.00] Another English line
-///   [00:05.50] 另一个中文翻译
-/// 或者中文在前：
-///   [00:01.00] 中文歌词
-///   [00:01.50] English translation
-/// mergeTranslation 不会处理这种格式（因为 rawTranslation 为空）。
-/// 本函数检测相邻行时间接近且语言不同的情况，确保英文作为主歌词（text），中文作为翻译（translation）。
-void mergeInlineTranslation(SongLyric &lyric)
+/// 场景：有些音源把原文和译文写在同一个 LRC 文件里。实测两种排法（酷我/咪咕/QQ）：
+///   A) 原文在前，译文紧随、常与**下一行原文**同时间戳：
+///        [00:01.54]夢ならば
+///        [00:02.88]如果只是一场梦            ← 夢ならば 的译文
+///        [00:02.88]どれほどよかったでしょう
+///   B) 译文排在原文之前：
+///        [00:02.88]如果只是一场梦
+///        [00:02.88]夢ならば
+/// mergeTranslation 不处理这种格式（rawTranslation 为空）。
+/// 旧实现按"相邻两行"合并、且只认"中文↔非中文"，遇到 A 会把译文挂到**后一行**原文上
+/// （整首错位），遇到 B 或日文假名误判（假名被当汉字）会变成"译文当正文"
+/// （用户 2026-10-20 报"日文译文与正文显示反了"）。
+/// 现改为：先定全曲主导脚本（= 原文语言），再把每个"非主导脚本行"当译文，
+/// 挂到**它前面最近的原文行**上（A/B 都成立：译文总在原文之后；前面实在没有原文才挂到后一行）。
+void mergeInlineTranslation(SongLyric &lyric, const Song *song)
 {
     if (lyric.lines.size() < 2) return;
 
-    QVector<LyricLine> result;
-    result.reserve(lyric.lines.size());
-
-    int i = 0;
-    while (i < lyric.lines.size()) {
-        LyricLine &line = lyric.lines[i];
-
-        // 已有翻译的行直接保留
-        if (!line.translation.isEmpty()) {
-            result.append(line);
-            ++i;
-            continue;
+    // 每行脚本 + 全曲主导脚本统计（空文本行不计）
+    QVector<Script> scripts(lyric.lines.size());
+    int counts[6] = {0, 0, 0, 0, 0, 0};   // 下标 = Script 枚举值
+    for (int i = 0; i < lyric.lines.size(); ++i) {
+        scripts[i] = classifyScript(lyric.lines[i].text);
+        if (scripts[i] != Script::None) ++counts[int(scripts[i])];
+    }
+    // 主导脚本 = 原文语言。判据按可靠性从强到弱：
+    //   ① 强信号：歌词里只要出现假名 → 原文必是日文；出现谚文 → 原文必是韩文。
+    //     中文译文永不含假名/谚文，故"有假名"就能一锤定音。日文歌里难免有纯汉字行
+    //     （如"心臓"），classifyScript 会把它误算成中文，使 counts[中文] > counts[日文]，
+    //     旧计数判据据此把中文当原文 → 整首反位（用户 2026-10-20 报"日文译文和正文显示反了"）。
+    //     强信号绕过计数，只要全曲有一行带假名即锁定日文。
+    //   ② 无假名/谚文（中文↔拉丁 等无 CJK 独有特征的场景）：走计数 + 并列结构判据。
+    //     并列时结构判据"最早时间戳组最后一行"对同时间戳排版是非对称的（译文在前=对、
+    //     原文在前=错），但中文↔拉丁内联同时间戳极少见，且歌名/歌手可辅助，留作次选。
+    Script dominant = Script::None;
+    const bool hasKana = counts[int(Script::Japanese)] > 0;
+    const bool hasHangul = counts[int(Script::Korean)] > 0;
+    if (hasKana && hasHangul) {
+        // 极罕见的三语（日+韩）：取行数多者为原文
+        dominant = counts[int(Script::Japanese)] >= counts[int(Script::Korean)]
+                       ? Script::Japanese : Script::Korean;
+    } else if (hasKana) {
+        dominant = Script::Japanese;
+    } else if (hasHangul) {
+        dominant = Script::Korean;
+    } else {
+        Script hint = Script::None;
+        if (song) hint = classifyScript(song->name + QLatin1Char(' ') + song->artist);
+        int best = 0;
+        bool tie = false;
+        for (int k = 1; k <= int(Script::Other); ++k) {
+            if (counts[k] > best) { best = counts[k]; dominant = Script(k); tie = false; }
+            else if (counts[k] == best && counts[k] > 0) { tie = true; }
         }
-
-        // 检查下一行是否是翻译行
-        if (i + 1 < lyric.lines.size()) {
-            const LyricLine &next = lyric.lines[i + 1];
-            const double timeDiff = std::fabs(next.time - line.time);
-
-            // 条件：时间接近（< 1s）+ 文本不同 + 语言不同（一行中文一行非中文）
-            if (timeDiff < 1.0
-                && !next.text.trimmed().isEmpty()
-                && next.text != line.text
-                && isMostlyChinese(next.text) != isMostlyChinese(line.text)) {
-
-                bool lineChinese = isMostlyChinese(line.text);
-                bool nextChinese = isMostlyChinese(next.text);
-
-                LyricLine merged;
-                if (lineChinese && !nextChinese) {
-                    // 当前行是中文，下一行是英文 → 英文作为主歌词，中文作为翻译
-                    merged = next;              // 英文行作为主行
-                    merged.translation = line.text; // 中文作为翻译
-                } else {
-                    // 当前行是英文，下一行是中文 → 英文作为主歌词，中文作为翻译
-                    merged = line;              // 英文行作为主行
-                    merged.translation = next.text; // 中文作为翻译
+        if (tie) {
+            if ((hint == Script::Japanese || hint == Script::Korean) && counts[int(hint)] == best) {
+                dominant = hint;
+            } else {
+                // 结构判据：最早时间戳那一组里**最后一行**是原文。
+                int last = 0;
+                const double t0 = lyric.lines.at(0).time;
+                for (int i = 1; i < lyric.lines.size(); ++i) {
+                    if (qFuzzyCompare(lyric.lines.at(i).time, t0)) last = i; else break;
                 }
-
-                result.append(merged);
-                lyric.hasTranslation = true;
-                i += 2; // 跳过两行（已合并）
-                continue;
+                dominant = scripts.at(last);
             }
         }
+    }
+    if (dominant == Script::None) return;   // 全是空行/无字母文字，没什么可并
 
-        result.append(line);
-        ++i;
+    // 先决定每条译文行挂到哪个原文行（原文行下标），再统一应用。
+    // 译文候选必须"贴"在原文行上，否则不算——否则间奏里的拉丁文拟声歌词
+    // （网易中文歌常见的 "Re So So Si Do Si La"）会被当成译文挂到前一句上。
+    //   ① 与相邻原文行同时间戳（酷我式：译文插在下一行原文之前；或原文后紧跟译文）
+    //   ② 前一行是原文且相差 ≤ 1.0s（原文后紧跟译文、时间戳略有出入）
+    auto attachedToOriginal = [&](int i) -> bool {
+        for (int j = i - 1; j >= 0; --j) {
+            if (scripts.at(j) != dominant) continue;
+            if (qFuzzyCompare(lyric.lines.at(j).time, lyric.lines.at(i).time)) return true;
+            if (lyric.lines.at(i).time - lyric.lines.at(j).time <= 1.0) return true;
+            break;
+        }
+        bool hasFollowingOriginal = false;
+        for (int j = i + 1; j < lyric.lines.size(); ++j) {
+            if (scripts.at(j) != dominant) continue;
+            if (qFuzzyCompare(lyric.lines.at(j).time, lyric.lines.at(i).time)) return true;
+            hasFollowingOriginal = true;
+            break;
+        }
+        // ③ 后面已经没有原文了 → 结尾那句的译文常单独占一行（歌词最后一句译文时间戳离得远），照挂
+        return !hasFollowingOriginal;
+    };
+
+    QVector<int> attachTo(lyric.lines.size(), -1);
+    QVector<bool> filled(lyric.lines.size(), false);   // 一条原文只收一条译文
+    for (int i = 0; i < lyric.lines.size(); ++i) {
+        if (scripts.at(i) == dominant || scripts.at(i) == Script::None) continue;   // 原文行/空行
+        if (!attachedToOriginal(i)) continue;                                      // 没贴在原文上 → 不当译文
+        int target = -1;
+        for (int j = i - 1; j >= 0; --j)                    // ① 前面最近的"还没译文的"原文行
+            if (scripts.at(j) == dominant && !filled.at(j)) { target = j; break; }
+        if (target < 0)
+            for (int j = i + 1; j < lyric.lines.size(); ++j)   // ② 前面没有 → 后面最近的原文行
+                if (scripts.at(j) == dominant && !filled.at(j)) { target = j; break; }
+        if (target >= 0) { attachTo[i] = target; filled[target] = true; }
     }
 
+    // 应用：先把译文写进目标原文行，再压缩掉译文行（顺序保持不变）
+    QVector<bool> isTranslation(lyric.lines.size(), false);
+    for (int i = 0; i < lyric.lines.size(); ++i) {
+        const int t = attachTo.at(i);
+        if (t < 0) continue;
+        isTranslation[i] = true;
+        lyric.lines[t].translation = lyric.lines.at(i).text;
+        lyric.hasTranslation = true;
+    }
+    QVector<LyricLine> result;
+    result.reserve(lyric.lines.size());
+    for (int i = 0; i < lyric.lines.size(); ++i)
+        if (!isTranslation.at(i)) result.append(lyric.lines.at(i));
+
     lyric.lines = result;
+}
+
+/// 剥掉歌词开头"歌名 - 歌手"行（酷我/咪咕/QQ 歌词常见：[00:00.00]Lemon - 米津玄師）。
+/// 它不是歌词，且时间通常紧贴首句；不剥的话会被 mergeInlineTranslation 当成"译文"
+/// 挂到首句原文上（用户 2026-10-20 报"日文译文与正文显示反了"）。
+void dropLeadingTitleLine(SongLyric &lyric, const Song &song)
+{
+    if (lyric.lines.isEmpty()) return;
+    const QString t = lyric.lines.at(0).text.trimmed();
+    if (t.isEmpty()) return;
+    // 标题行特征①：含 " - "（"歌名 - 歌手"），与歌名是否匹配无关
+    if (t.contains(QStringLiteral(" - "))) {
+        lyric.lines.removeFirst();
+        return;
+    }
+    // 特征②：正好等于歌名（歌名常带后缀 "봄날 (Spring Day)"，取括号前的主名再比对）
+    QString nm = song.name.trimmed();
+    if (nm.isEmpty()) return;
+    int paren = nm.indexOf(QLatin1Char('('));
+    const int parenFull = nm.indexOf(QChar(0xFF08));
+    if (parenFull >= 0 && (paren < 0 || parenFull < paren)) paren = parenFull;
+    if (paren > 0) nm = nm.left(paren).trimmed();
+    if (!nm.isEmpty() && (t == nm || t.startsWith(nm + QStringLiteral(" - "))))
+        lyric.lines.removeFirst();
 }
 
 int lineIndexAt(const SongLyric &lyric, double timeSec)

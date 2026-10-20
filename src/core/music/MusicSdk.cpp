@@ -186,7 +186,7 @@ void MusicSdk::rememberFailure(const QString &key)
 }
 
 QString MusicSdk::resolveUrl(const Song &song, AudioQuality quality, AudioQuality *actualQuality,
-                             const ResolutionToken *token)
+                             const ResolutionToken *token, int depth)
 {
     // 快照：一旦上层 bump()，后续所有检查点都会命中 isStale → 立即返回。
     // 无 token（旧调用方）视为永不取消，行为与改造前完全一致。
@@ -298,7 +298,10 @@ QString MusicSdk::resolveUrl(const Song &song, AudioQuality quality, AudioQualit
     //   若直接跨平台兜底会抓到酷我等别家链接（用户："QQ 的歌怎么能报酷我"）。
     //   用歌名在本平台搜出合法条目，走 LX/内置再试；**候选必须歌名与原曲匹配**
     //   （双向包含），防止搜索返回同名异曲/翻唱顶替。
-    if (!song.name.isEmpty()) {
+    // ⚠ depth 限制：只允许重搜一层。候选条目重搜时很可能又搜回原曲
+    //   （原曲 → 候选 → 原曲 …互递归），不设上限会栈溢出崩溃
+    //   （`--test-search` 退出码 0xC00000FD 就是这条）。
+    if (depth < 1 && !song.name.isEmpty()) {
         if (resolutionCancelled(token, snap)) return QString();
         const SearchResult local = search(code, song.name, 1, 8);
         const QString sName = song.name.trimmed();
@@ -314,8 +317,9 @@ QString MusicSdk::resolveUrl(const Song &song, AudioQuality quality, AudioQualit
             // 检查点：递归前再看一次，防止取到候选后立刻被切歌
             if (resolutionCancelled(token, snap)) return QString();
             AudioQuality cQ = quality;
-            // 递归一次：候选条目元数据合法，走 LX/内置取链；条目不同不会无限递归。
-            const QString u = resolveUrl(c, quality, &cQ, token);
+            // 递归一层（depth+1）：候选条目元数据合法，走 LX/内置取链；
+            // 下一层不再重搜，递归必然终止。
+            const QString u = resolveUrl(c, quality, &cQ, token, depth + 1);
             if (!u.isEmpty()) {
                 if (actualQuality) *actualQuality = cQ;
                 return u;

@@ -1246,8 +1246,9 @@ void PlayerController::loadLyric()
                 if (!emb.lyrics.isEmpty())
                     lyric = LyricParser::parseLrc(emb.lyrics);
             }
-            // 检测并合并主 LRC 中的内联翻译行（中英文交替出现在同一个 LRC 里的情况）
-            LyricParser::mergeInlineTranslation(lyric);
+            // 检测并合并主 LRC 中的内联翻译行（原文与译文交替出现在同一个 LRC 里的情况）
+            LyricParser::dropLeadingTitleLine(lyric, song);
+            LyricParser::mergeInlineTranslation(lyric, &song);
             return lyric;
         }
         // 歌词接口偶发失败（实测 rawLen=0 概率出现），按"解析后无行"判定，最多重试 3 次
@@ -1269,8 +1270,9 @@ void PlayerController::loadLyric()
         }
         lyric = LyricParser::parseLrc(rawFinal.rawLrc);
         lyric.rawLrc = rawFinal.rawLrc;
-        // 先检测并合并主 LRC 中的内联翻译行（中英文交替出现在同一个 LRC 里的情况）
-        LyricParser::mergeInlineTranslation(lyric);
+        // 先剥掉开头"歌名 - 歌手"行，再检测并合并主 LRC 中的内联翻译行
+        LyricParser::dropLeadingTitleLine(lyric, song);
+        LyricParser::mergeInlineTranslation(lyric, &song);
         if (!rawFinal.rawTranslation.isEmpty()) {
             LyricParser::mergeTranslation(lyric, rawFinal.rawTranslation, false);
             lyric.rawTranslation = rawFinal.rawTranslation;

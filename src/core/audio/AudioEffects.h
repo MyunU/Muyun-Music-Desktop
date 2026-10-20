@@ -164,8 +164,6 @@ private:
     double m_agcSq = 0.0;
     double m_agcPeak = 0.0;
     int m_agcN = 0;
-    double m_rmsAccum = 0.0;
-    int m_rmsCount = 0;
 
     // 可视化
     double m_level = 0.0;

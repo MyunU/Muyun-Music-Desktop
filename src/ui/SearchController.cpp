@@ -251,20 +251,27 @@ void SearchController::suggest(const QString &keyword)
                 emit suggestionsChanged();
             });
     watcher->setFuture(QtConcurrent::run([sdk, kw]() {
-        // 跨平台聚合做联想（与搜索结果页同一数据路径 searchAll）：
-        // 单靠 wy 不行——周杰伦等版权缺失歌手在 wy 结果里根本不出现，
-        // 而 searchAll 聚合 kw/kg/tx/mg 后热度原唱自然排前。
+        // QQ(tx) 优先（曲库最全，用户指定）；QQ 对未签名搜索限流很严，
+        // 被拦后 TxSource 会熔断 5 分钟（searchSongs 直接短路、不打网络），
+        // 此时用酷我(kw) 兜底，保证联想不会整体空白。
+        // 单平台请求很快（对比 searchAll 串行 5 平台每个最多 20s 超时）。
         QStringList out;
         QSet<QString> seen;
-        const SearchResult r = sdk->searchAll(kw, 1, 10);
-        for (const Song &s : r.songs) {
-            if (s.name.isEmpty()) continue;
-            const QString term = s.artist.isEmpty()
-                                   ? s.name : (s.name + QLatin1Char(' ') + s.artist);
-            if (seen.contains(term)) continue;
-            seen.insert(term);
-            out.append(term);
+        const QStringList codes = {QStringLiteral("tx"), QStringLiteral("kw")};
+        for (const QString &code : codes) {
             if (out.size() >= 10) break;
+            auto *src = sdk->source(code);
+            if (!src) continue;
+            const SearchResult r = src->searchSongs(kw, 1, 10);
+            for (const Song &s : r.songs) {
+                if (s.name.isEmpty()) continue;
+                const QString term = s.artist.isEmpty()
+                                       ? s.name : (s.name + QLatin1Char(' ') + s.artist);
+                if (seen.contains(term)) continue;
+                seen.insert(term);
+                out.append(term);
+                if (out.size() >= 10) break;
+            }
         }
         return out;
     }));

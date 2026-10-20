@@ -75,6 +75,15 @@ private:
     mutable QString m_csrf;
     mutable QString m_sessionCookie;   // weapi 预热获得的 NMTID 等
     mutable QMutex m_cookieMtx;        // 首页预览并行拉取时保护上述共享态
+
+    // 歌单广场缓存：key = "cat|order|page|limit"，5 分钟内有效
+    struct PlaylistCacheEntry {
+        QVector<PlaylistSummary> playlists;
+        bool hasMore = false;
+        qint64 timestamp = 0;
+    };
+    mutable QHash<QString, PlaylistCacheEntry> m_playlistCache;
+    mutable QMutex m_cacheMtx;
 };
 
 } // namespace Muyun

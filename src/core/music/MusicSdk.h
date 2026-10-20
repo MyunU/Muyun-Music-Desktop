@@ -103,9 +103,13 @@ public:
     /// 解析播放链接（自动按降级链回退）
     /// @param token 可选取消令牌：切歌/停止/pause/后台时上层 bump()，本方法内部
     ///   循环（音质降级链、本平台重搜、跨平台兜底）在检查点发现代数变化立即返回空。
+    /// @param depth 内部递归深度（调用方不要传）：本平台重搜候选时会递归调用自己。
+    ///   ⚠ 必须限深：候选搜出来可能又指回原曲（原曲→候选→原曲…互递归），
+    ///   无上限会栈溢出崩溃（`--test-search` 退出码 0xC00000FD 即此）。
     QString resolveUrl(const Song &song, AudioQuality quality,
                        AudioQuality *actualQuality = nullptr,
-                       const ResolutionToken *token = nullptr);
+                       const ResolutionToken *token = nullptr,
+                       int depth = 0);
     /// 单一音质解析：不做降级链、不做跨平台兜底，只尝试 (song, quality) 这一组合。
     /// 下载器据此把「先换源、再降音质」的重试序列自己铺开。
     /// @param token 可选取消令牌（同 resolveUrl 语义）
