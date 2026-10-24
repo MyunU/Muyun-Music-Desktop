@@ -117,6 +117,7 @@ SideDrawer {
                             font.bold: panel.hot === modelData.h
                         }
                         MouseArea {
+                            hoverEnabled: true
                             anchors.fill: parent
                             cursorShape: Qt.PointingHandCursor
                             onClicked: panel.switchTab(modelData.h)

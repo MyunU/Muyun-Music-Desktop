@@ -101,11 +101,27 @@ Item {
     }
 
     // ===== 背景（共用；舞台接管时连模糊一起关掉）=====
-    // 封面底图（模糊 + 暗化，作为亚克力基底）
+    // #31-⑥ 封面底图缓慢漂移（视差感）：-60 margins 改为手动定位 + 漂移偏移，边缘不露底
+    property real _bgDriftX: 0
+    property real _bgDriftY: 0
+    property real _bgDriftT: 0
+    Timer {
+        interval: 100
+        running: page.visible && coverBg.visible
+        repeat: true
+        onTriggered: {
+            page._bgDriftT = (page._bgDriftT + 0.055) % (2 * Math.PI)
+            // Lissajous 漂移：x/y 不同频率，最大 ±10px（边缘 60px 留白足够）
+            page._bgDriftX = Math.round(Math.sin(page._bgDriftT) * 10)
+            page._bgDriftY = Math.round(Math.sin(page._bgDriftT * 0.7 + 1.0) * 8)
+        }
+    }
     Image {
         id: coverBg
-        anchors.fill: parent
-        anchors.margins: -60
+        x: -60 + page._bgDriftX
+        y: -60 + page._bgDriftY
+        width: parent.width + 120
+        height: parent.height + 120
         source: (page.stageTakeover || !player.currentSong || !player.currentSong.cover)
                 ? "" : player.currentSong.cover
         sourceSize: Qt.size(640, 640)
@@ -238,24 +254,98 @@ Item {
                     anchors.margins: 16
                     spacing: 14
 
-                    Rectangle {
+                    // #31-⑤ classic 封面：旋转唱片（黑胶盘 + 圆形封面 + 外圈光晕）
+                    Item {
                         Layout.alignment: Qt.AlignHCenter
                         Layout.preferredWidth: Math.min(leftPanel.width - 48, 260)
                         Layout.preferredHeight: Layout.preferredWidth
-                        radius: 16
-                        color: theme.cardColor
-                        clip: true
-                        Image {
-                            anchors.fill: parent
-                            source: (player.currentSong && player.currentSong.cover) ? player.currentSong.cover : ""
-                            sourceSize: Qt.size(320, 320)
-                            fillMode: Image.PreserveAspectCrop
-                            asynchronous: true
-                            visible: status === Image.Ready
+                        // 外圈光晕（不随唱片旋转）
+                        Rectangle {
+                            anchors.centerIn: parent
+                            width: parent.width * 1.12
+                            height: parent.height * 1.12
+                            radius: Math.min(width, height) / 2
+                            color: "transparent"
+                            border.width: 4
+                            border.color: theme.accentColor
+                            opacity: 0.18
                         }
-                        Icon { anchors.centerIn: parent; name: "music"; iconSize: 48
-                               iconColor: theme.subTextColor
-                               visible: !(player.currentSong && player.currentSong.cover) }
+                        // 唱片本体（播放时旋转，同 amll 结构）
+                        Item {
+                            id: classicDisc
+                            anchors.fill: parent
+                            // 黑胶盘面
+                            Rectangle {
+                                anchors.fill: parent
+                                radius: Math.min(width, height) / 2
+                                color: theme.dark ? "#0d0d0d" : "#1a1a1a"
+                            }
+                            // 唱片纹路（同心圆，低调）
+                            Rectangle {
+                                anchors.centerIn: parent
+                                width: parent.width * 0.96; height: parent.height * 0.96
+                                radius: Math.min(width, height) / 2; color: "transparent"
+                                border.width: 1; border.color: theme.dark ? "#262626" : "#2e2e2e"
+                            }
+                            Rectangle {
+                                anchors.centerIn: parent
+                                width: parent.width * 0.88; height: parent.height * 0.88
+                                radius: Math.min(width, height) / 2; color: "transparent"
+                                border.width: 1; border.color: theme.dark ? "#212121" : "#2a2a2a"
+                            }
+                            Rectangle {
+                                anchors.centerIn: parent
+                                width: parent.width * 0.80; height: parent.height * 0.80
+                                radius: Math.min(width, height) / 2; color: "transparent"
+                                border.width: 1; border.color: theme.dark ? "#1c1c1c" : "#262626"
+                            }
+                            // 封面（唱片包裹：Canvas 圆形裁剪）
+                            Canvas {
+                                id: classicDiscCover
+                                anchors.centerIn: parent
+                                width: parent.width * 0.78
+                                height: width
+                                property url imgSrc: (player.currentSong && player.currentSong.cover)
+                                                     ? player.currentSong.cover : ""
+                                Image {
+                                    id: classicDiscImg
+                                    source: parent.imgSrc
+                                    visible: false
+                                    asynchronous: true
+                                    onStatusChanged: if (status === Image.Ready) parent.requestPaint()
+                                }
+                                onPaint: {
+                                    var ctx = getContext("2d")
+                                    ctx.clearRect(0, 0, width, height)
+                                    if (classicDiscImg.status !== Image.Ready) return
+                                    ctx.save()
+                                    ctx.beginPath()
+                                    ctx.arc(width / 2, height / 2, Math.min(width, height) / 2, 0, 2 * Math.PI)
+                                    ctx.clip()
+                                    ctx.drawImage(classicDiscImg, 0, 0, width, height)
+                                    ctx.restore()
+                                }
+                            }
+                            // 无封面占位
+                            Icon {
+                                anchors.centerIn: parent
+                                name: "music"; iconSize: 44
+                                iconColor: theme.dark ? "#3a3a3a" : "#2a2a2a"
+                                visible: classicDiscImg.status !== Image.Ready
+                            }
+                            // 中心孔
+                            Rectangle {
+                                anchors.centerIn: parent
+                                width: Math.max(14, parent.width * 0.07)
+                                height: width
+                                radius: width / 2
+                                color: theme.dark ? "#050505" : "#101010"
+                            }
+                            RotationAnimator {
+                                target: classicDisc; from: 0; to: 360; duration: 36000
+                                loops: Animation.Infinite; running: player.isPlaying && page.visible
+                            }
+                        }
                     }
                     Text {
                         Layout.fillWidth: true
@@ -342,6 +432,7 @@ Item {
                             Icon { anchors.centerIn: parent; name: player.isPlaying ? "pause" : "play"
                                    iconSize: 20; iconColor: "white" }
                             MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                        hoverEnabled: true
                                         onClicked: player.togglePlay() }
                         }
                         IconButton { name: "next"; iconSize: 20; onClicked: player.next() }
@@ -377,7 +468,10 @@ Item {
                 anchors.bottomMargin: 16
                 clip: true
                 model: player.lyricLines
-                spacing: 28
+                // #31-⑦ 歌词间距/字号自适应：行多时缩小、行少时放大（clamp 15~24）
+                property real autoSize: Math.max(15, Math.min(24,
+                    (classicList.height - 100) / Math.max(5, player.lyricLines.length) * 0.37))
+                spacing: autoSize * 1.4
                 boundsBehavior: Flickable.StopAtBounds
                 property int lastIdx: -1
                 onCountChanged: if (page.activeIndex >= 0) positionViewAtIndex(page.activeIndex, ListView.Center)
@@ -407,7 +501,7 @@ Item {
                         line: modelData
                         active: index === page.activeIndex
                         progress: index === page.activeIndex ? page.activeProgress : 0
-                        size: active ? 26 : 20
+                        size: active ? Math.round(classicList.autoSize * 1.3) : Math.round(classicList.autoSize)
                         textColor: theme.textColor
                         inactiveColor: theme.textColor
                         inactiveOpacity: 0.45
@@ -617,7 +711,10 @@ Item {
                     Layout.fillHeight: true
                     clip: true
                     model: player.lyricLines
-                    spacing: 22
+                    // #31-⑦ 歌词间距/字号自适应：行多时缩小、行少时放大（clamp 16~26）
+                    property real autoSize: Math.max(16, Math.min(26,
+                        (amllList.height - 140) / Math.max(5, player.lyricLines.length) * 0.40))
+                    spacing: autoSize * 1.3
                     boundsBehavior: Flickable.StopAtBounds
                     property int lastIdx: -1
                     onCountChanged: if (page.activeIndex >= 0) positionViewAtIndex(page.activeIndex, ListView.Center)
@@ -688,7 +785,7 @@ Item {
                             line: modelData
                             active: index === page.activeIndex
                             progress: index === page.activeIndex ? page.activeProgress : 0
-                            size: active ? 30 : 22
+                            size: active ? Math.round(amllList.autoSize * 1.35) : Math.round(amllList.autoSize)
                             textColor: theme.textColor
                             inactiveColor: theme.textColor
                             inactiveOpacity: 0.35
@@ -824,6 +921,7 @@ Item {
                             Icon { anchors.centerIn: parent; name: player.isPlaying ? "pause" : "play"
                                    iconSize: 24; iconColor: theme.textColor }
                             MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                        hoverEnabled: true
                                         onClicked: player.togglePlay() }
                         }
                         IconButton { name: "next"; iconSize: 24; onClicked: player.next() }
@@ -876,30 +974,14 @@ Item {
                 Rectangle { anchors.fill: parent; color: "#b0000000" }
             }
 
-            Canvas {
+            // #29 粒子视觉：封面 ↔ 滚筒 逐粒子 morph（GPU shader）
+            ParticleVisual {
                 anchors.fill: parent
-                property real t: 0
-                onPaint: {
-                    var ctx = getContext("2d")
-                    ctx.clearRect(0, 0, width, height)
-                    var n = 44
-                    for (var i = 0; i < n; i++) {
-                        var seed = i * 12.9898
-                        var bx = (Math.sin(seed) * 0.5 + 0.5) * width
-                        var speed = 10 + (i % 5) * 6
-                        var by = (t * speed) % (height + 40)
-                        var r = 1 + (i % 3)
-                        var a = 0.12 + 0.18 * Math.sin(t / 20 + i)
-                        ctx.beginPath()
-                        ctx.fillStyle = Qt.rgba(1, 1, 1, Math.max(0, a))
-                        ctx.arc(bx, height - by, r, 0, 2 * Math.PI)
-                        ctx.fill()
-                    }
-                }
-                Timer {
-                    interval: 90; running: page.visible && player.isPlaying; repeat: true
-                    onTriggered: { parent.t += 1; parent.requestPaint() }
-                }
+                active: page.visible
+                playing: player.isPlaying
+                coverSource: cinemaCover
+                // 切歌标记：以歌名变化驱动"回封面→进滚筒"导演流程
+                songTag: player.currentSong ? player.currentSong.title : ""
             }
 
             Column {
@@ -1010,6 +1092,7 @@ Item {
                                 width: 12; height: 12; radius: 6; color: "white"
                             }
                             MouseArea {
+                                hoverEnabled: true
                                 anchors.fill: parent
                                 anchors.topMargin: -12; anchors.bottomMargin: -12
                                 cursorShape: Qt.PointingHandCursor
@@ -1031,6 +1114,7 @@ Item {
                             Icon { anchors.centerIn: parent; name: player.isPlaying ? "pause" : "play"
                                    iconSize: 24; iconColor: "white" }
                             MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                        hoverEnabled: true
                                         onClicked: player.togglePlay() }
                         }
                         IconButton { name: "next"; iconSize: 24; iconColor: "white"; onClicked: player.next() }
@@ -1087,7 +1171,9 @@ Item {
             else if (action === "queue") { /* 舞台页内已自弹提示，不退出全屏 */ }
             else if (action === "fx") {
                 // 舞台 fx-fab → 右侧浮层「视觉控制台」（独立置顶窗，浮在舞台上可实时看效果）
-                if (typeof stageFx !== "undefined") stageFx.toggle()
+                if (typeof stageFx !== "undefined") {
+                    stageFx.toggle()
+                }
             }
         }
     }

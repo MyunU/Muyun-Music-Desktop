@@ -227,6 +227,7 @@ Item {
                             border.width: deskLyrics.color === modelData.c ? 2 : 1
                             border.color: deskLyrics.color === modelData.c ? "#ffffff" : "#44ffffff"
                             MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                hoverEnabled: true
                                 onClicked: deskLyrics.color = modelData.c }
                         }
                     }
@@ -245,6 +246,7 @@ Item {
                             Text { id: sizeLabel; anchors.centerIn: parent
                                 text: modelData.name; color: "#e8ebf0"; font.pixelSize: 12 }
                             MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                hoverEnabled: true
                                 onClicked: deskLyrics.sizePx = modelData.px }
                         }
                     }

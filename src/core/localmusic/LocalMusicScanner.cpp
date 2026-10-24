@@ -289,7 +289,7 @@ void LocalMusicScanner::saveToDisk()
     store->writeAll(QStringLiteral("local-music"), doc);
 }
 
-// 四-59：本轮修复后的"时长解析版本"（1 = 帧头遍历 + OGG granule）。以后若再修时长算法就 +1。
+// 四-59："时长解析版本"（1 = 帧头遍历 + OGG granule）。以后若再修时长算法就 +1。
 static constexpr int kMediaFixVersion = 1;
 
 bool LocalMusicScanner::needsMediaDurationFix() const

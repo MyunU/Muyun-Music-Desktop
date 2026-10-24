@@ -645,7 +645,14 @@ void PlayerController::pause()
     m_durationCheckArmed = false;
     emit isPlayingChanged();
 }
-void PlayerController::resume() { m_engine->resume(); emit isPlayingChanged(); }
+void PlayerController::resume()
+{
+    m_engine->resume();
+    // 歌词兜底：暂停期间歌词若是空的（接口偶发失败/平台当时没给），恢复播放时顺手再取一次。
+    // 有在途请求就不打断（否则又是一次白扔）。
+    if (!m_lyricLoading && m_lyric.lines.isEmpty() && !m_currentSong.id.isEmpty()) loadLyric();
+    emit isPlayingChanged();
+}
 void PlayerController::stop()
 {
     cancelActiveResolution();
@@ -929,8 +936,11 @@ void PlayerController::resolveAndPlayAt(AudioQuality startQ)
                 // 缓存 key = 歌曲稳定身份 + 实际音质（在线 URL 每次签名不同，不能拿 URL 当 key）
                 m_engine->play(QUrl(result.first),
                                song.identityKey() + QLatin1Char('@') + Muyun::qualityId(result.second));
-                // 无论哪条播放路径（列表播放/重启恢复/直接播放）都确保歌词被加载
-                loadLyric();
+                // 无论哪条播放路径（列表播放/重启恢复/直接播放）都确保歌词被加载。
+                // ⚠ 但同一首的歌词请求正在跑时**别重复发起**：重复会 bump 歌词令牌，
+                //   白白扔掉先到的那份结果、再重新排队等网络（"歌词要手动重载"的成因之一）。
+                //   无在途请求且仍没歌词（如重启恢复路径没触发过加载）才补一次。
+                if (!m_lyricLoading && m_lyric.lines.isEmpty()) loadLyric();
             });
 
     MusicSdk *sdk = MusicSdk::instance();
@@ -1212,19 +1222,44 @@ void PlayerController::loadLyric()
     }
 
     const Song song = m_currentSong;
+    // 重试计数按歌清零：换了歌就把"这首重试过几次"归零
+    if (song.identityKey() != m_lyricRetryKey) {
+        m_lyricRetryKey = song.identityKey();
+        m_lyricRetry = 0;
+    }
     auto *watcher = new QFutureWatcher<SongLyric>(this);
-    // 歌词 worker 也走同一个令牌：切歌/停止/pause/切后台时早退（用户 #39）
-    const quint64 tokSnap = m_resolutionToken ? m_resolutionToken->snapshot() : 0;
-    const ResolutionToken *tokPtr = m_resolutionToken.get();
-    connect(watcher, &QFutureWatcher<SongLyric>::finished, this, [this, watcher, song]() {
+    // ⚠ 歌词走**自己的令牌**，只被"新一轮歌词请求"取代（下面的 bump），
+    //   不再共用取源令牌 m_resolutionToken：pause()/stop()/切后台都会 bump 取源令牌，
+    //   旧实现因此把在途歌词请求打断 → 返回空歌词 → 顶栏显示「点击加载歌词」，
+    //   用户必须手动点一次才出歌词（2026-10-24 用户反馈的"经常要手动重新加载"）。
+    if (!m_lyricToken) m_lyricToken = std::make_shared<ResolutionToken>();
+    m_lyricToken->bump();   // 作废上一轮歌词请求（切歌/手动重载/重复发起）
+    const quint64 tokSnap = m_lyricToken->snapshot();
+    const ResolutionToken *tokPtr = m_lyricToken.get();
+    const int lyricGen = ++m_lyricGeneration;
+    connect(watcher, &QFutureWatcher<SongLyric>::finished, this,
+            [this, watcher, song, lyricGen]() {
         const SongLyric lyric = watcher->result();
         watcher->deleteLater();
-        if (m_currentSong.identityKey() != song.identityKey()) return; // 已切歌，新一轮加载还在跑
+        // 代际不匹配 = 已有更新的歌词请求在跑（切歌/手动重载/重试）→ 丢弃，别用旧结果覆盖
+        if (lyricGen != m_lyricGeneration) return;
+        if (m_currentSong.identityKey() != song.identityKey()) return; // 已切歌
         m_lyric = lyric;
         m_lyricLoading = false;
         emit lyricChanged();
         emit lyricLoadingChanged();
         updateCurrentLyric();
+        // 空歌词兜底：接口偶发失败/平台这一轮没给歌词 → 自动重试（600ms 后，最多 2 次），
+        // 让"有歌词但没显示出来"的情况自愈，不用用户去点顶栏。
+        if (lyric.lines.isEmpty() && !song.isLocal() && m_lyricRetry < 2) {
+            ++m_lyricRetry;
+            const QString key = song.identityKey();
+            QTimer::singleShot(600, this, [this, key]() {
+                if (m_currentSong.identityKey() != key) return;   // 已切歌，不重试
+                if (!m_lyric.lines.isEmpty()) return;             // 期间已经有了
+                loadLyric();
+            });
+        }
     });
     MusicSdk *sdk = MusicSdk::instance();
     watcher->setFuture(QtConcurrent::run([sdk, song, tokPtr, tokSnap]() {

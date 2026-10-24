@@ -39,17 +39,46 @@ void StageFxController::ensureView()
     m_view->setResizeMode(QQuickView::SizeRootObjectToView);
     // StaysOnTop：舞台窗本身非 topmost，面板浮在其上
     m_view->setFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | Qt::Tool);
-    m_view->setSource(QUrl(QStringLiteral("qrc:/qml/StageFxPanel.qml")));
     m_view->setTitle(QStringLiteral("暮云 - 视觉控制台"));
 
-    // 初始尺寸：右侧窄面板，高度按屏幕自适应
-    int h = 720;
+    // 初始尺寸：右侧面板，高度按屏幕自适应
+    // #5 BUG5: 从 340 加宽到 440，之前 340 太窄 —— 用户报"滚放排列右边被吞"
+    // 且导入图片按钮的 hint 文字("可多选·按序列匹配")与主按钮文字挤压重叠。
+    // 440 给滚动序列项留出 delBtn(22) + text elide 的空间，也让按钮行不再挤压。
+    int h = 860;
     if (auto *screen = QGuiApplication::primaryScreen())
-        h = qMin(720, screen->availableGeometry().height() - 80);
-    m_view->resize(340, h);
+        h = qMin(860, screen->availableGeometry().height() - 80);
+    m_view->resize(440, h);
 
     connect(m_view, &QWindow::visibleChanged, this,
             &StageFxController::visibleChanged);
+
+    // 等 QQuickView::statusChanged → Ready 再 position/raise/fxState，否则 show 后
+    // 窗口可能还停在初始位置或大小。Error 时打印 stderr 便于定位。
+    connect(m_view, &QQuickView::statusChanged, this, [this](QQuickView::Status s) {
+        if (s == QQuickView::Ready && m_pendingShow) {
+            m_pendingShow = false;
+            doShowWindow();
+        } else if (s == QQuickView::Error) {
+            fprintf(stderr, "[stage-fx] QML load FAILED url=%s\n",
+                    qPrintable(m_view->source().toString()));
+        }
+    });
+
+    // 延后 setSource，让它和后续 show 在同一 event loop tick 之外的异步链
+    m_view->setSource(QUrl(QStringLiteral("qrc:/qml/StageFxPanel.qml")));
+}
+
+// 把窗口显示到屏幕右上角（真正执行 show/raise/position 的辅助函数）
+void StageFxController::doShowWindow()
+{
+    if (!m_view) return;
+    positionNearWindow();
+    m_view->show();
+    m_view->raise();
+    if (m_stage && m_stage->active())
+        m_stage->requestFxState();
+    emit visibleChanged();
 }
 
 void StageFxController::positionNearWindow()
@@ -75,13 +104,15 @@ bool StageFxController::isVisible() const
 void StageFxController::show()
 {
     ensureView();
-    positionNearWindow();
-    m_view->show();
-    m_view->raise();
-    // 拉取引擎当前 fx 状态回显（舞台 active 才有意义；未连接时桥会静默丢弃）
-    if (m_stage && m_stage->active())
-        m_stage->requestFxState();
-    emit visibleChanged();
+    // QQuickView::setSource 是异步的；在 Ready 之前 show() 会显示一个空白/透明窗口
+    // （用户点 fx-fab 看不到内容，就是这种情况）。
+    // 但即使 QML 有 warning（如 Drag.onFinished），QQuickView 也不会进入 Ready，
+    // 所以必须立即 show()——窗口会先显示，QML 加载完后内容自动出现。
+    // statusChanged → Ready 时补做 position/raise/fxState（首次 show 时 view 可能还没定位好）。
+    doShowWindow();
+    if (m_view->status() != QQuickView::Ready) {
+        m_pendingShow = true;
+    }
 }
 
 void StageFxController::hide()
@@ -94,8 +125,15 @@ void StageFxController::hide()
 
 void StageFxController::toggle()
 {
-    if (isVisible()) hide();
-    else show();
+    // 已显示 → 隐藏；挂起显示中（view 未 Ready）→ 取消挂起；否则 → 请求显示
+    if (isVisible()) {
+        hide();
+    } else if (m_pendingShow) {
+        m_pendingShow = false;
+        emit visibleChanged();
+    } else {
+        show();
+    }
 }
 
 } // namespace Muyun

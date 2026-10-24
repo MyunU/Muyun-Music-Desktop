@@ -2126,7 +2126,7 @@ int main(int argc, char *argv[])
 
     // Windows 无边框：原生边缘缩放 + 最大化几何修复（替代 QML MouseArea 抖动方案）
     auto *frameless = new FramelessWindow(qApp);
-    // QML 侧 toggleMaximize 时同步 WS_MAXIMIZE 样式位（HANDOFF #11，第三方任务栏工具认最大化）
+    // QML 侧 toggleMaximize 时同步 WS_MAXIMIZE 样式位（第三方任务栏工具认最大化）
     engine.rootContext()->setContextProperty(QStringLiteral("frameless"), frameless);
 
     // 舞台 fx 视觉控制台：独立置顶浮层小窗（QQuickView 复用主 engine，
@@ -2223,6 +2223,179 @@ int main(int argc, char *argv[])
         }
         fprintf(stderr, "[test] returning %d\n", gotEngineReady ? 0 : 4);
         return finishSelfTest(gotEngineReady ? 0 : 4);
+    }
+#endif // MUYUN_SELFTES
+
+    // #29 舞台粒子 morph 端到端自检：切预设 → morph 期间(500ms)/结束后(2500ms)截图舞台窗口，
+    // 断言"渐进过渡"（mid 既不同于 base 也不同于 done）——瞬切会令 mid≈done 而失败。
+    // 用法：MuyunMusic.exe --test-stage-morph [截图目录]
+#ifdef MUYUN_SELFTES
+    if (args.contains(QStringLiteral("--test-stage-morph"))) {
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        setvbuf(stderr, nullptr, _IONBF, 0);
+        printf("=== 舞台粒子 morph 端到端自检 ===\n");
+        fflush(stdout);
+        const int mi = args.indexOf(QStringLiteral("--test-stage-morph"));
+        const QString shotDir = (mi + 1 < args.size() && !args.at(mi + 1).startsWith(QStringLiteral("--")))
+                                ? args.at(mi + 1)
+                                : QStringLiteral("%1/muyun-morph").arg(QDir::tempPath());
+        if (!QDir().mkpath(shotDir)) { printf("[FATAL] 建截图目录失败 %s\n", qPrintable(shotDir)); return 1; }
+        bool ready = false;
+        QObject::connect(stage, &StageBridge::activeChanged, [&]() {
+            if (stage->active() && !ready) {
+                ready = true;
+                printf("[OK] 舞台就绪，注入合成曲目\n"); fflush(stdout);
+                QVariantList lines;
+                lines << QVariantMap{{QStringLiteral("time"), 0.0},
+                                     {QStringLiteral("text"), QStringLiteral("morph 自检")}};
+                const QString coverFile = QCoreApplication::applicationDirPath()
+                    + QStringLiteral("/stage/web/covers/test.png");
+                const QString coverUrl = QFileInfo::exists(coverFile)
+                    ? QStringLiteral("/covers/test.png") : QString();
+                QTimer::singleShot(600, stage, [stage, coverUrl, lines]() {
+                    stage->testInject(QStringLiteral("morph自检"), QStringLiteral("粒子"),
+                                      coverUrl, lines);
+                });
+            }
+        });
+        stage->open();
+        QElapsedTimer t; t.start();
+        while (!ready && t.elapsed() < 20000)
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+        if (!ready) { printf("[FAIL] 舞台未就绪\n"); return finishSelfTest(4); }
+        auto pump = [](int ms) {
+            QElapsedTimer p; p.start();
+            while (p.elapsed() < ms) QCoreApplication::processEvents(QEventLoop::AllEvents, 30);
+        };
+        auto printWin = [](quintptr hwnd) {
+            RECT r{};
+            if (!GetWindowRect((HWND)hwnd, &r)) return QImage();
+            const int w = r.right - r.left, h = r.bottom - r.top;
+            if (w <= 0 || h <= 0) return QImage();
+            HDC hdcWin = GetWindowDC((HWND)hwnd);
+            HDC hdcMem = CreateCompatibleDC(hdcWin);
+            HBITMAP bmp = CreateCompatibleBitmap(hdcWin, w, h);
+            HGDIOBJ old = SelectObject(hdcMem, bmp);
+            BOOL ok = PrintWindow((HWND)hwnd, hdcMem, 2 /*PW_RENDERFULLCONTENT*/);
+            if (!ok) ok = PrintWindow((HWND)hwnd, hdcMem, 0);
+            QImage img;
+            if (ok) {
+                BITMAPINFO bi{};
+                bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+                bi.bmiHeader.biWidth = w;
+                bi.bmiHeader.biHeight = -h;
+                bi.bmiHeader.biPlanes = 1;
+                bi.bmiHeader.biBitCount = 32;
+                bi.bmiHeader.biCompression = BI_RGB;
+                img = QImage(w, h, QImage::Format_RGB32);
+                GetDIBits(hdcMem, bmp, 0, h, img.bits(), &bi, DIB_RGB_COLORS);
+            }
+            SelectObject(hdcMem, old);
+            DeleteObject(bmp);
+            DeleteDC(hdcMem);
+            ReleaseDC((HWND)hwnd, hdcWin);
+            return img;
+        };
+        auto shotStage = [&](const QString &name) {
+            QImage img;
+            const quintptr hwnd = stage->stageHwnd();
+            if (hwnd) {
+                // bug1 录屏透明：真实录屏软件(OBS/Xbox/N卡)走桌面合成捕获。
+                // Qt 的 grabWindow(WId) 在 Windows 用 GetDC(hwnd)+BitBlt，不含 DWM 合成
+                // 的 DirectComposition 内容 → WebView2/WebGL 画布抓不到(全黑)；PrintWindow
+                // 同样只能抓到 DOM 层。→ 用 grabWindow(0) 抓整屏(GetDC(NULL) 桌面路径
+                // = 录屏同路径)后按舞台窗口 rect 裁剪，PrintWindow 仅作兜底。
+                // 先把舞台窗口置顶，避免被其他窗口遮挡导致抓到别的内容。
+                SetWindowPos((HWND)hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                {
+                    // 关键：SetWindowPos 只把消息投递进队列，必须 pump 消息循环
+                    // 后 DWM 才真正更新 z-order；不 pump 直接 grabWindow(0) 抓到的
+                    // 仍是"主窗盖住舞台"的桌面状态（自检中央空白根因之一）。
+                    QElapsedTimer _w; _w.start();
+                    while (_w.elapsed() < 120)
+                        QCoreApplication::processEvents(QEventLoop::AllEvents, 30);
+                }
+                RECT r{};
+                if (GetWindowRect((HWND)hwnd, &r) && r.right > r.left && r.bottom > r.top) {
+                    const QPixmap pm = QGuiApplication::primaryScreen()->grabWindow(0);
+                    const int x = r.left, y = r.top;
+                    const int w = r.right - r.left, h = r.bottom - r.top;
+                    printf("    诊断: hwnd=%llu rect=(%d,%d,%d,%d) full=%dx%d pmNull=%d\n",
+                           (unsigned long long)hwnd, r.left, r.top, r.right, r.bottom,
+                           pm.width(), pm.height(), pm.isNull() ? 1 : 0);
+                    if (!pm.isNull() && pm.save(shotDir + QStringLiteral("/_fullscreen_") + name))
+                        printf("    诊断: 已存整屏 %s\n", qPrintable(name));
+                    if (!pm.isNull() && pm.width() >= x + w && pm.height() >= y + h)
+                        img = pm.copy(QRect(x, y, w, h)).toImage();
+                }
+                if (img.isNull() || img.width() <= 1)
+                    img = printWin(hwnd);
+            }
+            if (img.isNull()) {
+                printf("[WARN] 舞台窗口截图失败 hwnd=%llu\n", (unsigned long long)hwnd);
+            } else {
+                const QString p = shotDir + QLatin1Char('/') + name;
+                img.save(p);
+                printf("    截图 %s (%dx%d)\n", qPrintable(p), img.width(), img.height());
+            }
+            return img;
+        };
+        auto diffRatio = [](const QImage &a, const QImage &b) {
+            if (a.isNull() || b.isNull() || a.size() != b.size()) return 1.0;
+            const QImage aa = a.convertToFormat(QImage::Format_RGB32);
+            const QImage bb = b.convertToFormat(QImage::Format_RGB32);
+            int total = 0, diff = 0;
+            for (int y = 0; y < aa.height(); y += 2) {
+                const QRgb *la = reinterpret_cast<const QRgb *>(aa.constScanLine(y));
+                const QRgb *lb = reinterpret_cast<const QRgb *>(bb.constScanLine(y));
+                for (int x = 0; x < aa.width(); x += 2) {
+                    ++total;
+                    const int dr = qRed(la[x]) - qRed(lb[x]);
+                    const int dg = qGreen(la[x]) - qGreen(lb[x]);
+                    const int db = qBlue(la[x]) - qBlue(lb[x]);
+                    if (qAbs(dr) + qAbs(dg) + qAbs(db) > 48) ++diff;
+                }
+            }
+            return total ? double(diff) / double(total) : 0.0;
+        };
+        // 预设序列：1(滚筒) → 2(星球) → 4(唱片) → 5(星河) → 0(封面)。
+        // 避开 3(虚空)：其 vAlpha 归零导致粒子瞬消，mid/done 对比失去意义。
+        const int seq[] = { 1, 2, 4, 5, 0 };
+        pump(2500); // 初始渲染稳定
+        QImage prev = shotStage(QStringLiteral("m0_base_p0.png"));
+        int bad = 0, steps = 0;
+        for (int i = 0; i < 5; ++i) {
+            const int p = seq[i];
+            printf("[step %d] fxPreset(%d)\n", i + 1, p); fflush(stdout);
+            stage->fxPreset(p);
+            pump(500);
+            stage->fxProbe();
+            pump(200);
+            const QImage mid = shotStage(QStringLiteral("m%1_mid_p%2.png").arg(i + 1).arg(p));
+            pump(2200);
+            stage->fxProbe();
+            pump(200);
+            const QImage done = shotStage(QStringLiteral("m%1_done_p%2.png").arg(i + 1).arg(p));
+            const double dBaseMid = diffRatio(prev, mid);
+            const double dMidDone = diffRatio(mid, done);
+            const double dBaseDone = diffRatio(prev, done);
+            printf("  base→mid=%.1f%% mid→done=%.1f%% base→done=%.1f%%\n",
+                   dBaseMid * 100, dMidDone * 100, dBaseDone * 100);
+            if (dBaseDone < 0.03) { ++bad; printf("[WARN] 预设切换后画面几乎未变\n"); }
+            if (dBaseMid < 0.02 || dMidDone < 0.02) {
+                ++bad; printf("[WARN] 过渡帧差异过小，疑似瞬切（mid≈base 或 mid≈done）\n");
+            }
+            ++steps;
+            prev = done;
+        }
+        printf("[%s] steps=%d bad=%d (截图目录 %s)\n",
+               bad == 0 ? "PASS" : "FAIL", steps, bad, qPrintable(shotDir));
+        fflush(stdout);
+        stage->close();
+        { QElapsedTimer d; d.start();
+          while (d.elapsed() < 1500) QCoreApplication::processEvents(QEventLoop::AllEvents, 50); }
+        return finishSelfTest(bad == 0 ? 0 : 4);
     }
 #endif // MUYUN_SELFTES
 
@@ -4198,6 +4371,93 @@ int main(int argc, char *argv[])
     }
 #endif // MUYUN_SELFTES
 
+    // 滚放持久化自检：启用滚放 → 关闭并重开 stage（同 data-dir）→ 验证 localStorage 恢复 enabled。
+    // 直接复现用户"滚放启用重启后失效"。用法：MuyunMusic.exe --test-roller （必须隔离 MUYUN_STORE_ROOT）
+#ifdef MUYUN_SELFTES
+    if (args.contains(QStringLiteral("--test-roller"))) {
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        setvbuf(stderr, nullptr, _IONBF, 0);
+        if (qEnvironmentVariableIsEmpty("MUYUN_STORE_ROOT")) {
+            printf("[FAIL] 必须设 MUYUN_STORE_ROOT 隔离后再跑（会写滚放配置）\n");
+            return finishSelfTest(1);
+        }
+        printf("=== 滚放持久化自检 ===\n");
+        // 阶段1: 拉起 stage → 引擎就绪 → 下发滚放配置（enabled=true, intervalSec=2）
+        bool gotReady1 = false;
+        bool applied = false;
+        bool seenEnabled1 = false;
+        QObject::connect(stage, &StageBridge::activeChanged, [&]() {
+            if (stage->active() && !gotReady1) {
+                gotReady1 = true;
+                printf("[OK] stage ready(1)，下发滚放 enabled=true seq=[0,5,4,2,1] intervalSec=2\n");
+                fflush(stdout);
+                stage->rollerSetConfig(QJsonObject{
+                    {QStringLiteral("enabled"), true},
+                    {QStringLiteral("seq"), QJsonArray{0, 5, 4, 2, 1}},
+                    {QStringLiteral("intervalSec"), 2}});
+                applied = true;
+            }
+        });
+        QObject::connect(stage, &StageBridge::fxStateReceived, [&](const QJsonObject &st) {
+            const auto roller = st.value(QStringLiteral("roller")).toObject();
+            const bool en = roller.value(QStringLiteral("enabled")).toBool(false);
+            printf("[EVT] fx roller.enabled=%d\n", (int)en);
+            fflush(stdout);
+            if (en) seenEnabled1 = true;
+        });
+        stage->open();
+        {
+            QElapsedTimer t; t.start();
+            while ((!applied || !seenEnabled1) && t.elapsed() < 15000)
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+        }
+        if (!applied || !seenEnabled1) {
+            printf("[FAIL] 启用滚放未生效 applied=%d seenEnabled1=%d\n",
+                   (int)applied, (int)seenEnabled1);
+            fflush(stdout);
+            stage->close();
+            return finishSelfTest(4);
+        }
+        printf("[OK] 滚放已启用，关闭 stage 并重开（模拟用户重启）\n");
+        fflush(stdout);
+        stage->close();
+        {
+            QElapsedTimer t; t.start();
+            while (t.elapsed() < 8000)
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+        }
+        // 阶段2: 重开 stage → 引擎就绪 → 请求 fx 状态 → 验证 roller.enabled 从 localStorage 恢复
+        bool gotReady2 = false;
+        bool seenEnabled2 = false;
+        QObject::connect(stage, &StageBridge::activeChanged, [&]() {
+            if (stage->active() && !gotReady2) {
+                gotReady2 = true;
+                printf("[OK] stage ready(2)\n");
+                fflush(stdout);
+                stage->requestFxState();
+            }
+        });
+        QObject::connect(stage, &StageBridge::fxStateReceived, [&](const QJsonObject &st) {
+            const auto roller = st.value(QStringLiteral("roller")).toObject();
+            const bool en = roller.value(QStringLiteral("enabled")).toBool(false);
+            printf("[EVT] fx(2) roller.enabled=%d\n", (int)en);
+            fflush(stdout);
+            if (en) seenEnabled2 = true;
+        });
+        stage->open();
+        {
+            QElapsedTimer t; t.start();
+            while ((!gotReady2 || !seenEnabled2) && t.elapsed() < 20000)
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+        }
+        printf("[%s] 重启后 roller.enabled 恢复=%d\n",
+               (gotReady2 && seenEnabled2) ? "PASS" : "FAIL", (int)seenEnabled2);
+        fflush(stdout);
+        stage->close();
+        return finishSelfTest((gotReady2 && seenEnabled2) ? 0 : 4);
+    }
+#endif // MUYUN_SELFTES
+
     // 重开竞态自检：open→ready→close→open→ready，验证不再崩溃（问题4）
     // 用法：MuyunMusic.exe --test-stage-reopen
 #ifdef MUYUN_SELFTES
@@ -4846,6 +5106,163 @@ int main(int argc, char *argv[])
             printf("歌词翻译开关即时生效自检结束\n");
             fflush(stdout);
             finishSelfTest(all ? 0 : 4);
+        });
+    }
+#endif // MUYUN_SELFTES
+
+    // #29 粒子视觉冒烟：独立 QQuickView 加载 ParticleVisual + 封面图，
+    // 走完整 shader 编译 → 断言 status==Compiled → 三形态（封面/过渡/滚筒）截图，
+    // 并统计非黑像素占比防"shader 静默渲染成全黑"。
+    // 用法：MuyunMusic.exe --test-particle [截图目录]
+#ifdef MUYUN_SELFTES
+    if (args.contains(QStringLiteral("--test-particle"))) {
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        QString shotDir = qEnvironmentVariable("MUYUN_PARTICLE_SHOTS");
+        if (shotDir.isEmpty()) {
+            const QString t = QDir::tempPath() + QStringLiteral("/muyun-particle");
+            if (!QDir().mkpath(t)) { printf("[FATAL] 建截图目录失败\n"); return 1; }
+            shotDir = t;
+        } else if (!QDir().mkpath(shotDir)) {
+            printf("[FATAL] 建截图目录失败\n"); return 1;
+        }
+        // 封面素材：仓库自带测试封面（stage/web/covers/test.png）
+        const QString coverFile = QCoreApplication::applicationDirPath()
+            + QStringLiteral("/stage/web/covers/test.png");
+        // probe QML：Image(封面) + Loader 加载 ParticleVisual（qrc 组件）
+        const QString probe = shotDir + QStringLiteral("/probe_particle.qml");
+        {
+            QFile f(probe);
+            if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                const QString qmlText =
+                        QStringLiteral("import QtQuick\n"
+                        "Item {\n"
+                        "    id: probeRoot\n"
+                        "    width: 960; height: 540\n"
+                        "    Rectangle { anchors.fill: parent; color: \"#000000\" }\n"
+                        "    Image { id: coverImg; source: \"%1\"; visible: false; asynchronous: true }\n"
+                        "    Loader {\n"
+                        "        id: pvLoader\n"
+                        "        objectName: \"pvLoader\"\n"
+                        "        anchors.fill: parent\n"
+                        "        source: \"qrc:/qml/components/ParticleVisual.qml\"\n"
+                        "        onLoaded: {\n"
+                        "            item.dirEnabled = false\n"
+                        "            item.active = true\n"
+                        "            item.playing = true\n"
+                        "            item.coverSource = coverImg\n"
+                        "            item.songTag = \"probe\"\n"
+                        "            item.morphT = 0\n"
+                        "            console.log(\"[probe] ParticleVisual loaded, shaderStatus=\" + item.shaderStatus)\n"
+                        "        }\n"
+                        "        onStatusChanged: console.log(\"[probe] loader status=\" + status)\n"
+                        "    }\n"
+                        "}\n").arg(QUrl::fromLocalFile(coverFile).toString());
+                f.write(qmlText.toUtf8());
+                f.close();
+            } else { printf("[FATAL] 写 probe QML 失败\n"); return 1; }
+        }
+        auto *pvView = new QQuickView(&engine, nullptr);
+        pvView->setResizeMode(QQuickView::SizeRootObjectToView);
+        pvView->setSource(QUrl::fromLocalFile(probe));
+        pvView->resize(960, 540);
+        pvView->show();
+        auto shot = [pvView, shotDir](const char *name) {
+            const QString p = shotDir + QStringLiteral("/") + name + QStringLiteral(".png");
+            pvView->grabWindow().save(p);
+            printf("    截图 %s\n", qPrintable(p));
+            fflush(stdout);
+            return p;
+        };
+        // 非黑像素占比：防 shader 渲染成全黑/未生效
+        auto nonBlackRatio = [](const QString &p) {
+            QImage img(p);
+            if (img.isNull()) return -1.0;
+            int total = 0, lit = 0;
+            for (int y = 0; y < img.height(); y += 2) {
+                for (int x = 0; x < img.width(); x += 2) {
+                    const QRgb px = img.pixel(x, y);
+                    if (qRed(px) + qGreen(px) + qBlue(px) > 60) ++lit;
+                    ++total;
+                }
+            }
+            return total ? double(lit) / double(total) : 0.0;
+        };
+        // 轮询等 shader 编译稳定（QQuickView 首帧渲染后才真正编译，硬等 900ms 有抖动）
+        QTimer::singleShot(600, &app, [=]() {
+            QElapsedTimer wt; wt.start();
+            int st = -1;
+            for (;;) {
+                QObject *ro = pvView->rootObject();
+                QObject *pv = nullptr;
+                if (ro) {
+                    if (QObject *l = ro->findChild<QObject*>("pvLoader"))
+                        pv = l->property("item").value<QObject*>();
+                }
+                st = pv ? pv->property("shaderStatus").toInt() : -1;
+                if (st == 1 || wt.elapsed() > 6000) break;
+                for (int k = 0; k < 20; ++k)
+                    QCoreApplication::processEvents(QEventLoop::AllEvents, 0);
+            }
+            printf("[%s] shaderStatus=%d（期望 1=Compiled）\n", st == 1 ? "PASS" : "FAIL", st);
+            fflush(stdout);
+            if (st != 1) { finishSelfTest(4); return; }
+        });
+        // 调试：打印 pv 实际属性值
+        auto dumpPv = [pvView](const char *tag) {
+            QObject *ro = pvView->rootObject();
+            QObject *pv = ro ? ro->findChild<QObject*>("pvLoader")->property("item").value<QObject*>() : nullptr;
+            if (!pv) { printf("    [%s] pv=null\n", tag); fflush(stdout); return; }
+            printf("    [%s] morphT=%.3f coverW=%d coverH=%d hasCover=%d camRot=%.3f camZoom=%.3f dirEnabled=%d\n",
+                   tag, pv->property("morphT").toDouble(),
+                   pv->property("coverW").toInt(), pv->property("coverH").toInt(),
+                   pv->property("hasCover").toBool() ? 1 : 0,
+                   pv->property("camRot").toDouble(), pv->property("camZoom").toDouble(),
+                   pv->property("dirEnabled").toBool() ? 1 : 0);
+            fflush(stdout);
+        };
+        QTimer::singleShot(1200, &app, [=]() {
+            QObject *ro = pvView->rootObject();
+            QObject *pv = ro ? ro->findChild<QObject*>("pvLoader")->property("item").value<QObject*>() : nullptr;
+            if (pv) pv->setProperty("morphT", 0.0);
+            dumpPv("set0");
+        });
+        QTimer::singleShot(1500, &app, [=]() {
+            dumpPv("cover");
+            shot("pv_cover");
+        });
+        QTimer::singleShot(2000, &app, [=]() {
+            QObject *ro = pvView->rootObject();
+            QObject *pv = ro ? ro->findChild<QObject*>("pvLoader")->property("item").value<QObject*>() : nullptr;
+            if (pv) pv->setProperty("morphT", 0.5);
+            dumpPv("set05");
+        });
+        QTimer::singleShot(2300, &app, [=]() {
+            dumpPv("mid");
+            shot("pv_mid");
+        });
+        QTimer::singleShot(2700, &app, [=]() {
+            QObject *ro = pvView->rootObject();
+            QObject *pv = ro ? ro->findChild<QObject*>("pvLoader")->property("item").value<QObject*>() : nullptr;
+            if (pv) pv->setProperty("morphT", 1.0);
+            dumpPv("set1");
+        });
+        QTimer::singleShot(3000, &app, [=]() {
+            dumpPv("tunnel");
+            shot("pv_tunnel");
+        });
+        QTimer::singleShot(3300, &app, [=]() {
+            const double r0 = nonBlackRatio(shotDir + "/pv_cover.png");
+            const double r1 = nonBlackRatio(shotDir + "/pv_mid.png");
+            const double r2 = nonBlackRatio(shotDir + "/pv_tunnel.png");
+            const bool ok = r0 > 0.02 && r1 > 0.02 && r2 > 0.02;
+            printf("[%s] 非黑像素占比 cover=%.1f%% mid=%.1f%% tunnel=%.1f%%（期望均>2%%）\n",
+                   ok ? "PASS" : "FAIL", r0 * 100, r1 * 100, r2 * 100);
+            fflush(stdout);
+            pvView->close();
+            delete pvView;
+            printf("粒子视觉自检结束（截图目录 %s）%s\n", qPrintable(shotDir), ok ? "[PASS]" : "[FAIL]");
+            fflush(stdout);
+            finishSelfTest(ok ? 0 : 4);
         });
     }
 #endif // MUYUN_SELFTES

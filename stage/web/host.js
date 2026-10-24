@@ -11,7 +11,7 @@
  *  离线解析后经 beatmap/analyser 通道注入。当前封面粒子、舞台歌词、
  *  电影镜头时间动画均为时间驱动，不受影响。
  * ============================================================ */
-import { createMineradioEngine } from '/mineradio/engine.js'
+import { createMineradioEngine } from '/mineradio/engine.js?v=20261024.8'
 import { initSpectrum, startAnalyze, resetSpectrum, spectrumState } from '/spectrum.js'
 
 // ---------- 原生通道 ----------
@@ -26,10 +26,12 @@ window.addEventListener('unhandledrejection', (e) => {
 })
 
 // 调试：转发引擎节拍相关 console 到主程序（含 beat/tempo/分析/节拍）
+// + #5 滚放/封面调试前缀 ([roller / [coverDataUrl / [applyCoverCanvas / [tickRoller)
+//   便于 C++ 侧 [stage-web] 文件日志直接定位滚放切图问题 (2026-10-24)
 ;(() => {
   const origLog = console.log.bind(console)
   const origWarn = console.warn.bind(console)
-  const want = (a) => { const s = a.map(String).join(' '); return /beat|tempo|分析|节拍|music-tempo|decode|onset/i.test(s) }
+  const want = (a) => { const s = a.map(String).join(' '); return /beat|tempo|分析|节拍|music-tempo|decode|onset|\[roller|\[coverDataUrl|\[applyCoverCanvas|\[tickRoller/i.test(s) }
   console.log = (...a) => {
     origLog(...a)
     const s = a.map(String).join(' ')
@@ -39,6 +41,15 @@ window.addEventListener('unhandledrejection', (e) => {
     if (m) post({ e: 'beat', maps: Number(m[2]), sample: 'bpm=' + m[1] })
   }
   console.warn = (...a) => { origWarn(...a); if (want(a)) post({ e: 'log', m: 'ENGW: ' + a.map(String).join(' ').slice(0, 200) }) }
+  // GLSL/渲染错误 (THREE.WebGLProgram 编译失败 / Shader Error / ANGLE 降级):
+  // console.error 不经 want() 过滤直接转发, 否则 shader 编译错误在日志里完全不可见。
+  const origErr = console.error.bind(console)
+  console.error = (...a) => {
+    origErr(...a)
+    const s = a.map(String).join(' ')
+    if (/THREE|Shader|ERROR|WebGL|ANGLE|gl_|program|uniform|attribute/i.test(s))
+      post({ e: 'log', m: 'ENGERR: ' + s.slice(0, 400) })
+  }
 })()
 
 // ---------- 播放时钟：主程序 clk 消息为权威，tick 间线性外插 ----------
@@ -156,7 +167,7 @@ const ICON = {
   repeat1: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/><path d="M11 10h1v4"/></svg>',
   // 顺序播放专属图标（列表 + 向下箭头，与主程序 PlayBar 的 order.svg 同款）：
   // 早先把顺序映射到 repeat 图标，和"列表循环"长得一模一样 → 全屏歌词页显示与
-  // 实际播放模式不符（用户 2026-10-04 反馈，HANDOFF 新问题③）。
+  // 实际播放模式不符（2026-10-04 反馈的真实场景）。
   order: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6.5h11"/><path d="M4 12h11"/><path d="M4 17.5h7"/><path d="M17.8 12.6v6.4"/><path d="M15.3 16.6l2.5 2.5 2.5-2.5"/></svg>',
   shuffle: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 2 4 4-4 4"/><path d="M2 22v-4a4 4 0 0 1 4-4h12"/><path d="m18 14 4 4-4 4"/><path d="M2 2v4a4 4 0 0 0 4 4h2"/><path d="M22 6h-6L4 18"/></svg>',
   volume: '<svg id="volume-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>',
@@ -222,6 +233,13 @@ function safeState () {
       lyricScale: f.lyricScale, lyricGlow: !!f.lyricGlow, lyricGlowStrength: f.lyricGlowStrength,
       lyricGlowBeat: !!f.lyricGlowBeat, lyricGlowParticles: !!f.lyricGlowParticles,
       lyricCameraLock: !!f.lyricCameraLock,
+      roller: f.roller ? {
+        enabled: !!f.roller.enabled,
+        seq: Array.isArray(f.roller.seq) ? f.roller.seq.slice() : [],
+        intervalSec: Number(f.roller.intervalSec) || 8,
+      } : { enabled: false, seq: [0,5,4,2,1], intervalSec: 8 },
+      // #5 修复 (2026-10-24): 面板"清理导入图片"按钮显示数量
+      importedImageCount: st.rolledImagesCount | 0,
     }
   } catch (e) { return {} }
 }
@@ -253,6 +271,18 @@ function initEngine () {
     })
     post({ e: 'engineReady' })
     document.title = 'ENGINE-OK'
+    // 诊断: 启动时 localStorage 里滚放布局原始内容 (验证跨进程重启持久化)
+    try {
+      const raw = localStorage.getItem('mineradio-lyric-layout-v1')
+      const diag = localStorage.getItem('mineradio-boot-diag')
+      const inner = localStorage.getItem('mineradio-boot-diag-inner')
+      const rollerTag = raw ? (JSON.parse(raw).roller || 'none') : 'NULL'
+      post({ e: 'log', m: '[boot] layoutRawLen=' + String((raw || '').length) + ' roller=' + JSON.stringify(rollerTag)
+        + ' diag=' + String(diag) + ' inner=' + String(inner)
+        + ' href=' + String(location.href) + ' ready=' + document.readyState })
+    } catch (err) {
+      post({ e: 'log', m: '[boot] layoutRaw ERR ' + String(err) })
+    }
   } catch (err) {
     document.title = 'ENGINE-FAIL'
     post({ e: 'fatal', msg: String((err && err.stack) || err) })
@@ -365,10 +395,13 @@ document.addEventListener('keydown', (ev) => {
   if (inField) return                       // Space 之类仍要放行给输入框
   if (ev.key === ' ' || ev.code === 'Space') { ev.preventDefault(); post({ e: 'ctrl', a: 'play' }) }
 })
-$('fx-fab').addEventListener('click', () => {
-  // 主程序 QML 侧「视觉控制台」浮层面板（toggle 语义在主程序）
-  post({ e: 'ctrl', a: 'fx' })
-})
+const _fxFabEl = $('fx-fab')
+if (_fxFabEl) {
+  _fxFabEl.addEventListener('click', () => {
+    // 主程序 QML 侧「视觉控制台」浮层面板（toggle 语义在主程序）
+    post({ e: 'ctrl', a: 'fx' })
+  })
+}
 
 // ---------- 页面内轻提示（主窗被舞台盖住，toast 必须画在本页） ----------
 let toastEl = null
@@ -580,11 +613,31 @@ function handleCmd (msg) {
     case 'fx': {
       if (!engine) break
       try {
-        if (msg.op === 'set') engine.setFxValue(String(msg.k), Number(msg.v))
-        else if (msg.op === 'toggle') engine.toggleFx(String(msg.k))
-        else if (msg.op === 'preset') engine.setPreset(Number(msg.i) | 0)
-        else if (msg.op === 'reset') engine.resetFx()
+        if (msg.op === 'set') { engine.setFxValue(String(msg.k), Number(msg.v)); post({ e: 'log', m: 'fx set ' + msg.k + '=' + msg.v }) }
+        else if (msg.op === 'toggle') { engine.toggleFx(String(msg.k)); post({ e: 'log', m: 'fx toggle ' + msg.k }) }
+        else if (msg.op === 'preset') { engine.setPreset(Number(msg.i) | 0); post({ e: 'log', m: 'fx preset=' + msg.i }) }
+        else if (msg.op === 'reset') { engine.resetFx(); post({ e: 'log', m: 'fx reset' }) }
         else if (msg.op === 'get') post({ e: 'fx', state: safeState() })
+        else if (msg.op === 'probe') {
+          // 自检诊断: 导出主粒子层 uniform 原始值, 定位"预设切换画面几乎未变"
+          var g = null
+          try { g = engine.probeUniforms ? engine.probeUniforms() : null } catch (e3) { g = null }
+          post({ e: 'log', m: 'PROBE ' + JSON.stringify(g) })
+        }
+        else if (msg.op === 'roller') { engine.setRollerConfig(msg.config || null); post({ e: 'log', m: 'fx roller=' + JSON.stringify(msg.config || null) }) }
+        else if (msg.op === 'importImage') { engine.importParticleImage(String(msg.data || '')); post({ e: 'log', m: 'fx importImage len=' + String(msg.data || '').length }) }
+        else if (msg.op === 'importImages') {
+          post({ e: 'log', m: 'fx importImages recv n=' + (Array.isArray(msg.images) ? msg.images.length : -1) + ' firstLen=' + (Array.isArray(msg.images) && msg.images.length ? String(msg.images[0]||'').length : 0) })
+          const r = engine.importParticleImages(Array.isArray(msg.images) ? msg.images : [])
+          post({ e: 'fx', state: safeState(), importProgress: r })
+          post({ e: 'log', m: 'fx importImages total=' + r.total + ' pending=' + r.pending })
+        }
+        // #5 修复 (2026-10-24): 面板"清理导入图片"按钮 → 清持久化 + 恢复歌曲封面
+        else if (msg.op === 'clearImages') {
+          const r = engine.clearImportedImages ? engine.clearImportedImages() : { cleared: -1 }
+          post({ e: 'fx', state: safeState() })
+          post({ e: 'log', m: 'fx clearImages cleared=' + ((r && r.cleared) | 0) })
+        }
       } catch (e) { post({ e: 'log', m: 'fx op failed: ' + String(e) }) }
       break
     }

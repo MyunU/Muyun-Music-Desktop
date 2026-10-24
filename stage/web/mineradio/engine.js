@@ -212,6 +212,11 @@ var djMode = {
 // fx 状态: 预设 + 主滑块 + 开关 + 三态
 var fxDefaults = {
   preset: 0,            // 0=emily cover, 1=tunnel, 2=orbit, 3=void, 4=vinyl, 5=wallpaper, 6=skull
+  roller: {            // #5 滚放: 自动轮换有粒子切换特效的预设序列; intervalSec 每次停留秒数
+    enabled: false,
+    seq: [0, 5, 4, 2, 1], // 默认: 封面→星河→唱片→星球→滚筒
+    intervalSec: 8,
+  },
   intensity: 0.85,
   cinemaShake: 0.5,
   depth: 1.0,
@@ -283,6 +288,19 @@ var fxDefaults = {
   liveBackgroundKeep: false,
   cam: 'off',
 };
+// 预置元数据提前声明: readSavedLyricLayout() 在模块求值早期 (fx 初始化) 就调用
+// normalizeRollerConfig(), 其中访问 presetMeta.length; 若声明放在文件后部, var 提升
+// 使该时刻 presetMeta 为 undefined → 抛 "Cannot read properties of undefined (reading
+// 'length')" → readSavedLyricLayout catch → 返回 {} → 滚放及全部视觉配置每次启动丢失。
+var presetMeta = [
+  { name: 'emily专辑封面',  desc: '封面粒子 · 快速入场' },
+  { name: '滚筒', desc: '隧道 · 沉浸感' },
+  { name: '星球',  desc: '星球 · 雕塑感' },
+  { name: '虚空', desc: '无粒子 · 自定义背景' },
+  { name: '唱片', desc: '唱片 · 圆形封面' },
+  { name: '星河', desc: '壁纸粒子 · 音乐律动' },
+  { name: '安魂', desc: '骷髅·YUI7W', descHtml: '骷髅·<span class="pc-yui7w">YUI7W</span>' },
+];
 var PACKAGED_DEFAULT_USER_FX_ARCHIVE_NAME = '默认测试';
 var PACKAGED_DEFAULT_USER_FX_ARCHIVE_EXPORTED_AT = 1782276031784;
 var PACKAGED_DEFAULT_USER_FX_ARCHIVE_SAVED_AT = 1782273019045;
@@ -599,7 +617,11 @@ var playbackVisualPreset = readSavedPlaybackVisualPreset();
 var startupVisualPreviewActive = false;
 var fx = Object.assign({}, fxDefaults, readSavedLyricLayout());
 normalizeDevelopmentLockedFxState();
+__writeBootDiag();  // 诊断: 记录 fx.roller 初始化结果 (host.js [boot] 读回)
 var presetTransition = { active:false, start:-10, duration:0.92, from:0, to:0 };
+/* 域间粒子级 morph 状态 (bug6): uMorphFrom=from 端预设, uPresetTarget=to 端预设, uMorphT 0→1 双端全字段插值。 */
+/* #32 duration 1.2→2.0: 让封面↔唱片等大幅重排的粒子有足够时间走完, 遮丑不再主导 */
+var morphTransition = { active:false, start:-10, duration:2.0, from:0, to:0 };
 var controlsAutoHide = readBooleanPreference(CONTROLS_AUTO_HIDE_STORE_KEY, false);
 var controlsHovering = false;
 var controlsHideTimer = null;
@@ -3043,6 +3065,9 @@ var uniforms = {
   uBurstAmt:   { value: 0 },          // 通用预设切换脉冲 0..1
   uVinylSpin:  { value: 0 },
   uPreset:     { value: 0 },
+  uMorphFrom:  { value: 0 },          // #29 粒子 morph: 起始预设 (bug6: 双端全字段插值的 from 端)
+  uMorphT:     { value: 0 },          // #29 粒子 morph: 0→1 进度 (0=无 morph)
+  uPresetTarget: { value: 0 },        // bug6 morph 目标预设 — from/to 两端全字段 mix, 颜色/大小/亮度连续演化
   uIntensity:  { value: 0.85 },
   uDepth:      { value: 1.0 },
   uPointScale: { value: 1.0 },
@@ -3087,6 +3112,8 @@ var vs = `
 precision highp float;
 uniform float uTime, uBass, uMid, uTreble, uBeat, uEnergy, uBurstAmt;
 uniform float uPreset, uIntensity, uDepth, uPointScale, uSpeed, uTwist;
+uniform float uMorphFrom, uMorphT; // #29 粒子 morph (bug6: 双端全字段插值)
+uniform float uPresetTarget;       // bug6 morph 目标预设 — from/to 两端全字段 mix, morph 期间颜色/大小/亮度连续演化
 uniform float uVinylSpin;
 uniform float uColorBoost, uScatter, uCoverRes, uBgFade;
 uniform float uHasCover, uHasDepth, uEdgeEnabled, uAiBoost;
@@ -3185,9 +3212,25 @@ float rippleSumAt(vec2 p, out float maxAmp) {
   return sum;
 }
 
-void main(){
-  float t = uTime * uSpeed;
+// bug6: 单个预设的"完整视觉" (位置+颜色+alpha+亮度+涟漪+大小+边缘增强)
+// 预设切换时 from/to 两端各求值一次, 全部字段按 uMorphT 插值 —
+//   粒子身份连续演化 ("散开组成下一形态"), 不再 morph 结束瞬切颜色/大小/形状。
+//   #34 旧实现只 lerp 位置 (computePresetPos 已删), 着色/边框/alpha 到 morph 结束才切到新预设。
+struct PresetVisuals {
   vec3 pos;
+  vec3 color;
+  float alpha;
+  float bright;
+  float ripple;
+  float size;
+  float edgeBoost;
+};
+
+PresetVisuals computePresetVisuals(float presetIdx) {
+  PresetVisuals result;
+  float t = uTime * uSpeed;
+  float K = uIntensity * 1.6;
+  vec3 pos = position;
   vec2 sampleUv = safeCoverUv(aUv);
   // 切歌颜色渐变: 在新旧封面间 mix
   vec3 newCol = sampleNewCoverColor(sampleUv);
@@ -3197,7 +3240,6 @@ void main(){
   float depthVal = edge.r;
   float edgeVal  = edge.g;
   float fgMask   = edge.b;
-  float lumVal   = edge.a;
   float maxRippleAmp = 0.0;
   float rippleZ = 0.0;
 
@@ -3206,17 +3248,14 @@ void main(){
     mix(vec3(0.85, 0.55, 0.95), vec3(0.45, 0.78, 0.95), aUv.x),
     aUv.y
   );
-  vColor = mix(defaultColor, coverColor, uHasCover);
-  vAlpha = 1.0;
-
-  // 律动强度的真实倍数 (放大 intensity 滑块的影响)
-  float K = uIntensity * 1.6;   // 滑块 1.0 → K=1.6, 滑块 1.6 → K=2.56
+  vec3 vColor = mix(defaultColor, coverColor, uHasCover);
+  float vAlpha = 1.0;
 
   // ====================================================
   //  Preset 0: SILK — 丝绸 (xy 平面, z 涟漪)
   //  v7.1: 全部位移 ×2.5
   // ====================================================
-  if (uPreset < 0.5) {
+  if (presetIdx < 0.5) {
     pos = position;
     rippleZ = rippleSumAt(pos.xy, maxRippleAmp);
 
@@ -3237,7 +3276,7 @@ void main(){
   // ====================================================
   //  Preset 1: TUNNEL — 隧道 + 自旋
   // ====================================================
-  else if (uPreset < 1.5) {
+  else if (presetIdx < 1.5) {
     // v7.1: 整体自旋 — 整管缓慢绕 Z 轴
     float spin = t * 0.12;
     float angle = aUv.x * 2.0 * PI + spin;
@@ -3266,12 +3305,12 @@ void main(){
   //  Preset 2: ORBIT — 星球 (保留自转)
   //  v7.1: 律动幅度加大
   // ====================================================
-  else if (uPreset < 2.5) {
+  else if (presetIdx < 2.5) {
     float theta = aUv.x * 2.0 * PI;
     float phi   = (aUv.y - 0.5) * PI;
     float baseR = 2.2;
     float trebFlare = snoise(vec3(theta * 1.5, phi * 1.5, t * 0.7)) * uTreble * 0.85 * K;   // 0.40→0.85
-    float bassExpand = uBass * 0.35 * K;                                                      // 0.18→0.35
+    float bassExpand = uBass * 0.35 * K;                                                    // 0.18→0.35
     float r = baseR * (1.0 + bassExpand) + trebFlare;
 
     pos.x = r * cos(phi) * cos(theta);
@@ -3286,7 +3325,7 @@ void main(){
   // ====================================================
   //  Preset 3: VOID — 虚空 (无粒子, 适合自定义背景)
   // ====================================================
-  else if (uPreset < 3.5) {
+  else if (presetIdx < 3.5) {
     pos = vec3((aUv.x - 0.5) * 0.01, (aUv.y - 0.5) * 0.01, -90.0);
     vAlpha = 0.0;
     vColor = vec3(0.0);
@@ -3298,7 +3337,7 @@ void main(){
   //  A real record layout: circular album cover in the center, black vinyl
   //  grooves outside, and a complete white particle rim.
   // ====================================================
-  else if (uPreset < 4.5) {
+  else if (presetIdx < 4.5) {
     float bassDrive = smoothstep(0.08, 0.78, uBass + uBeat * 0.82);
     float highDrive = smoothstep(0.05, 0.46, uTreble);
     float hiResGuard = smoothstep(1.08, 1.55, uCoverRes);
@@ -3360,6 +3399,7 @@ void main(){
   //  Preset 5: WALLPAPER PULSE
   //  Layered music-particle wallpaper: aurora ribbons, depth sparks,
   //  and cover-colored audio flow.
+  //  (Preset 6 SKULL 复用同一星河布局 + 独立 skull 粒子资产层)
   // ====================================================
   else {
     float bassGlow = smoothstep(0.07, 0.78, uBass) * 0.34 + uBeat * 0.014;
@@ -3433,9 +3473,101 @@ void main(){
   }
 
   // ====================================================
-  //  鼠标交互 (仅 SILK)
+  //  通用后处理 — 颜色 gamma/边缘增强/色调, 亮度, 大小 (全部按预设求值)
   // ====================================================
-  if (uMouseActive > 0.5 && uPreset < 0.5) {
+  float vinylHiResGuard = smoothstep(1.08, 1.55, uCoverRes) * step(3.5, presetIdx) * (1.0 - step(4.5, presetIdx));
+  float edgeBoost = uEdgeEnabled * edgeVal * mix(1.0, 0.42, vinylHiResGuard);
+  float sourceLum = dot(max(vColor, vec3(0.0)), vec3(0.299, 0.587, 0.114));
+  float blackParticleGuard = 1.0 - smoothstep(0.025, 0.115, sourceLum);
+  float edgeBoostF = edgeBoost * (presetIdx > 3.5 ? 0.22 : 1.0) * (1.0 - blackParticleGuard);
+  vColor = pow(max(vColor, vec3(0.0)), vec3(1.0 / max(0.35, uColorBoost)));
+  float edgeColorMix = edgeBoost * (presetIdx > 3.5 ? 0.20 : 0.50) * (1.0 - blackParticleGuard);
+  vColor = mix(vColor, vColor + vec3(0.20), edgeColorMix);
+  float tintLum = max(max(vColor.r, vColor.g), vColor.b);
+  vec3 tintedColor = uTintColor * max(0.24, tintLum * 1.12);
+  vColor = mix(vColor, tintedColor, clamp(uTintStrength, 0.0, 1.0) * (1.0 - blackParticleGuard));
+
+  float vBright = 0.82 + maxRippleAmp * 0.55 + uBass * 0.10 + edgeBoost * 0.30 + uEnergy * 0.05 + uBurstAmt * 0.40;
+  if (presetIdx > 4.5) {
+    vBright = 0.94 + maxRippleAmp * 0.34 + uBass * 0.020 + uEnergy * 0.026 + uBurstAmt * 0.025;
+  } else if (presetIdx > 3.5) {
+    vBright = 0.94 + maxRippleAmp * 0.64 + uBass * 0.08 + edgeBoost * 0.12 + uEnergy * 0.05 + uBeat * 0.16 + uBurstAmt * 0.16;
+  }
+  if (uHasDepth > 0.5 && presetIdx < 0.5) {
+    float bgMul = mix(1.0, 0.55, uBgFade * (1.0 - fgMask));
+    vBright *= bgMul;
+  }
+
+  vec4 mvPos = modelViewMatrix * vec4(pos, 1.0);
+  float depthSize = 36.0 / max(0.5, -mvPos.z);
+  float audioBoost = 1.0 + maxRippleAmp * 0.7 + edgeBoost * 0.55 + uBeat * 0.30 + uBurstAmt * 0.5;
+  float sz = clamp(depthSize * audioBoost, 1.05, 4.95);
+  if (presetIdx > 4.5) {
+    float flowDrive = uBass * 0.070 + uMid * 0.046 + uTreble * 0.060 + uBurstAmt * 0.090 + uBeat * 0.055;
+    sz = clamp(depthSize * (1.05 + flowDrive), 1.00, 5.45);
+  } else if (presetIdx > 3.5) {
+    float ringDrive = uBass * 0.30 + uMid * 0.18 + uTreble * 0.22 + uBeat * 0.30;
+    sz = clamp(depthSize * (0.90 + ringDrive * 0.62), 1.05, 3.90);
+  }
+
+  result.pos = pos;
+  result.color = vColor;
+  result.alpha = vAlpha;
+  result.bright = vBright;
+  result.ripple = maxRippleAmp;
+  result.size = sz;
+  result.edgeBoost = edgeBoostF;
+  return result;
+}
+
+void main(){
+  // ====================================================
+  //  bug6: 粒子身份连续演化 — from(uMorphFrom) 与 to(uPresetTarget) 两端
+  //  各求值完整视觉 (位置+颜色+alpha+亮度+涟漪+大小), 全部按 uMorphT 插值。
+  //  非 morph 时 uMorphFrom == uPresetTarget == fx.preset, 两端相等 (m 任意值结果一致),
+  //  旧行为完全保持; morph 期间颜色/大小/亮度不再瞬切 (旧实现只用 uPreset 走 if/else,
+  //  morph 结束才 snap, 导致方形跳变)。
+  // ====================================================
+  float m = clamp(uMorphT, 0.0, 1.0);
+  PresetVisuals va = computePresetVisuals(uMorphFrom);
+  PresetVisuals vb = va;
+  if (m > 0.001 && uMorphFrom != uPresetTarget) {
+    vb = computePresetVisuals(uPresetTarget);
+  }
+  // ---- morph 重做: 每粒子错峰出发, 避免中途两形态并置 ----
+  //  旧实现: 所有粒子按同一个 m 直线插值 A→B。中途粒子一半路程时云团同时
+  //  骑在 A、B 两个形状上 → 视觉上就是"旧形态+新形态"两团并置。
+  //  新实现:
+  //   1) 每粒子错峰出发 (stagger): 粒子按 aRand 先后启动, 云团像"流动重塑",
+  //      A 端粒子数随时间单调减少, B 端同步增加, 不会两团各占一半静置。
+  //   2) 行进弧线 (arc): 中点向轴心收拢 + 轻微旋涡, 走曲线而非直线跨越,
+  //      避免中途形成一条横贯两形状的"拉丝带"。
+  //   3) 全部字段 (位置/颜色/alpha/亮度/大小) 统一用每粒子进度 e,
+  //      保证单个粒子颜色与位置一致, 不会出现"位置在 A、颜色是 B"的割裂感。
+  float stag = clamp((m - aRand * 0.45) / 0.55, 0.0, 1.0);
+  float e = stag * stag * (3.0 - 2.0 * stag);   // smoothstep 缓动
+  vec3 pos = mix(va.pos, vb.pos, e);
+  // 行进弧: 只在 morph 期间生效, 非 morph (e 恒 0 或 1) 时 arc≈0 无影响
+  float arc = sin(3.14159265 * e);
+  float swirl = e * 6.2831 * 0.22 + aRand * 6.2831;
+  pos.xy *= mix(1.0, 0.82, arc * (0.35 + 0.35 * sin(aRand * 12.9898)));
+  pos.xy = mat2(cos(swirl * arc), -sin(swirl * arc), sin(swirl * arc), cos(swirl * arc)) * pos.xy;
+  pos.z *= mix(1.0, 0.88, arc * 0.6);
+  vColor = mix(va.color, vb.color, e);
+  vAlpha = mix(va.alpha, vb.alpha, e);
+  vBright = mix(va.bright, vb.bright, e);
+  float maxRippleAmp = mix(va.ripple, vb.ripple, e);
+  float edgeBoost = mix(va.edgeBoost, vb.edgeBoost, e);
+  float sz = mix(va.size, vb.size, e);
+  vSourceLum = dot(max(vColor, vec3(0.0)), vec3(0.299, 0.587, 0.114));
+  vEdgeBoost = edgeBoost;
+  vRipple = clamp(maxRippleAmp * 1.5, 0.0, 1.0);
+  vBright += uGestureGrip * 0.22;
+
+  // ====================================================
+  //  鼠标交互 (仅 SILK) — morph 端跟随 uMorphFrom (from 不是 SILK 则不交互)
+  // ====================================================
+  if (uMouseActive > 0.5 && uMorphFrom < 0.5) {
     float mdx = pos.x - uMouseXY.x;
     float mdy = pos.y - uMouseXY.y;
     float md = sqrt(mdx*mdx + mdy*mdy);
@@ -3469,44 +3601,18 @@ void main(){
   }
 
   // ====================================================
-  //  通用: 离散感 / 扭曲
+  //  通用: 离散感 / 扭曲 (twist 仅 SILK 端生效, 跟随 uMorphFrom)
   // ====================================================
   if (uScatter > 0.001) {
     vec2 jdir = vec2(cos(aRand * 6.2831), sin(aRand * 6.2831));
     pos.xy += jdir * uScatter * (0.05 + uTreble * 0.10);
   }
-  if (uTwist > 0.001 && uPreset < 0.5) {
+  if (uTwist > 0.001 && uMorphFrom < 0.5) {
     float ta = uTwist * pos.z * 0.6;
     float cs = cos(ta), sn = sin(ta);
     pos.xy = mat2(cs, -sn, sn, cs) * pos.xy;
   }
 
-  // 颜色
-  float vinylHiResGuard = smoothstep(1.08, 1.55, uCoverRes) * step(3.5, uPreset) * (1.0 - step(4.5, uPreset));
-  float edgeBoost = uEdgeEnabled * edgeVal * mix(1.0, 0.42, vinylHiResGuard);
-  vSourceLum = dot(max(vColor, vec3(0.0)), vec3(0.299, 0.587, 0.114));
-  float blackParticleGuard = 1.0 - smoothstep(0.025, 0.115, vSourceLum);
-  vEdgeBoost = edgeBoost * (uPreset > 3.5 ? 0.22 : 1.0) * (1.0 - blackParticleGuard);
-  vColor = pow(max(vColor, vec3(0.0)), vec3(1.0 / max(0.35, uColorBoost)));
-  float edgeColorMix = edgeBoost * (uPreset > 3.5 ? 0.20 : 0.50) * (1.0 - blackParticleGuard);
-  vColor = mix(vColor, vColor + vec3(0.20), edgeColorMix);
-  float tintLum = max(max(vColor.r, vColor.g), vColor.b);
-  vec3 tintedColor = uTintColor * max(0.24, tintLum * 1.12);
-  vColor = mix(vColor, tintedColor, clamp(uTintStrength, 0.0, 1.0) * (1.0 - blackParticleGuard));
-
-  vBright = 0.82 + maxRippleAmp * 0.55 + uBass * 0.10 + edgeBoost * 0.30 + uEnergy * 0.05 + uBurstAmt * 0.40;
-  if (uPreset > 4.5) {
-    vBright = 0.94 + maxRippleAmp * 0.34 + uBass * 0.020 + uEnergy * 0.026 + uBurstAmt * 0.025;
-  } else if (uPreset > 3.5) {
-    vBright = 0.94 + maxRippleAmp * 0.64 + uBass * 0.08 + edgeBoost * 0.12 + uEnergy * 0.05 + uBeat * 0.16 + uBurstAmt * 0.16;
-  }
-  vRipple = clamp(maxRippleAmp * 1.5, 0.0, 1.0);
-
-  if (uHasDepth > 0.5 && uPreset < 0.5) {
-    float bgMul = mix(1.0, 0.55, uBgFade * (1.0 - fgMask));
-    vBright *= bgMul;
-  }
-  vBright += uGestureGrip * 0.22;
   float loadingMistSize = 1.0;
 
   // 加载形态: 雾状微尘流，避免廉价旋转圆环
@@ -3538,21 +3644,11 @@ void main(){
     loadingMistSize = 1.26 + mistBreath * 0.24 + abs(mistRibbon) * 0.14 + glowPick * 0.78;
   }
 
-  vec4 mvPos = modelViewMatrix * vec4(pos, 1.0);
-  float depthSize = 36.0 / max(0.5, -mvPos.z);
-  float audioBoost = 1.0 + maxRippleAmp * 0.7 + edgeBoost * 0.55 + uBeat * 0.30 + uBurstAmt * 0.5;
-  float sz = clamp(depthSize * audioBoost, 1.05, 4.95);
-  if (uPreset > 4.5) {
-    float flowDrive = uBass * 0.070 + uMid * 0.046 + uTreble * 0.060 + uBurstAmt * 0.090 + uBeat * 0.055;
-    sz = clamp(depthSize * (1.05 + flowDrive), 1.00, 5.45);
-  } else if (uPreset > 3.5) {
-    float ringDrive = uBass * 0.30 + uMid * 0.18 + uTreble * 0.22 + uBeat * 0.30;
-    sz = clamp(depthSize * (0.90 + ringDrive * 0.62), 1.05, 3.90);
-  }
+  // bug6: 大小已按预设求值并 mix (sz = mix(va.size, vb.size, m))
   // 加载态下粒子稍大
   sz = mix(sz, sz * loadingMistSize, uLoading);
   gl_PointSize = sz * uPixel * uPointScale;
-  gl_Position = projectionMatrix * mvPos;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
 }
 `;
 
@@ -3560,7 +3656,7 @@ void main(){
 var fs = `
 precision highp float;
 uniform sampler2D uDotTex;
-uniform float uAlpha, uPreset, uParticleDim;
+uniform float uAlpha, uParticleDim;
 varying vec3 vColor;
 varying float vBright, vRipple, vEdgeBoost, vAlpha, vSourceLum;
 
@@ -3587,6 +3683,9 @@ void main(){
 var material = new THREE.ShaderMaterial({
   uniforms: uniforms, vertexShader: vs, fragmentShader: fs,
   transparent: true, depthWrite: false, blending: THREE.NormalBlending,
+  onCompile: function(shader) {
+    console.log('[shader-compile] main vsLen=' + (shader.vertexShader||'').length + ' fsLen=' + (shader.fragmentShader||'').length);
+  },
 });
 
 var bloomVs = vs
@@ -3595,7 +3694,7 @@ var bloomVs = vs
 var bloomFs = `
 precision highp float;
 uniform sampler2D uDotTex;
-uniform float uAlpha, uBloomStrength, uPreset, uParticleDim;
+uniform float uAlpha, uBloomStrength, uParticleDim;
 varying vec3 vColor;
 varying float vBright, vRipple, vEdgeBoost, vAlpha, vSourceLum;
 
@@ -3615,6 +3714,9 @@ void main(){
 var bloomMaterial = new THREE.ShaderMaterial({
   uniforms: uniforms, vertexShader: bloomVs, fragmentShader: bloomFs,
   transparent: true, depthWrite: false, depthTest: false, blending: THREE.AdditiveBlending,
+  onCompile: function(shader) {
+    console.log('[shader-compile] bloom vsLen=' + (shader.vertexShader||'').length + ' fsLen=' + (shader.fragmentShader||'').length);
+  },
 });
 var bloomParticles = new THREE.Points(geo, bloomMaterial);
 bloomParticles.frustumCulled = false;
@@ -4784,7 +4886,7 @@ function readSavedLyricLayout() {
     var savedShelfAngle = savedShelfAngleManual
       ? clampRange(raw.shelfAngleY == null ? shelfDefaultAngleForCameraMode(savedShelfCameraMode) : Number(raw.shelfAngleY), -30, 30)
       : shelfDefaultAngleForCameraMode(savedShelfCameraMode);
-    return {
+    var ret = {
       preset: savedPreset,
       intensity: clampRange(Number(raw.intensity) || fxDefaults.intensity, 0.2, 1.6),
       cinemaShake: clampRange(Number(raw.cinemaShake) || fxDefaults.cinemaShake, 0, 1.8),
@@ -4861,11 +4963,40 @@ function readSavedLyricLayout() {
       shelfOpacity: clampRange(raw.shelfOpacity == null ? fxDefaults.shelfOpacity : Number(raw.shelfOpacity), 0.25, 1),
       shelfBgOpacity: clampRange(raw.shelfBgOpacity == null ? fxDefaults.shelfBgOpacity : Number(raw.shelfBgOpacity), 0.25, 0.98),
       shelfAccentColor: normalizeHexColor(raw.shelfAccentColor || fxDefaults.shelfAccentColor, fxDefaults.shelfAccentColor),
-      cam: /^(off|gesture)$/.test(String(raw.cam || '')) ? raw.cam : fxDefaults.cam
+      cam: /^(off|gesture)$/.test(String(raw.cam || '')) ? raw.cam : fxDefaults.cam,
+      // #5 滚放: 解析用户自定义轮换序列 (过滤非法预设索引, 至少保留 1 项)
+      roller: normalizeRollerConfig(raw.roller)
     };
+    // 诊断: 记录引擎内部 readSavedLyricLayout 实际读到的原始值
+    try {
+      localStorage.setItem('mineradio-boot-diag-inner', JSON.stringify({
+        state: 'inner', getLen: savedLayoutRaw ? savedLayoutRaw.length : -1,
+        rawRoller: (raw && raw.roller) || null,
+        href: typeof location !== 'undefined' ? location.href : 'no-location',
+        ready: document.readyState, t: Date.now() }));
+    } catch (e2) {}
+    return ret;
   } catch (e) {
+    // 诊断: 记录读取失败原因到 localStorage (host.js [boot] 会读回), 否则静默 {} 掩盖滚放丢失根因
+    try {
+      localStorage.setItem('mineradio-boot-diag-inner', JSON.stringify({
+        state: 'err', msg: String((e && e.message) || e),
+        href: typeof location !== 'undefined' ? location.href : 'no-location',
+        ready: document.readyState, t: Date.now() }));
+    } catch (e2) {}
     return {};
   }
+}
+// 诊断: 成功路径把 roller 解析结果写给 host.js 读回 (定位"读到了 true 却回显 false")
+function __writeBootDiag() {
+  try {
+    var raw = JSON.parse(localStorage.getItem(LYRIC_LAYOUT_STORE_KEY) || '{}') || {};
+    localStorage.setItem('mineradio-boot-diag', JSON.stringify({
+      state: 'ok', rawRoller: (raw && raw.roller) || null,
+      normRoller: fx ? (fx.roller || null) : null,
+      href: typeof location !== 'undefined' ? location.href : 'no-location',
+      ready: document.readyState, t: Date.now() }));
+  } catch (e) {}
 }
 function saveLyricLayout() {
   try {
@@ -4951,7 +5082,9 @@ function saveLyricLayout() {
       shelfOpacity: clampRange(fx.shelfOpacity == null ? fxDefaults.shelfOpacity : Number(fx.shelfOpacity), 0.25, 1),
       shelfBgOpacity: clampRange(fx.shelfBgOpacity == null ? fxDefaults.shelfBgOpacity : Number(fx.shelfBgOpacity), 0.25, 0.98),
       shelfAccentColor: normalizeHexColor(fx.shelfAccentColor || fxDefaults.shelfAccentColor, fxDefaults.shelfAccentColor),
-      cam: /^(off|gesture)$/.test(String(fx.cam || '')) ? fx.cam : fxDefaults.cam
+      cam: /^(off|gesture)$/.test(String(fx.cam || '')) ? fx.cam : fxDefaults.cam,
+      // #5 滚放持久化 (用户自定义序列 + 停留时长 + 启用状态)
+      roller: normalizeRollerConfig(fx.roller)
     }));
   } catch (e) {}
 }
@@ -4970,6 +5103,31 @@ function normalizeDesktopLyricsFps(value) {
   if (n <= 45) return 30;
   if (n <= 90) return 60;
   return 120;
+}
+// #5 滚放: 序列规范化 — 过滤越界/非整数/重复的预设索引, 至少保留 1 项, intervalSec 1-120s
+function normalizeRollerConfig(raw) {
+  raw = (raw && typeof raw === 'object') ? raw : {};
+  var seqRaw = Array.isArray(raw.seq) ? raw.seq : fxDefaults.roller.seq;
+  var seq = [];
+  var seen = {};
+  for (var i = 0; i < seqRaw.length; i++) {
+    var v = seqRaw[i];
+    if (typeof v === 'string') v = parseInt(v, 10);
+    v = Number(v);
+    if (!isFinite(v)) continue;
+    v = Math.round(v);
+    if (v < 0 || v >= presetMeta.length) continue;
+    if (seen[v]) continue;
+    seen[v] = true;
+    seq.push(v);
+  }
+  if (seq.length === 0) seq = fxDefaults.roller.seq.slice();
+  var intervalSec = clampRange(Number(raw.intervalSec) || fxDefaults.roller.intervalSec, 2, 120);
+  return {
+    enabled: raw.enabled === true,
+    seq: seq,
+    intervalSec: intervalSec,
+  };
 }
 function normalizeShelfCameraMode(value) {
   return String(value || '') === 'static' ? 'static' : 'dynamic';
@@ -7169,6 +7327,14 @@ function applyCoverCanvas(cv, thumbSrc, opts) {
   var colorMixMs = opts.colorMixDuration || (fx.preset === 0 ? 520 : 1400);
   startColorMixTween(opts.fromResolutionChange ? (fx.preset === 0 ? 300 : 520) : colorMixMs);
 
+  // #29 导演状态机：切歌自动轮换预设（morph 演出）
+  // #5 BUG-FIX (2026-10-24): 滚放槽位图 (coverKey=roller-img-*) 调 directorOnSongChange
+  //   时若 director 在轮换, 会间接触发 setPreset → rollerOnManualPresetChange →
+  //   suppressUntil=now+60000, 滚放被卡 60s. 传 rollerMuted 让 director 的 setPreset
+  //   也带 rollerMuted, 不触发 60s 抑制.
+  if (typeof directorOnSongChange === 'function')
+    directorOnSongChange(opts.coverKey || thumbSrc || '', opts);
+
   function refreshCoverDependentColors() {
     if (token !== coverProcessToken || !coverApplyStillCurrent(opts)) return;
     if (floatGroup) refreshFloatColorsFromCover(cv);
@@ -7190,6 +7356,18 @@ function applyCoverCanvas(cv, thumbSrc, opts) {
     refreshCoverDependentColors();
 
     queueAIDepthForCover(cv, edgeCv, token, opts, cacheSeed, false);
+  }
+  // #5 滚放快速切换: 滚放槽位图跳过重活 (buildEdgeAndDepth + queueAIDepth 耗时 ~500ms+),
+  //   在 8s 节奏下可能还没跑完下一次 advance 就来了 → token 竞态丢图.
+  //   滚放图只做: coverTex 已赋值 (L7356), uHasCover=1, 颜色渐变已启动 (L7375),
+  //   跳过 runHeavyCoverWork + queueAIDepth + refreshCoverDependentColors 全部重活.
+  // #5 BUG-FIX (2026-10-24): 重活调度必须无条件执行, 不能 return 跳过 — 否则颜色渐变
+  //   startColorMixTween 虽然已启动, 但 refreshCoverDependentColors 永不执行 → 歌词/唱片
+  //   颜色不更新. 改为只跳过 buildEdgeAndDepth/queueAIDepth, 保留颜色刷新.
+  var isRollerSlot = opts.coverKey && opts.coverKey.indexOf('roller-img-') === 0;
+  if (isRollerSlot) {
+    scheduleVisualApply(refreshCoverDependentColors, 120, 700);
+    return;
   }
   if (cachedDepth && cachedDepth.canvas) {
     scheduleVisualApply(refreshCoverDependentColors, opts.deferHeavy ? 260 : 90, opts.deferHeavy ? 1200 : 700);
@@ -9718,6 +9896,18 @@ function hideAIDepthChip() {
 
 function loadCoverFromUrl(directUrl, opts) {
   opts = opts || {};
+  // #5 BUG4: 用户已导入自定义粒子图时, 切歌不要覆盖它。
+  // 之前逻辑: apiSetTrack → loadCoverFromUrl(coverUrl) 会把 album-bg 和 uCoverTex
+  // 都改回歌曲封面, 用户看到的"仍显示封面"就是这里. 加持久化 guard, 只有显式
+  // opts.force=true 或 currentCoverSource.kind 不是 'user-import' 才继续。
+  if (currentCoverSource && currentCoverSource.kind === 'user-import' && !opts.force) {
+    // 第11轮: 粒子纹理保持导入图, 但背景光仍跟随歌曲封面 (否则切歌后背景停在旧图 -> 变黑)
+    if (/^(https?|data|blob|file):/i.test(directUrl)) {
+      byId('album-bg').style.backgroundImage = "url(" + directUrl + ")";
+      byId('album-bg').classList.add('visible');
+    }
+    return;
+  }
   if (!directUrl || typeof directUrl !== 'string' || !/^(https?|data|blob|file):/i.test(directUrl)) {
     if (!coverApplyStillCurrent(opts)) return;
     currentCoverSource = null;
@@ -9809,13 +9999,34 @@ function coverCanvasToDataUrl(cv) {
 function applyCoverDataUrl(dataUrl, opts) {
   opts = opts || {};
   if (!dataUrl) return;
+  var ckey = (opts && opts.coverKey) ? '' : '';
+  if (opts && opts.coverKey) ckey = opts.coverKey;
+  if (ckey) console.log('[coverDataUrl] apply start key=' + ckey + ' len=' + dataUrl.length);
+  // #5 BUG3 真因: 用户导入的图片必须成为"唯一可见"的封面 —— 既替换粒子纹理
+  //   也替换 #album-bg (全屏背景模糊光) 和 #thumb-cover / #control-cover (底部缩略)。
+  //   原代码只调 applyCoverCanvas 换了纹理, 但切歌时 apiSetTrack 里的
+  //   loadCoverFromUrl(coverUrl) 又把 #album-bg 覆盖回歌曲封面 —— 用户看到
+  //   "依旧显示封面, 而不显示传入的照片"。
+  //   修法: 1) 立即把当前导入图登记为 currentCoverSource (这样 loadCoverFromUrl
+  //         的重载走 coverApplyStillCurrent 时 opts 里的 trackToken 才会拦截后续重载)
+  //         2) 同步更新 album-bg 为导入图
+  //         3) 切歌钩子 (loadCoverFromUrl 里) 里若当前是 user-import 就跳过重载
+  currentCoverSource = { kind: 'user-import', src: dataUrl };
+  // 第11轮 (2026-10-24): 背景光 #album-bg 只跟"歌曲封面", 导入图只接管粒子纹理。
+  // 原逻辑把 bg 也换成导入图 → 用户传透明底/偏暗的图后全屏背景变成纯黑(用户实测反馈)。
+  // opts.keepBackground=true 时跳过 bg 更新 (importParticleImage / roller 槽位图会传)。
+  var bgEl = byId('album-bg');
+  if (bgEl && !opts.keepBackground) {
+    bgEl.style.backgroundImage = 'url(' + dataUrl + ')';
+    bgEl.classList.add('visible');
+  }
   var img = new Image();
   img.decoding = 'async';
   img.onload = function() {
     if (!coverApplyStillCurrent(opts)) return;
     var cv = makeSquareCoverCanvas(img, coverTextureSizeForResolution(fx.coverResolution));
-    setAlbumBackground(dataUrl);
-    applyCoverCanvas(cv, dataUrl, Object.assign({}, opts, { coverSourceKind: 'data', coverSource: dataUrl }));
+    if (!cv) return;
+    applyCoverCanvas(cv, dataUrl, Object.assign({}, opts, { coverSourceKind: 'user-import', coverSource: dataUrl }));
   };
   img.src = dataUrl;
 }
@@ -10225,15 +10436,6 @@ function clearPlayerControlFocusState(reason) {
 
 
 // ▼▼▼ [mineradio:preset-meta] source lines 20084,20122 ▼▼▼
-var presetMeta = [
-  { name: 'emily专辑封面',  desc: '封面粒子 · 快速入场' },
-  { name: '滚筒', desc: '隧道 · 沉浸感' },
-  { name: '星球',  desc: '星球 · 雕塑感' },
-  { name: '虚空', desc: '无粒子 · 自定义背景' },
-  { name: '唱片', desc: '唱片 · 圆形封面' },
-  { name: '星河', desc: '壁纸粒子 · 音乐律动' },
-  { name: '安魂', desc: '骷髅·YUI7W', descHtml: '骷髅·<span class="pc-yui7w">YUI7W</span>' },
-];
 var presetIcons = [
   '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 14c3-2 5-2 8 0s5 2 8 0M3 10c3-2 5-2 8 0s5 2 8 0M3 18c3-2 5-2 8 0s5 2 8 0"/></svg>',
   '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.5" fill="currentColor"/></svg>',
@@ -11358,9 +11560,14 @@ function triggerPresetParticleTransition(fromPreset, toPreset) {
   presetTransition.to = toPreset;
   var newVisual = toPreset >= 4;
   var wallpaperFlow = toPreset === 5;
-  uniforms.uScatter.value = Math.max(uniforms.uScatter.value, fx.scatter + (newVisual ? (wallpaperFlow ? 0.008 : 0.024) : 0.12));
-  uniforms.uBurstAmt.value = Math.max(uniforms.uBurstAmt.value, wallpaperFlow ? 0.05 : 0.15);
-  camPunch = Math.max(camPunch, wallpaperFlow ? 0.04 : 0.12);
+  // #32 减弱遮丑: 原 uScatter 0.008/0.024 + uBurstAmt 0.05/0.15 + camPunch 0.04/0.12
+  //   幅度太大，粒子被"散开再归位"主导，morph 路径被盖住，用户看到"瞬切"。
+  //   改为遮丑只做"启动瞬间的微呼吸"，把视觉主舞台交给 morph 本身。
+  // #34 旧视觉→旧视觉（封面/滚筒/星球，preset<4）遮丑太强会盖过 morph 路径，
+  //   用户报「星球跳滚筒粒子显示异常」。降到与 morph 同量级：uScatter 0.06→0.018, uBurstAmt 0.075→0.028。
+  uniforms.uScatter.value = Math.max(uniforms.uScatter.value, fx.scatter + (newVisual ? (wallpaperFlow ? 0.004 : 0.010) : 0.018));
+  uniforms.uBurstAmt.value = Math.max(uniforms.uBurstAmt.value, wallpaperFlow ? 0.028 : (newVisual ? 0.075 : 0.028));
+  camPunch = Math.max(camPunch, wallpaperFlow ? 0.020 : (newVisual ? 0.055 : 0.022));
   for (var i = 0; i < 3; i++) {
     triggerRipple((Math.random() - 0.5) * 3.4, (Math.random() - 0.5) * 3.4, 0.58 + Math.random() * 0.32);
   }
@@ -11387,27 +11594,248 @@ function tickPresetTransition() {
     syncFxUniforms();
   }
 }
+function tickMorphTransition() {
+  if (!morphTransition.active) return;
+  var raw = (uniforms.uTime.value - morphTransition.start) / morphTransition.duration;
+  if (raw >= 1) {
+    // bug6 morph 完成: 同步 uMorphFrom=uPresetTarget=uPreset, uMorphT=0。
+    //   双端全字段插值 (位置+颜色+alpha+亮度+涟漪+大小+边缘) 全程连续,
+    //   完成时 from=to, shader 两端求值结果一致, 不再瞬切。
+    uniforms.uMorphFrom.value = morphTransition.to;
+    uniforms.uMorphT.value = 0;
+    uniforms.uPreset.value = morphTransition.to;
+    morphTransition.active = false;
+    return;
+  }
+  var t = Math.max(0, Math.min(1, raw));
+  // #5 BUG1 滚放: 线性缓动 (无起停抖动)。
+  //   原 easeInOutCubic 首尾速度为 0, 表现为"上一个特效散开后卡顿一下再切"——
+  //   正是用户反馈的现象。滚放要求粒子匀速散开组成下一形态, 不用加速/减速。
+  var eased = morphTransition.active && fx.roller && fx.roller.enabled ? t : (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
+  uniforms.uMorphT.value = eased;
+}
+
+// #29 导演状态机：切歌自动编排预设 morph（演出轮换），用户手动切预设后暂停
+var director = {
+  enabled: true,
+  seq: [0, 1, 2, 4, 5],   // 封面→滚筒→星球→唱片→星河（避开虚空 3）
+  idx: 0,
+  lastSongKey: '',
+  suppressUntil: 0,        // 手动切预设后的自动轮换暂停截止时间戳
+};
+
+// #5 滚放状态机：用户手动设定序列 + 停留秒数, 按时间定时轮换 (不依赖切歌)
+//   - enabled=true 时按 fx.roller.seq 顺序循环切换预设
+//   - 每次停留 fx.roller.intervalSec 秒 (默认 8s)
+//   - 手动切预设 (非 roller 内部触发) → suppress 60s 后自动恢复
+//   - 用户切到不在 seq 中的预设 → 永久停用 (下次启用前不清 seq)
+var roller = {
+  nextTickAt: 0,
+  suppressUntil: 0,
+  seqIdx: 0,
+};
+// #5 BUG3/4 滚放粒子图: 用户导入的本地图片 (每项 data URL), 按滚放槽位索引取用。
+//   空 = 沿用歌曲封面；非空 = 第 k 个特效槽播 rollerImages[k % len] (特效多于图片时循环复用)。
+var rollerImages = [];
+var rollerImagesLoading = false;  // 多图尚未全部解码完成 → 滚放暂停等齐 (用户: 等全部加载完再滚)
+// #5 修复 (2026-10-24): 导入图持久化 —— "重启全屏歌词后导入图片失效" 根因:
+//   rollerImages 是模块级变量, saveLyricLayout 的大 JSON 不含它 → 重启全丢。
+//   独立 key 持久化: a) 大 JSON 每次改 fx 参数都要整体重序列化, 不能混入
+//   100-400KB/张 的 base64 图片; b) 只在 导入/清理/启动恢复 时写, 滚放正常节奏无 I/O。
+var ROLLER_IMAGES_STORE_KEY = 'mineradio-roller-images-v1';
+var ROLLER_IMAGES_MAX = 16;
+function persistRollerImages() {
+  try {
+    var arr = (Array.isArray(rollerImages) ? rollerImages : [])
+      .filter(function(u){ return typeof u === 'string' && u.length > 0; })
+      .slice(0, ROLLER_IMAGES_MAX);
+    localStorage.setItem(ROLLER_IMAGES_STORE_KEY, JSON.stringify(arr));
+    return arr.length;
+  } catch (e) { console.log('[roller] persistRollerImages failed: ' + e.message); return -1; }
+}
+function loadSavedRollerImages() {
+  try {
+    var raw = localStorage.getItem(ROLLER_IMAGES_STORE_KEY);
+    if (!raw) return [];
+    var arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return [];
+    return arr.filter(function(u){ return typeof u === 'string' && u.length > 0; }).slice(0, ROLLER_IMAGES_MAX);
+  } catch (e) { return []; }
+}
+// 取某个滚放槽位对应的导入图并铺到粒子 (无导入图时不动作, 保持歌曲封面)
+function applyRollerImageForSlot(slotIdx) {
+  if (!rollerImages.length) { console.log('[roller] applyRollerImageForSlot: no images, skip'); return; }
+  var n = rollerImages.length;
+  var src = rollerImages[((Number(slotIdx) % n) + n) % n];
+  console.log('[roller] applyRollerImageForSlot slot=' + slotIdx + ' n=' + n + ' srcLen=' + (src ? src.length : 0));
+  if (!src) return;
+  try {
+    applyCoverDataUrl(src, { coverSourceKind: 'user-import', coverSource: src,
+                             coverKey: 'roller-img-' + slotIdx,
+                             rollerMuted: true, keepBackground: true });
+  } catch (e) { console.log('[roller] applyCoverDataUrl threw: ' + e.message); }
+}
+function rollerIsSuppressed() {
+  return !fx.roller.enabled || performance.now() < roller.suppressUntil;
+}
+function rollerAdvance() {
+  // 找到当前预设所在 idx (不在序列中→从 0 开始)
+  var seq = fx.roller.seq;
+  var pos = seq.indexOf(fx.preset);
+  if (pos < 0) pos = 0;
+  else pos = (pos + 1) % seq.length;
+  roller.seqIdx = pos;
+  var next = seq[pos];
+  console.log('[roller] advance: preset=' + fx.preset + ' → next=' + next + ' seqIdx=' + pos + ' seqLen=' + seq.length + ' imgLen=' + rollerImages.length + ' suppressUntil=' + roller.suppressUntil);
+  if (next !== fx.preset) {
+    setPreset(next, { silent: true, noSave: true, directorMuted: true, rollerMuted: true });
+  }
+  // #5 BUG4 多图匹配: 每个特效槽配一张导入图, 槽位循环 (特效多于图片时回到第一张)
+  applyRollerImageForSlot(roller.seqIdx);
+  roller.nextTickAt = performance.now() + fx.roller.intervalSec * 1000;
+}
+function tickRoller(dt) {
+  if (!fx || !fx.roller || !fx.roller.enabled) {
+    roller.nextTickAt = 0;
+    return;
+  }
+  if (rollerImagesLoading) {
+    if (roller._lastTickLog !== 'LOADING') { console.log('[roller] tickRoller: LOADING (waiting for images)'); roller._lastTickLog = 'LOADING'; }
+    return;
+  }
+  if (rollerIsSuppressed()) {
+    if (roller._lastTickLog !== 'SUPPRESSED') { console.log('[roller] tickRoller: SUPPRESSED until=' + roller.suppressUntil + ' now=' + performance.now()); roller._lastTickLog = 'SUPPRESSED'; }
+    return;
+  }
+  if (performance.now() < roller.nextTickAt) {
+    if (roller._lastTickLog !== 'EARLY') { console.log('[roller] tickRoller: nextTick not yet, nextTickAt=' + roller.nextTickAt + ' now=' + performance.now()); roller._lastTickLog = 'EARLY'; }
+    return;
+  }
+  roller._lastTickLog = '';
+  rollerAdvance();
+}
+// 手动切预设 → 抑制 roller 60s (除非是 roller 自己触发)
+function rollerOnManualPresetChange() {
+  if (!fx || !fx.roller || !fx.roller.enabled) return;
+  // #4 不再永久停用: 用户切到不在 seq 中的预设时, 只抑制 60s, 之后 roller 自动恢复。
+  //   原方案永久停用导致"滚放播放退出程序后程序打开无效"——退出时 enabled=false 被持久化,
+  //   下次启动读到 enabled=false, 滚放永不恢复。新方案只抑制, 不修改 enabled 状态。
+  roller.suppressUntil = performance.now() + 60000;
+  roller.nextTickAt = roller.suppressUntil + fx.roller.intervalSec * 1000;
+}
+// #5 BUG5 启动武装: fx.roller.enabled 从 localStorage 恢复后, 只靠 tickRoller 会等到
+//   roller.nextTickAt (初值 0 → 第一帧就立刻触发一次 advance, 之后正常节奏)。
+//   这里显式把 nextTickAt 排到 intervalSec 之后, 让"启用滚放"跨重启立即生效,
+//   且不会因用户重启前恰好停在 suppress 期而卡住。
+function armRollerOnStartup() {
+  if (!fx || !fx.roller || !fx.roller.enabled) return;
+  roller.suppressUntil = 0;
+  var pos = fx.roller.seq.indexOf(fx.preset);
+  if (pos < 0 && fx.roller.seq.length > 0) {
+    // 当前预设不在序列中 → 排到下一个 tick 再切, 避免启动瞬间猛切
+    roller.seqIdx = 0;
+  } else {
+    roller.seqIdx = Math.max(0, pos);
+  }
+  roller.nextTickAt = performance.now() + fx.roller.intervalSec * 1000;
+}
+function directorIsSuppressed() {
+  return !director.enabled || performance.now() < director.suppressUntil;
+}
+function directorOnSongChange(songKey, opts) {
+  if (directorIsSuppressed()) return;
+  // #5 修复 (2026-10-24): 滚放开启时, 预设轮换权归滚放 (用户自定义序列 +
+  //   导入图), 导演不得再抢权 —— 否则两大后果 (用户报的 bug 1 "乱序 + 删除的特效依旧播"):
+  //   1) 导演固定 seq [0,1,2,4,5] 与用户 roller.seq 不一致 → 跳序
+  //   2) 用户已从序列删掉的预设, 导演仍按自己的 seq 拾取 → 被删特效重新出现
+  //   另外 applyCoverCanvas L7383 把 coverKey ('roller-img-N') 当 songKey 传入,
+  //   滚放每铺一张图导演都 advance 一次, 进一步放大乱序。滚放开启时整条链路静默。
+  if (fx && fx.roller && fx.roller.enabled) return;
+  if (!songKey || songKey === director.lastSongKey) return;
+  director.lastSongKey = songKey;
+  var cur = fx.preset;
+  var pos = director.seq.indexOf(cur);
+  if (pos < 0) return;      // 当前预设不在轮换序列（用户自选预设）→ 不打扰
+  var next = director.seq[(pos + 1) % director.seq.length];
+  if (next !== cur) {
+    // #5 BUG-FIX (2026-10-24): 导演轮换 = 引擎内部自动行为, 不是用户手动切预设.
+    //   必须带 rollerMuted, 否则 setPreset 会触发 rollerOnManualPresetChange →
+    //   suppressUntil=now+60000 → 滚放被卡 60s (用户: "很久才进第二个特效").
+    //   旧代码只透传 opts.rollerMuted, 但切歌铺封面 (applyCoverCanvas) 的 opts
+    //   来自 applyCoverDataUrl, 恒无 rollerMuted → 抑制每次都触发. 现在无条件带上.
+    var popts = { silent: true, noSave: true, directorMuted: true, rollerMuted: true };
+    setPreset(next, popts);
+  }
+}
 function setPreset(p, opts) {
   opts = opts || {};
   p = Math.max(0, Math.min(presetMeta.length - 1, Number(p) || 0));
   var prev = fx.preset;
   var changed = prev !== p;
   fx.preset = p;
+  // #5 BUG2 (2026-10-24): 滚放内部触发 (rollerMuted) 的预设切换, 若新预设不在
+  //   roller.seq 中 (用户改了序列但当前预设是旧的), 把 seqIdx 复位到 0,
+  //   否则 rollerAdvance 里 seq.indexOf(fx.preset)=-1 → pos=0 虽然能继续,
+  //   但 seqIdx 与 fx.preset 脱节会导致"播放到最后一个时无法跳转".
+  if (changed && opts.rollerMuted && fx.roller && fx.roller.enabled) {
+    var rp = fx.roller.seq.indexOf(p);
+    roller.seqIdx = (rp >= 0) ? rp : 0;
+  }
   if (changed && prev === SKULL_PRESET_INDEX && p !== SKULL_PRESET_INDEX) clearSkullPresetResidue();
   if (p === SKULL_PRESET_INDEX) loadSkullParticleAsset();
-  uniforms.uPreset.value = p;
+  // bug6 morph 期间 uMorphFrom=旧预设, uPresetTarget=新p; shader 双端全字段插值。
+  //   morph 结束后 tickMorphTransition 同步 uPreset=uMorphFrom=uPresetTarget=to。
+  //   非 morph 时 uMorphFrom==uPresetTarget, 两端相等结果不变。
+  uniforms.uPresetTarget.value = p;
+  if (morphTransition.active) {
+    // 打断旧 morph: 旧 to 作为新 morph 的视觉起点 (uPreset 保持旧 to 位置)
+    uniforms.uPreset.value = morphTransition.to;
+    uniforms.uMorphFrom.value = morphTransition.to;
+    uniforms.uMorphT.value = 0;
+    morphTransition.active = false;
+  }
   refreshPresetGrid();
-  if (changed && !opts.skipTransition) triggerPresetParticleTransition(prev, p);
-  // 每个预设对应的相机基线 (改 userOrbit)
+  if (changed && !opts.skipTransition) {
+    // #29: 启动粒子位置 morph (from→to 逐粒子插值, easeInOutCubic, 2s)
+    morphTransition.active = true;
+    morphTransition.start = uniforms.uTime.value;
+    morphTransition.from = uniforms.uPreset.value;  // 旧位置 (uPreset 未被覆盖)
+    morphTransition.to = p;
+    uniforms.uMorphT.value = 0;
+    // #5 BUG1 滚放切预设: 只走 morph 本体, 不再叠加 triggerPresetParticleTransition 的
+    //   遮丑爆裂 (uScatter/uBurstAmt/camPunch + 3 涟漪) —— 那些是抢戏的"散开再归位",
+    //   用户要求粒子自身散开组成下一形态, 由 2s morph 独立完成。
+    //   前一次手动切预设留下的 uBurstAmt / uScatter 还在 *=0.90 逐帧衰减,
+    //   滚放触发的 preset 5 shader 分支 (transition > 0.001) 会把它们当成
+    //   "又有一次切换"再演出一次 burst —— 表现就是用户看到的"散开再归位"。
+    //   这里显式把遮丑状态清零, 让 morph 是唯一视觉信号。
+    if (opts.rollerMuted) {
+      uniforms.uBurstAmt.value = 0;
+      uniforms.uScatter.value = Math.min(uniforms.uScatter.value, fx.scatter);
+      presetTransition.active = false;
+    } else {
+      triggerPresetParticleTransition(prev, p);
+    }
+  } else if (changed) {
+    // 无 morph (skipTransition): 立即切换 uPreset
+    uniforms.uPreset.value = p;
+  }
+  // #29 导演状态机：用户手动切预设（非自动轮换）→ 暂停切歌自动轮换 60s
+  if (changed && !opts.directorMuted && typeof director === 'object')
+    director.suppressUntil = performance.now() + 60000;
+  // #5 滚放状态机：用户手动切预设（非 roller 内部触发）→ 抑制 60s 或永久停用
+  if (changed && !opts.rollerMuted && typeof rollerOnManualPresetChange === 'function')
+    rollerOnManualPresetChange();
+  // #29: 每个预设对应的相机基线 — 只设 baseline*, 启用 recentering 缓动 (4%/帧 lerp)
   if (changed && !opts.preserveCamera) {
-    if (p === 1)      { orbit.userRadius = 6.2; orbit.userPhi = 0.03; orbit.userTheta = 0.0; orbit.baselineRadius = 6.2; orbit.baselinePhi = 0.03; }
-    else if (p === 2) { orbit.userRadius = 7.0; orbit.userPhi = 0.15; orbit.userTheta = 0.0; orbit.baselineRadius = 7.0; orbit.baselinePhi = 0.15; }
-    else if (p === 3) { orbit.userRadius = 8.0; orbit.userPhi = 0.05; orbit.userTheta = 0.0; orbit.baselineRadius = 8.0; orbit.baselinePhi = 0.05; }
-    else if (p === 4) { orbit.userRadius = 6.5; orbit.userPhi = 0.04; orbit.userTheta = 0.0; orbit.baselineRadius = 6.5; orbit.baselinePhi = 0.04; }
-    else if (p === 5) { orbit.userRadius = 9.4; orbit.userPhi = 0.34; orbit.userTheta = -0.52; orbit.baselineRadius = 9.4; orbit.baselinePhi = 0.34; }
-    else if (p === 6) { orbit.userRadius = 7.4; orbit.userPhi = 0.10; orbit.userTheta = 0.18; orbit.baselineRadius = 7.4; orbit.baselinePhi = 0.10; }
-    else              { orbit.userRadius = 6.6; orbit.userPhi = 0.08; orbit.userTheta = 0.0; orbit.baselineRadius = 6.6; orbit.baselinePhi = 0.08; }
-    orbit.baselineTheta = p === 5 ? -0.52 : (p === 6 ? 0.18 : 0.0);
+    if (p === 1)      { orbit.baselineRadius = 6.2; orbit.baselinePhi = 0.03; orbit.baselineTheta = 0.0; }
+    else if (p === 2) { orbit.baselineRadius = 7.0; orbit.baselinePhi = 0.15; orbit.baselineTheta = 0.0; }
+    else if (p === 3) { orbit.baselineRadius = 8.0; orbit.baselinePhi = 0.05; orbit.baselineTheta = 0.0; }
+    else if (p === 4) { orbit.baselineRadius = 6.5; orbit.baselinePhi = 0.04; orbit.baselineTheta = 0.0; }
+    else if (p === 5) { orbit.baselineRadius = 9.4; orbit.baselinePhi = 0.34; orbit.baselineTheta = -0.52; }
+    else if (p === 6) { orbit.baselineRadius = 7.4; orbit.baselinePhi = 0.10; orbit.baselineTheta = 0.18; }
+    else              { orbit.baselineRadius = 6.6; orbit.baselinePhi = 0.08; orbit.baselineTheta = 0.0; }
+    orbit.recentering = true;
   }
   if (changed && !opts.silent) showToast('视觉预设: ' + presetMeta[p].name);
   var shouldCommitPlaybackPreset = !!opts.commitPlaybackPreset || !opts.noSave;
@@ -11421,7 +11849,13 @@ function setPreset(p, opts) {
 }
 
 function syncFxUniforms() {
-  uniforms.uPreset.value = fx.preset;
+  // bug6 morph 期间 uMorphFrom 保持旧预设 (from 端), uPresetTarget=新预设 (to 端);
+  //   shader 双端全字段插值, morph 结束后 tickMorphTransition 同步三值。
+  //   syncFxUniforms 每帧调用, 不能覆盖 morph 期间故意保持旧值的 uMorphFrom/uPreset。
+  uniforms.uPresetTarget.value = fx.preset;
+  if (!morphTransition.active) uniforms.uPreset.value = fx.preset;
+  // uMorphFrom 非 morph 时=uPreset, shader 两端相等 (from=to) 结果不变。
+  if (!morphTransition.active) uniforms.uMorphFrom.value = fx.preset;
   uniforms.uIntensity.value = fx.intensity;
   uniforms.uDepth.value = fx.depth;
   uniforms.uPointScale.value = fx.point;
@@ -11969,6 +12403,8 @@ function animate() {
   // 通用转场脉冲: 只作为切换预设时的短促提亮。
   uniforms.uBurstAmt.value *= 0.90;
   tickPresetTransition();
+  tickMorphTransition(); // #29 粒子 morph 进度
+  tickRoller(dt); // #5 滚放: 定时自动轮换预设
 
   updateRipples(dt);
   updateFloatLayer(dt);
@@ -12268,7 +12704,10 @@ function applyStartupStarfieldVisual() {
   if (playing || currentIdx >= 0) return;
   startupVisualPreviewActive = true;
   if (fx.preset !== 5) {
-    setPreset(5, { silent: true, preserveCamera: false, skipTransition: true, noSave: true });
+    // #5 BUG5: 启动预览本身不该被当成"用户手动切预设"——否则 rollerOnManualPresetChange
+    //   会把滚放抑制 60s, 重启全屏歌词后前 1 分钟不转, 观感等同"自动退出"。
+    setPreset(5, { silent: true, preserveCamera: false, skipTransition: true,
+                   noSave: true, directorMuted: true, rollerMuted: true });
   } else {
     syncFxUniforms();
   }
@@ -12278,7 +12717,9 @@ function restorePlaybackVisualPreset() {
   var targetPreset = typeof playbackVisualPreset === 'number' ? playbackVisualPreset : fxDefaults.preset;
   startupVisualPreviewActive = false;
   if (fx.preset !== targetPreset) {
-    setPreset(targetPreset, { silent: true, preserveCamera: false, noSave: true });
+    // #5 BUG5: 播放启动时还原预设也不该被当成"用户手动切预设"——否则首次起歌就把滚放抑制 60s。
+    setPreset(targetPreset, { silent: true, preserveCamera: false, noSave: true,
+                             directorMuted: true, rollerMuted: true });
   } else {
     syncFxUniforms();
   }
@@ -12403,7 +12844,96 @@ function apiGetState() {
     userFxArchives: userFxArchives,
     coverSwatches: (function(){ try { return coverPickerSwatchColors(); } catch (e) { return []; } })(),
     immersive: immersiveMode,
+    // #5 修复 (2026-10-24): 面板"清理导入图片"按钮显示数量用
+    rolledImagesCount: (Array.isArray(rollerImages) ? rollerImages.length : 0),
   };
+}
+
+// #5 滚放: 外部 API — 接收 QML 通过 fx.roller 命令推送的完整配置
+//   config = { enabled: bool, seq: [int], intervalSec: number }
+//   null → 使用 fxDefaults.roller 默认值
+function apiSetRollerConfig(config) {
+  if (__disposed) return;
+  var target = (config && typeof config === 'object') ? config : fxDefaults.roller;
+  fx.roller = normalizeRollerConfig(target);
+  // 切换 enabled 后立即重排下一次 tick (开→马上排队; 关→清零)
+  if (fx.roller.enabled) {
+    roller.suppressUntil = 0;
+    roller.nextTickAt = performance.now() + fx.roller.intervalSec * 1000;
+    // 如果当前预设不在序列中, 立即切到序列第一项
+    var pos = fx.roller.seq.indexOf(fx.preset);
+    if (pos < 0 && fx.roller.seq.length > 0) {
+      setPreset(fx.roller.seq[0], { silent: true, noSave: true, directorMuted: true, rollerMuted: true });
+      roller.seqIdx = 0;
+      roller.nextTickAt = performance.now() + fx.roller.intervalSec * 1000;
+    } else {
+      roller.seqIdx = Math.max(0, pos);
+    }
+  } else {
+    roller.nextTickAt = 0;
+    roller.suppressUntil = 0;
+  }
+  saveLyricLayout();
+  emitFxChange();
+}
+
+// #5 BUG4 多图批量导入: 每个滚放槽位配一张图, 槽位索引循环取用 (特效多于图片时回到第一张)。
+//   2026-10-24 重写: 不再预解码全部图片 (避免 5张=10次 data URL 解码卡 UI),
+//   直接铺当前槽位, 其余靠 tickRoller 正常节奏逐张应用。rollerImagesLoading 不再置 true。
+//   返回 { total: 已入队张数, pending: 0 } 供 QML 显示。
+function apiImportParticleImages(urls) {
+  if (__disposed) return { total: 0, pending: 0 };
+  urls = Array.isArray(urls) ? urls : [];
+  rollerImages = urls.filter(function(u){ return typeof u === 'string' && u.length > 0; });
+  if (!rollerImages.length) {
+    rollerImagesLoading = false;
+    persistRollerImages();  // 同步清掉持久化 (C++ 侧全部解码失败才会发空数组, 罕见路径)
+    emitFxChange();
+    return { total: 0, pending: 0 };
+  }
+  // #5 BUG-FIX (2026-10-24): 不再预解码全部图片 (new Image + data URL 双重解码, 5张=10次解码, 卡UI).
+  //   改为直接铺当前槽位, 后续靠 tickRoller 正常节奏逐张应用 (applyCoverDataUrl 内部按需解码).
+  //   rollerImagesLoading 保持 false, 不暂停滚放.
+  //   导入后重置 nextTickAt = now, 让下一次 advance 立即发生 (不等完整 interval).
+  //   导入后清 suppressUntil, 防之前手动切预设留下的 60s 抑制期导致"很久才进第二个特效".
+  rollerImagesLoading = false;
+  var curSeqIdx = (roller && roller.seqIdx >= 0) ? roller.seqIdx : 0;
+  console.log('[roller] importImages total=' + rollerImages.length + ' enabled=' + (fx && fx.roller && fx.roller.enabled) + ' seqIdx=' + curSeqIdx + ' intervalSec=' + (fx && fx.roller ? fx.roller.intervalSec : -1));
+  if (fx && fx.roller && fx.roller.enabled) {
+    // 滚放已启用: 立即铺当前槽位的图, 并重置 tick 让下一个特效立即来
+    applyRollerImageForSlot(curSeqIdx);
+    roller.suppressUntil = 0;
+    roller.nextTickAt = performance.now();
+  } else {
+    // 滚放未启用: 铺第一张到当前粒子 (用户点导入就要看见效果)
+    applyRollerImageForSlot(0);
+  }
+  saveLyricLayout();
+  persistRollerImages();  // #5 修复 (2026-10-24): 导入图落盘, 重启不再失效
+  emitFxChange();
+  showToast('已导入 ' + rollerImages.length + ' 张图片 → 粒子');
+  return { total: rollerImages.length, pending: 0 };
+}
+
+// #5 修复 (2026-10-24): "清理导入图片" 专用按钮 (面板) —— 导入图默认持久化,
+//   重启不再自动清除; 清除是用户主动动作。清除后:
+//   1) rollerImages=[] 且持久化写 '[]' (下次启动不再恢复)
+//   2) 解除 user-import guard (currentCoverSource=null), 强制恢复歌曲封面:
+//      loadCoverFromUrl(..., {force:true}) 绕过 L9950 的 user-import 早退;
+//      无歌曲 (舞台未 track) → 空 url 走封面清空分支。
+function apiClearImportedImages() {
+  if (__disposed) return { cleared: 0 };
+  var n = rollerImages.length;
+  rollerImages = [];
+  persistRollerImages();
+  currentCoverSource = null;
+  var song = (currentIdx >= 0 && playQueue[currentIdx]) ? playQueue[currentIdx] : null;
+  var url = song ? (songCoverSrc(song, 400) || song.cover || '') : '';
+  loadCoverFromUrl(url, { force: true });
+  saveLyricLayout();
+  emitFxChange();
+  showToast(n ? ('已清理 ' + n + ' 张导入图片, 恢复歌曲封面') : '没有已导入的图片');
+  return { cleared: n };
 }
 
 function apiDestroy() {
@@ -12469,6 +12999,25 @@ applyUiAccentColor();
 applyIconAccentColors();
 syncFxUniforms();
 applyStartupStarfieldVisual();
+// #5 BUG5 滚放跨重启武装: fx.roller.enabled 从 localStorage 恢复后, 显式排一次 tick,
+//   否则首次启用后重启全屏歌词 → roller.nextTickAt=0 → 第一帧被当作"已到点"猛切,
+//   观感等同于"自动退出"。这里改为按用户设定的间隔排一次, 且把 suppressUntil 清零。
+armRollerOnStartup();
+// #5 修复 (2026-10-24): 恢复重启前导入的图片 (独立 localStorage key 持久化)。
+//   "不清除" = 重启后导入图继续铺在粒子上; 想清除 → 面板"清理导入图片"按钮。
+//   applyRollerImageForSlot 登记的 user-import guard 会拦截后续 apiSetTrack 的封面覆盖;
+//   滚放开启时铺当前 seqIdx 槽 (与 armRollerOnStartup 的 seqIdx 对齐), 关闭时铺第 0 张。
+rollerImages = loadSavedRollerImages();
+if (rollerImages.length) {
+  var _restoreSlot = (fx && fx.roller && fx.roller.enabled && roller.seqIdx >= 0) ? roller.seqIdx : 0;
+  applyRollerImageForSlot(_restoreSlot);
+  console.log('[roller] startup restored imported images n=' + rollerImages.length + ' slot=' + _restoreSlot);
+}
+// #5 BUG5 QML 同步: 引擎初始化后必须显式 emitFxChange 一次, 否则 QML 的 fxState
+//   一直是空 {}, rollerEnabled() 永远返回 false, 面板开关显示"关"—— 用户看到"重启后自动退出"。
+//   正常路径 setPreset 会 refreshPresetGrid→emitFxChange, 但 preset 已经是 5 时会走
+//   syncFxUniforms 分支直接跳过 emit, 所以要在这里兜底。
+emitFxChange();
 __on(window, 'resize', function(){ if (!__disposed) scheduleMainRendererViewportRefresh('resize'); });
 scheduleMainRendererViewportRefresh('mount');
 
@@ -12494,6 +13043,16 @@ function apiDebug() {
     dbg.audioStreamAlive = !!(__audioStream && __audioStream.active);
   } catch (e) {}
   try { dbg.deepSleep = isDeepBackgroundMode(); } catch (e) {}
+  // #5 滚放诊断: suppressUntil / nextTickAt / seqIdx / 序列
+  try {
+    dbg.rollerSuppressed = rollerIsSuppressed();
+    dbg.rollerSuppressUntil = roller.suppressUntil;
+    dbg.rollerNextTickAt = roller.nextTickAt;
+    dbg.rollerSeqIdx = roller.seqIdx;
+    dbg.rollerSeqLen = fx.roller.seq.length;
+    dbg.rollerImagesLen = rollerImages.length;
+    dbg.rollerNow = performance.now();
+  } catch (e) { dbg.rollerErr = e.message; }
   return dbg;
 }
 try { window.__mineradioDebug = apiDebug; } catch (e) {}
@@ -12555,6 +13114,62 @@ return {
   emitProgressDragParticles: emitProgressDragParticles,
   markRenderInteraction: function(reason){ if (!__disposed) markRenderInteraction(reason || 'host'); },
   syncViewport: function(){ if (!__disposed) scheduleMainRendererViewportRefresh('host'); },
+  setRollerConfig: apiSetRollerConfig,
+  // #5 P2 图片导入: data URL → 当作封面纹理解析到粒子 (预设0封面/唱片中心取样)
+  // #5 BUG-FIX (2026-10-24): 单张导入也要进 rollerImages, 否则滚放切特效时
+  //   applyRollerImageForSlot 全 skip (imgLen=0), 粒子纹理永不更新.
+  //   同时清 suppressUntil + 重置 nextTickAt, 与批量路径行为一致.
+  importParticleImage: function(dataUrl){
+    if (__disposed || !dataUrl) return;
+    try {
+      rollerImages = [String(dataUrl)];
+      if (fx && fx.roller && fx.roller.enabled) {
+        applyRollerImageForSlot(roller.seqIdx >= 0 ? roller.seqIdx : 0);
+        roller.suppressUntil = 0;
+        roller.nextTickAt = performance.now();
+      } else {
+        applyCoverDataUrl(String(dataUrl), { coverSourceKind: 'user-import', keepBackground: true });
+      }
+      persistRollerImages();  // #5 修复 (2026-10-24): 单张导入也持久化, 重启不再失效
+      showToast('图片已导入 → 粒子');
+    } catch (e) {}
+    emitFxChange();
+  },
+  // #5 BUG4 多图批量导入: 每个滚放特效槽配一张图, 槽位循环复用; 等全部图解码完才允许滚放前进
+  importParticleImages: apiImportParticleImages,
+  // #5 修复 (2026-10-24): 面板"清理导入图片"按钮 → 清持久化 + 恢复歌曲封面
+  clearImportedImages: apiClearImportedImages,
   destroy: apiDestroy,
+  // 自检/诊断探针: 导出主粒子层 uniform 原始值 (host.js fx probe 用)
+  probeUniforms: function() {
+    var u = uniforms || {};
+    var g = {};
+    var keys = ['uPreset','uMorphFrom','uMorphT','uPresetTarget','uAlpha','uHasCover',
+                'uLoading','uParticleDim','uScatter','uBurstAmt','uIntensity','uPointScale'];
+    for (var i = 0; i < keys.length; i++) {
+      var v = u[keys[i]];
+      g[keys[i]] = (v && typeof v.value === 'number') ? v.value : String(v && v.value && v.value.x !== undefined ? v.value.x + ',' + v.value.y + ',' + v.value.z : v ? v.value : null);
+    }
+    g.fxPreset = fx && fx.preset;
+    g.dbgPreset = (typeof dbg !== 'undefined' && dbg && typeof dbg.preset === 'number') ? dbg.preset : null;
+    g.dbgMorphT = (typeof dbg !== 'undefined' && dbg && typeof dbg.morphT === 'number') ? dbg.morphT : null;
+    g.currentIdx = currentIdx;
+    g.playing = playing;
+    // 渲染器/材质状态: 定位"预设切换画面几乎未变"根因
+    // 注: material.program 在 Three.js r128 不是有效属性, 改用 renderer.info.programs
+    try {
+      g.mainProg = (renderer && renderer.info && renderer.info.programs && renderer.info.programs.length > 0) ? 'ok('+renderer.info.programs.length+' prog)' : 'none';
+      g.bloomProg = g.mainProg; // 共用 renderer.info.programs
+      g.progCacheKey = material && material._programCacheKey ? 'set' : 'empty';
+      g.renderInfo = renderer && renderer.info && renderer.info.render
+        ? (renderer.info.render.calls + 'c/' + renderer.info.render.triangles + 't/' + renderer.info.render.points + 'p')
+        : 'n/a';
+      g.pointsVis = particles ? (particles.visible + '/frustumCulled=' + particles.frustumCulled) : 'n/a';
+      g.geoCount = geo && geo.attributes && geo.attributes.position ? geo.attributes.position.count : 'n/a';
+      g.webgl2 = renderer && renderer.capabilities ? renderer.capabilities.isWebGL2 : 'n/a';
+      g.rendererVer = renderer && renderer.renderLists ? 'three-' + (typeof THREE !== 'undefined' && THREE.REVISION) : 'n/a';
+    } catch (e4) { g.renderDiag = 'fail:' + String(e4); }
+    return g;
+  },
 };
 }

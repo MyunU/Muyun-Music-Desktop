@@ -882,7 +882,7 @@ SearchResult WySource::getToplist(const QString &id, int page, int limit)
     const int maxAttempts = want <= 10 ? 2 : 5;
     static const int kDelaysMs[5] = {0, 400, 700, 1100, 1600};
     // 退出中就不再重试（也不 sleep）：否则 killer 只能杀掉"当前这一个"请求，
-    // 循环紧接着又发下一个，退出收尾会被重试链拖到几分钟（见 HANDOFF --test-ui）。
+    // 循环紧接着又发下一个，退出收尾会被重试链拖到几分钟。
     for (int attempt = 0; attempt < maxAttempts && !HttpClient::shuttingDown(); ++attempt) {
         if (attempt > 0) {
             const int jitter = QRandomGenerator::global()->bounded(201) - 100;

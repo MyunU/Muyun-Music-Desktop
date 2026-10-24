@@ -848,6 +848,7 @@ Rectangle {
 
     // 右键：独立层放最顶层、只接受右键（层级免疫，左键不受影响）
     MouseArea {
+        hoverEnabled: true
         anchors.fill: parent
         acceptedButtons: Qt.RightButton
         cursorShape: Qt.ArrowCursor

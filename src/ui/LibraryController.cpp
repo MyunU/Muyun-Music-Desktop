@@ -385,7 +385,7 @@ QVariantList LibraryController::playlistSongs(const QString &playlistId) const
 
 namespace {
 /// 平台串归一：广场/推荐给的是 platformId("netease")，home.platform 给的是音源码("wy")。
-/// 收藏键必须统一，否则同一张歌单会被认成两张（HANDOFF 点名的"两套串"坑）。
+/// 收藏键必须统一，否则同一张歌单会被认成两张（"两套串"是著名坑）。
 Platform platformLoose(const QString &s)
 {
     Platform p = platformFromId(s);

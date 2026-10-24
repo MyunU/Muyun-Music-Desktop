@@ -29,4 +29,4 @@ Copy-Item "$sdk\package\dist\gsap.min.js" "$web\vendor\gsap.min.js" -Force
 Remove-Item "$sdk\package","$sdk\gsap.tgz" -Recurse -Force
 
 Write-Host "OK: WebView2 SDK + three + gsap 已就位。" -ForegroundColor Green
-Write-Host "music-tempo.min.js 与 mineradio/engine.js+css+资产 从 Sollin 参考工程拷贝（见 HANDOFF 第八节）。" -ForegroundColor Yellow
+Write-Host "music-tempo.min.js 与 mineradio/engine.js+css+资产 从 Sollin 参考工程拷贝（见项目文档）。" -ForegroundColor Yellow

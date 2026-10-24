@@ -97,6 +97,38 @@ Rectangle {
             onPositionChanged: {
                 if (progressTrack.dragging)
                     player.seekRatio(Math.max(0, Math.min(1, mouseX / progressTrack.width)))
+                // #31-③：hover 时间气泡跟随鼠标
+                var r = Math.max(0, Math.min(1, mouseX / progressTrack.width))
+                seekTip.ratio = r
+                seekTip.x = Math.max(0, Math.min(progressTrack.width - seekTip.width,
+                                             mouseX - seekTip.width / 2))
+            }
+            onEntered: {
+                var r0 = Math.max(0, Math.min(1, mouseX / progressTrack.width))
+                seekTip.ratio = r0
+                seekTip.x = Math.max(0, Math.min(progressTrack.width - seekTip.width,
+                                                 mouseX - seekTip.width / 2))
+            }
+        }
+
+        // #31-③：进度 hover 时间气泡（对齐歌词页 classicTip 样式）
+        Rectangle {
+            id: seekTip
+            property real ratio: 0
+            z: 999
+            anchors.bottom: progressTrack.top
+            anchors.bottomMargin: 8
+            width: seekTipText.width + 8
+            height: seekTipText.height + 6
+            radius: 4
+            color: "#cc333333"
+            visible: hoverArea.containsMouse && player.duration > 0
+            Text {
+                id: seekTipText
+                anchors.centerIn: parent
+                text: player.formatTime(seekTip.ratio * player.duration)
+                color: "white"
+                font.pixelSize: 10
             }
         }
     }
@@ -325,12 +357,17 @@ Rectangle {
             Item { Layout.fillWidth: true }
 
             Text {
-                text: player.duration > 0
-                      ? (player.formatTime(player.position) + " / " + player.formatTime(player.duration))
-                      : "--:-- / --:--"
+                // #31-④：时间显示随宽度收缩——宽窗完整 "位置 / 总长"，中窗只显示位置，窄窗隐藏
+                text: bar.width > 820
+                      ? (player.duration > 0
+                         ? (player.formatTime(player.position) + " / " + player.formatTime(player.duration))
+                         : "--:-- / --:--")
+                      : (bar.width > 620
+                         ? (player.duration > 0 ? player.formatTime(player.position) : "--:--")
+                         : "")
                 color: theme.subTextColor
                 font.pixelSize: 10
-                visible: bar.width > 820
+                visible: bar.width > 620
             }
 
             RowLayout {
@@ -341,36 +378,18 @@ Rectangle {
                     tip: "静音"
                     onClicked: player.muted = !player.muted
                 }
-                Slider {
+                MuyunSlider {
                     id: volSlider
                     Layout.fillWidth: true
                     // #13：音量条加长（原来 84px 太短不好拖）；腾出的宽度主要给音量，
                     // 其余给歌曲信息（歌名/歌手宽度也在左侧同步加宽）
                     Layout.maximumWidth: 150
                     Layout.minimumWidth: 60
+                    fillColor: theme.textColor
+                    handleSize: 11
                     from: 0; to: 1
                     value: player.volume
                     onMoved: player.volume = value
-                    background: Rectangle {
-                        x: volSlider.leftPadding
-                        y: volSlider.topPadding + volSlider.availableHeight / 2 - height / 2
-                        width: volSlider.availableWidth
-                        height: 3
-                        radius: 2
-                        color: theme.borderColor
-                        Rectangle {
-                            width: volSlider.visualPosition * parent.width
-                            height: parent.height
-                            radius: 2
-                            color: theme.textColor
-                        }
-                    }
-                    handle: Rectangle {
-                        x: volSlider.leftPadding + volSlider.visualPosition * (volSlider.availableWidth - width)
-                        y: volSlider.topPadding + volSlider.availableHeight / 2 - height / 2
-                        width: 11; height: 11; radius: 6
-                        color: "white"
-                    }
                 }
             }
 

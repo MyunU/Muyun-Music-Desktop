@@ -41,10 +41,12 @@ signals:
 private:
     void ensureView();
     void positionNearWindow();
+    void doShowWindow();   // 真正执行 show/raise/position（statusChanged=Ready 时或 view 已就绪时调用）
 
     StageBridge *m_stage = nullptr;
     QQmlEngine *m_engine = nullptr;
     QQuickView *m_view = nullptr;
+    bool m_pendingShow = false;   // show() 被调用但 view 还没 Ready 时挂起，等 statusChanged 完成再显示
 };
 
 } // namespace Muyun

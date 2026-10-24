@@ -144,7 +144,7 @@ HttpResponse HttpClient::execOp(QNetworkAccessManager *nam, const QString &url,
     timer.start(opt.timeoutMs);
     // 退出收尾：应用在退出时置 shuttingDown → 在途请求最多再等 200ms 就被中止。
     // 否则 main 退出处的 QThreadPool::waitForDone() 会干等本请求的网络超时
-    // （播放中托盘退出"未响应"的根因，见 HANDOFF 新问题②）。
+    // （播放中托盘退出"未响应"的根因）。
     QTimer killer;
     killer.setInterval(200);
     QObject::connect(&killer, &QTimer::timeout, &loop, [&]() {

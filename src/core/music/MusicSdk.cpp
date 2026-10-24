@@ -422,7 +422,7 @@ SongLyric MusicSdk::resolveLyric(const Song &song, const ResolutionToken *token)
 {
     const quint64 snap = token ? token->snapshot() : 0;
     // LX 脚本优先：歌曲带 lx 元信息时先问脚本要歌词（local 源 lyric action，
-    // HANDOFF 待办 #9 已接）。脚本没给/给的不是合法歌词就走内置五源。
+    // 已接本地歌词接口）。脚本没给/给的不是合法歌词就走内置五源。
     {
         QReadLocker rl(&m_lxEngineLock);   // 护住 m_lxEngine，防异步切音源换实例
         if (m_lxEngine && m_lxEngine->inited() && song.hasLx) {

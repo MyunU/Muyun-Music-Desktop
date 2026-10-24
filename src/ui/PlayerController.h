@@ -300,6 +300,16 @@ private:
     /// 资源只在"正在播放这首歌"时被占用。用户明确要求"不要加超时强退"（负责），所以走
     /// 主动 bump 而不是看门狗强杀。
     ResolutionTokenPtr m_resolutionToken;
+    /// 歌词专用取消令牌：**只在新一轮歌词请求发起时 bump**（取代旧请求），
+    /// 不受 pause()/stop()/切后台（cancelActiveResolution）影响。
+    /// 旧实现让歌词 worker 共用取源令牌 → 播放中途按暂停/切窗口就把在途歌词请求打断，
+    /// 返回空歌词、UI 显示「点击加载歌词」，用户被迫手动重载（2026-10-24 反馈）。
+    ResolutionTokenPtr m_lyricToken;
+    /// 歌词请求代际：每次 loadLyric() 递增，旧 watcher 回调发现代际不匹配直接丢弃。
+    int m_lyricGeneration = 0;
+    /// 空歌词自动重试计数（每首歌最多 2 次），配合 m_lyricRetryKey 在切歌时清零。
+    int m_lyricRetry = 0;
+    QString m_lyricRetryKey;
     /// 立即作废当前取源令牌：切歌/停止/pause/切后台/失败推进时调用，让旧 worker 早退。
     /// 幂等：没令牌也没关系。
     void cancelActiveResolution();

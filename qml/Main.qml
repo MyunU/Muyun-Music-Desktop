@@ -27,6 +27,8 @@ Window {
     property string listTitle: ""
     property string playContextId: ""   // 当前播放上下文（歌单 id / favorites / local / recent）
     property string listBackTarget: "home"   // 点"返回"时回到哪一页（首页 / 歌单广场）
+    // #31-②：侧栏折叠（200px ↔ 64px 图标模式）
+    property bool sidebarCollapsed: false
 
     // 当前打开的「在线歌单」（广场/推荐点进来的那张），收藏歌单按钮要用它做键；
     // 切到别的页面/自建歌单时必须清空，否则收藏按钮会挂到不相干的列表上。
@@ -103,7 +105,7 @@ Window {
             // 摘掉 WS_MAXIMIZE 位；位还在时 Windows 会直接拒绝改窗口大小（stderr: "Unable to set
             // geometry ... Resulting geometry: <原样>"），几何赋值就被吞掉 → 点「还原」没反应、
             // 窗口钉在工作区大小。v1.1.0 出厂时顺序正好反了（先赋几何 L76、后清标志 L83），
-            // --test-maximize 稳定 3/3 复现，2026-10-04 修复（见 HANDOFF 待办 #23）。
+            // --test-maximize 稳定 3/3 复现，2026-10-04 修复。
             maximized = false
             if (_saved) { root.x = _rx; root.y = _ry; root.width = _rw; root.height = _rh }
             else {      // 没存到还原目标（启动即最大化等）→ 回默认尺寸，别让按钮空转
@@ -210,23 +212,26 @@ Window {
         // ------------------ 侧边栏 ------------------
         Rectangle {
             Layout.fillHeight: true
-            Layout.preferredWidth: 200
+            Layout.preferredWidth: root.sidebarCollapsed ? 64 : 200
+            // #31-②：折叠/展开平滑过渡
+            Behavior on Layout.preferredWidth { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
             color: theme.panelColor
 
             ColumnLayout {
                 anchors.fill: parent
-                anchors.margins: 12
+                anchors.margins: root.sidebarCollapsed ? 6 : 12
                 spacing: 2
 
-                NavItem { icon: "home"; label: "主页";     active: root.currentPage === "home";           onClicked: goPage("home") }
-                NavItem { icon: "music"; label: "本地音乐"; active: root.currentPage === "local";          onClicked: goPage("local") }
+                NavItem { icon: "home"; label: "主页";     active: root.currentPage === "home";           onClicked: goPage("home"); collapsed: root.sidebarCollapsed }
+                NavItem { icon: "music"; label: "本地音乐"; active: root.currentPage === "local";          onClicked: goPage("local"); collapsed: root.sidebarCollapsed }
 
-                SectionLabel { text: "收藏" }
-                NavItem { icon: "heart"; label: "收藏"; count: library.favorites.length; active: root.currentPage === "favorites"; onClicked: goPage("favorites") }
-                NavItem { icon: "clock"; label: "最近播放"; active: root.currentPage === "recent";         onClicked: goPage("recent") }
+                SectionLabel { text: "收藏"; visible: !root.sidebarCollapsed }
+                NavItem { icon: "heart"; label: "收藏"; count: library.favorites.length; active: root.currentPage === "favorites"; onClicked: goPage("favorites"); collapsed: root.sidebarCollapsed }
+                NavItem { icon: "clock"; label: "最近播放"; active: root.currentPage === "recent";         onClicked: goPage("recent"); collapsed: root.sidebarCollapsed }
 
                 SectionLabel {
                     text: "歌单"
+                    visible: !root.sidebarCollapsed
                     onAddClicked: newPlaylistDialog.open()
                 }
                 Repeater {
@@ -237,6 +242,7 @@ Window {
                         label: modelData.name
                         active: root.currentPage === "playlistDetail" && root.playContextId === modelData.id
                         deletable: true
+                        collapsed: root.sidebarCollapsed
                         onClicked: goPlaylist(modelData.id, modelData.name)
                         onDeleteRequested: {
                             deletePlaylistDialog.pendingId = modelData.id
@@ -247,6 +253,14 @@ Window {
                 }
 
                 Item { Layout.fillHeight: true }
+
+                // #31-②：折叠/展开按钮（固定底部）
+                NavItem {
+                    icon: root.sidebarCollapsed ? "chevron-right" : "chevron-left"
+                    label: root.sidebarCollapsed ? "展开侧栏" : "收起侧栏"
+                    collapsed: root.sidebarCollapsed
+                    onClicked: root.sidebarCollapsed = !root.sidebarCollapsed
+                }
             }
         }
 
@@ -328,16 +342,34 @@ Window {
                         Layout.preferredWidth: 300
                         Layout.preferredHeight: 32
                         radius: 16
-                        color: theme.bgColor
-                        border.color: searchInput.activeFocus ? theme.accentColor : theme.borderColor
+                        // #31-①：hover 描边提亮、聚焦时浅 accent 底 + accent 描边
+                        color: searchInput.activeFocus
+                               ? Qt.rgba(theme.accentColor.r, theme.accentColor.g,
+                                         theme.accentColor.b, 0.06)
+                               : theme.bgColor
+                        border.color: searchInput.activeFocus ? theme.accentColor
+                                     : (searchHover.containsMouse ? theme.subTextColor : theme.borderColor)
                         border.width: 1
+
+                        // hover 检测（声明在 RowLayout 之前 → 处于下层，不拦截 TextInput 点击）
+                        MouseArea {
+                            id: searchHover
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.IBeamCursor
+                        }
 
                         RowLayout {
                             anchors.fill: parent
                             anchors.leftMargin: 14
                             anchors.rightMargin: 12
                             spacing: 8
-                            Icon { name: "search"; iconSize: 15; iconColor: theme.subTextColor }
+                            Icon {
+                                name: "search"
+                                iconSize: 15
+                                iconColor: (searchInput.activeFocus || searchInput.text.length > 0)
+                                           ? theme.accentColor : theme.subTextColor
+                            }
                             TextInput {
                                 id: searchInput
                                 objectName: "searchInputObj"      // 自检用（--test-ime：文本框焦点基线）
@@ -364,6 +396,32 @@ Window {
                                              && searchInput.preeditText.length === 0
                                 }
                             }
+                            // #31-①：清除按钮（有输入时显示，只清输入与联想，不清搜索结果）
+                            Rectangle {
+                                id: searchClear
+                                visible: searchInput.text.length > 0
+                                width: 16
+                                height: 16
+                                radius: 8
+                                color: searchClearMa.containsMouse ? theme.hoverColor : "transparent"
+                                Icon {
+                                    anchors.centerIn: parent
+                                    name: "window-close"
+                                    iconSize: 9
+                                    iconColor: theme.subTextColor
+                                }
+                                MouseArea {
+                                    id: searchClearMa
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        searchInput.text = ""
+                                        searchInput.focus = true
+                                        searcher.suggest("")
+                                    }
+                                }
+                            }
                             // 防抖：停止输入 300ms 后请求联想
                             Timer {
                                 id: suggestTimer
@@ -373,33 +431,36 @@ Window {
                                         searcher.suggest(searchInput.text)
                                 }
                             }
-                            Icon {
-                                name: "window-close"
-                                iconSize: 13
-                                iconColor: theme.subTextColor
-                                visible: searchInput.text.length > 0
-                                MouseArea {
-                                    anchors.fill: parent
-                                    onClicked: { searchInput.text = ""; searcher.suggest("") }
-                                }
-                            }
                         }
 
                         // 联想 / 热搜下拉（搜索框子元素，天然贴其正下方；父项不裁剪可悬浮）
                         // 热搜模式左右分栏：热搜歌曲 | 热搜歌手；联想模式单栏
+                        // v1.3.0 UI 改良：圆角 14 + 顶部高亮线 + 间距优化 + 序号徽章 + hover 柔和
                         Rectangle {
                             id: searchDrop
                             visible: searchInput.activeFocus
-                            width: searchInput.text.length > 0 ? 300 : 520
-                            height: dropContent.height + 12
+                            width: searchInput.text.length > 0 ? 320 : 540
+                            height: dropContent.height + 16
                             anchors.top: parent.bottom
-                            anchors.topMargin: 6
+                            anchors.topMargin: 8
                             anchors.left: parent.left
-                            radius: 10
+                            radius: 14
                             color: theme.cardColor
                             border.color: theme.borderColor
                             border.width: 1
                             z: 999
+                            // 顶部高亮线（accent 色，2px，给下拉"轻盈感"）
+                            Rectangle {
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.leftMargin: 14
+                                anchors.rightMargin: 14
+                                anchors.top: parent.top
+                                height: 2
+                                radius: 1
+                                color: theme.accentColor
+                                opacity: 0.6
+                            }
 
                             ColumnLayout {
                                 id: dropContent
@@ -414,9 +475,10 @@ Window {
                                     text: "搜索联想"
                                     color: theme.subTextColor
                                     font.pixelSize: 11
-                                    Layout.leftMargin: 8
-                                    Layout.topMargin: 4
-                                    Layout.bottomMargin: 4
+                                    font.letterSpacing: 1.5
+                                    Layout.leftMargin: 12
+                                    Layout.topMargin: 8
+                                    Layout.bottomMargin: 6
                                 }
                                 Repeater {
                                     model: searchInput.text.length > 0 ? searcher.suggestions : []
@@ -424,24 +486,36 @@ Window {
                                         id: sugItem
                                         required property var modelData
                                         Layout.fillWidth: true
-                                        height: 34
+                                        height: 38
                                         Rectangle {
                                             anchors.fill: parent
-                                            anchors.margins: 2
-                                            radius: 5
-                                            color: sugHover.containsMouse ? theme.hoverColor : "transparent"
+                                            anchors.leftMargin: 4
+                                            anchors.rightMargin: 4
+                                            anchors.topMargin: 3
+                                            anchors.bottomMargin: 3
+                                            radius: 8
+                                            color: sugHover.containsMouse ? "#14ffffff" : "transparent"
+                                            Behavior on color { ColorAnimation { duration: 120 } }
                                         }
                                         RowLayout {
                                             anchors.fill: parent
-                                            anchors.leftMargin: 10
-                                            anchors.rightMargin: 10
-                                            Icon { name: "search"; iconSize: 12; iconColor: theme.subTextColor }
+                                            anchors.leftMargin: 14
+                                            anchors.rightMargin: 14
+                                            spacing: 10
+                                            Icon {
+                                                name: "search"
+                                                iconSize: 14
+                                                iconColor: sugHover.containsMouse ? theme.accentColor : theme.subTextColor
+                                                Behavior on iconColor { ColorAnimation { duration: 120 } }
+                                            }
                                             Text {
                                                 Layout.fillWidth: true
                                                 text: modelData
-                                                color: theme.textColor
-                                                font.pixelSize: 12
+                                                color: sugHover.containsMouse ? theme.textColor : "#e0e4eb"
+                                                font.pixelSize: 13
+                                                font.weight: sugHover.containsMouse ? Font.Medium : Font.Normal
                                                 elide: Text.ElideRight
+                                                Behavior on color { ColorAnimation { duration: 120 } }
                                             }
                                         }
                                         MouseArea {
@@ -461,7 +535,10 @@ Window {
                                     text: "无匹配联想"
                                     color: theme.subTextColor
                                     font.pixelSize: 12
-                                    Layout.margins: 10
+                                    Layout.leftMargin: 14
+                                    Layout.topMargin: 10
+                                    Layout.bottomMargin: 10
+                                    font.italic: true
                                 }
 
                                 // ---------- 历史搜索（下拉框内，热搜上方，自动换行） ----------
@@ -483,6 +560,7 @@ Window {
                                         color: theme.subTextColor
                                         font.pixelSize: 11
                                         MouseArea {
+                                            hoverEnabled: true
                                             anchors.fill: parent
                                             cursorShape: Qt.PointingHandCursor
                                             onClicked: searcher.clearHistory()
@@ -520,6 +598,7 @@ Window {
                                                 maximumLineCount: 1
                                             }
                                             MouseArea {
+                                                hoverEnabled: true
                                                 anchors.fill: parent
                                                 cursorShape: Qt.PointingHandCursor
                                                 onClicked: {
@@ -535,22 +614,36 @@ Window {
                                 RowLayout {
                                     visible: searchInput.text.length === 0
                                     Layout.fillWidth: true
-                                    Layout.topMargin: 6
-                                    Layout.bottomMargin: 4
-                                    Layout.leftMargin: 8
-                                    Layout.rightMargin: 8
+                                    Layout.topMargin: 8
+                                    Layout.bottomMargin: 6
+                                    Layout.leftMargin: 12
+                                    Layout.rightMargin: 12
                                     spacing: 0
 
-                                    Text {
-                                        text: "热搜歌曲"
-                                        color: theme.subTextColor
-                                        font.pixelSize: 11
+                                    RowLayout {
+                                        spacing: 6
+                                        Icon { name: "search"; iconSize: 12; iconColor: theme.accentColor }
+                                        Text {
+                                            text: "热搜歌曲"
+                                            color: theme.accentColor
+                                            font.pixelSize: 12
+                                            font.bold: true
+                                            font.letterSpacing: 1
+                                        }
+                                        Rectangle { Layout.fillWidth: true; height: 1; color: theme.borderColor; opacity: 0.4 }
                                     }
                                     Item { Layout.fillWidth: true }
-                                    Text {
-                                        text: "热搜歌手"
-                                        color: theme.subTextColor
-                                        font.pixelSize: 11
+                                    RowLayout {
+                                        spacing: 6
+                                        Icon { name: "mic"; iconSize: 12; iconColor: theme.accentColor }
+                                        Text {
+                                            text: "热搜歌手"
+                                            color: theme.accentColor
+                                            font.pixelSize: 12
+                                            font.bold: true
+                                            font.letterSpacing: 1
+                                        }
+                                        Rectangle { Layout.fillWidth: true; height: 1; color: theme.borderColor; opacity: 0.4 }
                                     }
                                 }
                                 RowLayout {
@@ -574,33 +667,46 @@ Window {
                                                 height: 40
                                                 Rectangle {
                                                     anchors.fill: parent
-                                                    anchors.margins: 2
-                                                    radius: 5
-                                                    color: hotSongHover.containsMouse ? theme.hoverColor : "transparent"
+                                                    anchors.leftMargin: 4
+                                                    anchors.rightMargin: 4
+                                                    anchors.topMargin: 3
+                                                    anchors.bottomMargin: 3
+                                                    radius: 8
+                                                    color: hotSongHover.containsMouse ? "#14ffffff" : "transparent"
+                                                    Behavior on color { ColorAnimation { duration: 120 } }
                                                 }
                                                 RowLayout {
                                                     anchors.fill: parent
-                                                    anchors.leftMargin: 8
-                                                    anchors.rightMargin: 8
-                                                    spacing: 8
-                                                    Text {
-                                                        text: String(hotSongItem.index + 1)
-                                                        width: 16
-                                                        horizontalAlignment: Text.AlignHCenter
-                                                        color: hotSongItem.index < 3 ? theme.accentColor : theme.subTextColor
-                                                        font.pixelSize: 12
-                                                        font.bold: hotSongItem.index < 3
+                                                    anchors.leftMargin: 12
+                                                    anchors.rightMargin: 10
+                                                    spacing: 10
+                                                    // 序号徽章（前3名高亮）
+                                                    Rectangle {
+                                                        width: 22
+                                                        height: 22
+                                                        radius: 11
+                                                        color: hotSongItem.index < 3 ? theme.accentColor : "#1a2230"
+                                                        opacity: hotSongItem.index >= 3 ? 0.55 : 1
+                                                        Text {
+                                                            anchors.centerIn: parent
+                                                            text: String(hotSongItem.index + 1)
+                                                            color: hotSongItem.index < 3 ? "#ffffff" : theme.subTextColor
+                                                            font.pixelSize: 10
+                                                            font.bold: true
+                                                        }
                                                     }
                                                     ColumnLayout {
                                                         Layout.fillWidth: true
-                                                        spacing: 0
+                                                        spacing: 1
                                                         Text {
                                                             Layout.fillWidth: true
                                                             text: hotSongItem.modelData.name
                                                                   || hotSongItem.modelData.word || ""
-                                                            color: theme.textColor
+                                                            color: hotSongHover.containsMouse ? theme.textColor : "#e0e4eb"
                                                             font.pixelSize: 12
+                                                            font.weight: hotSongHover.containsMouse ? Font.Medium : Font.Normal
                                                             elide: Text.ElideRight
+                                                            Behavior on color { ColorAnimation { duration: 120 } }
                                                         }
                                                         Text {
                                                             Layout.fillWidth: true
@@ -660,24 +766,31 @@ Window {
                                                 height: 40
                                                 Rectangle {
                                                     anchors.fill: parent
-                                                    anchors.margins: 2
-                                                    radius: 5
-                                                    color: hotArtistHover.containsMouse ? theme.hoverColor : "transparent"
+                                                    anchors.leftMargin: 4
+                                                    anchors.rightMargin: 4
+                                                    anchors.topMargin: 3
+                                                    anchors.bottomMargin: 3
+                                                    radius: 8
+                                                    color: hotArtistHover.containsMouse ? "#14ffffff" : "transparent"
+                                                    Behavior on color { ColorAnimation { duration: 120 } }
                                                 }
                                                 RowLayout {
                                                     anchors.fill: parent
-                                                    anchors.leftMargin: 8
-                                                    anchors.rightMargin: 8
-                                                    spacing: 8
-                                                    // 头像（圆形）
+                                                    anchors.leftMargin: 12
+                                                    anchors.rightMargin: 10
+                                                    spacing: 10
+                                                    // 头像（圆形，前3名高亮边框）
                                                     Rectangle {
-                                                        Layout.preferredWidth: 26
-                                                        Layout.preferredHeight: 26
-                                                        radius: 13
+                                                        Layout.preferredWidth: 28
+                                                        Layout.preferredHeight: 28
+                                                        radius: 14
                                                         clip: true
                                                         color: theme.cardColor
+                                                        border.width: hotArtistItem.index < 3 ? 1 : 0
+                                                        border.color: hotArtistItem.index < 3 ? theme.accentColor : "transparent"
                                                         Image {
                                                             anchors.fill: parent
+                                                            anchors.margins: 1
                                                             source: hotArtistItem.modelData.avatar || ""
                                                             sourceSize: Qt.size(80, 80)
                                                             fillMode: Image.PreserveAspectCrop
@@ -695,9 +808,11 @@ Window {
                                                     Text {
                                                         Layout.fillWidth: true
                                                         text: hotArtistItem.modelData.name || ""
-                                                        color: theme.textColor
+                                                        color: hotArtistHover.containsMouse ? theme.textColor : "#e0e4eb"
                                                         font.pixelSize: 12
+                                                        font.weight: hotArtistHover.containsMouse ? Font.Medium : Font.Normal
                                                         elide: Text.ElideRight
+                                                        Behavior on color { ColorAnimation { duration: 120 } }
                                                     }
                                                 }
                                                 MouseArea {
@@ -745,6 +860,7 @@ Window {
                         visible: player.currentSong.name.length > 0
                         clip: true
                         MouseArea {
+                            hoverEnabled: true
                             anchors.fill: parent
                             cursorShape: Qt.PointingHandCursor
                             onClicked: player.reloadLyric()
@@ -1020,7 +1136,7 @@ Window {
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
         background: Rectangle {
             color: theme.panelColor
-            radius: 12
+            radius: 14
             border.color: theme.borderColor
         }
         contentItem: ColumnLayout {
@@ -1153,7 +1269,7 @@ Window {
         closePolicy: Popup.NoAutoClose
         background: Rectangle {
             color: theme.cardColor
-            radius: 12
+            radius: 14
             border.color: theme.borderColor
         }
         contentItem: ColumnLayout {
@@ -1233,7 +1349,7 @@ Window {
         modal: true
         dim: true
         // #19：必须 focus:true——否则弹层不上焦点，CloseOnEscape 永不触发，
-        // 用户按 Esc 想关确认框却"没反应"（HANDOFF #19 候选病因③）
+        // 用户按 Esc 想关确认框却"没反应"（焦点被别处吞掉的典型症状）
         focus: true
         width: 380
         padding: 20
@@ -1242,7 +1358,7 @@ Window {
         closePolicy: Popup.CloseOnEscape
         background: Rectangle {
             color: theme.cardColor
-            radius: 12
+            radius: 14
             border.color: theme.borderColor
         }
         contentItem: ColumnLayout {
@@ -1276,6 +1392,7 @@ Window {
                         visible: exitDialog.rememberChecked
                     }
                     MouseArea {
+                        hoverEnabled: true
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
                         onClicked: exitDialog.rememberChecked = !exitDialog.rememberChecked
@@ -2599,7 +2716,7 @@ Window {
         enabled: !root.escClaimed
         onActivated: root.runEscLadder()
     }
-    // Esc 系统热键的接管窗口期（HANDOFF #19 修"有时 Esc 关不掉主窗口"）：
+    // Esc 系统热键的接管窗口期（"有时 Esc 关不掉主窗口"的根因）：
     // 旧版只覆盖"播放页/舞台/全屏/最大化"——普通窗口态 + 焦点被自家另一个窗
     // （桌面歌词独立窗、舞台壳等）叼走时，QML Shortcut 收不到键、系统热键又没注册，
     // 两头都断 → Esc 没反应（最符合用户"有时"的观察）。

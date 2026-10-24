@@ -35,7 +35,7 @@ static const QString kKeyIgnored   = QStringLiteral("updateIgnoredVersion");
 static const QString kKeyLastCheck = QStringLiteral("updateLastCheckAt");
 static const QString kKeyAuto      = QStringLiteral("updateAutoCheck");
 
-// 2026-10-04 用户拍板（HANDOFF 待办 #17）：节流从"每天最多一次"改成"每次进程启动查一次"。
+// 节流从"每天最多一次"改成"每次进程启动查一次"（2026-10-04 定）。
 // kAutoIntervalMs / kKeyLastCheck 的时间戳不再参与节流判定（写入保留，供诊断）。
 
 static QString rawFeedUrl()

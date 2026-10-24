@@ -76,20 +76,31 @@ Popup {
                         Layout.fillWidth: true
                         Layout.preferredHeight: 34
                         radius: 8
+                        Behavior on color { ColorAnimation { duration: 140 } }
                         color: panel.section === modelData.id ? theme.activeColor
                                                               : (secHover.containsMouse ? theme.hoverColor : "transparent")
+                        // #31-⑧ tab 化：选中态左侧 accent 指示条
+                        Rectangle {
+                            visible: panel.section === modelData.id
+                            anchors.left: parent.left
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 3; height: 18; radius: 2
+                            color: theme.accentColor
+                        }
                         Text {
                             anchors.left: parent.left
-                            anchors.leftMargin: 12
+                            anchors.leftMargin: 14
                             anchors.verticalCenter: parent.verticalCenter
                             text: modelData.name
                             color: panel.section === modelData.id ? theme.accentColor : theme.textColor
                             font.pixelSize: 13
+                            font.bold: panel.section === modelData.id
                         }
                         MouseArea {
                             id: secHover
                             anchors.fill: parent
                             hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
                             onClicked: panel.section = modelData.id
                         }
                     }
@@ -290,6 +301,7 @@ Popup {
                                 font.pixelSize: 11
                             }
                             MouseArea {
+                                hoverEnabled: true
                                 anchors.fill: parent
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: modelData.toggle(!modelData.on)
@@ -523,6 +535,7 @@ Popup {
                             Behavior on x { NumberAnimation { duration: 120 } }
                         }
                         MouseArea {
+                            hoverEnabled: true
                             anchors.fill: parent
                             anchors.margins: -4
                             cursorShape: Qt.PointingHandCursor
@@ -577,6 +590,7 @@ Popup {
                         color: sync.busy ? theme.hoverColor : theme.accentColor
                         Text { anchors.centerIn: parent; text: sync.busy ? "同步中…" : "拉取到我这"; color: "white"; font.pixelSize: 12 }
                         MouseArea {
+                            hoverEnabled: true
                             anchors.fill: parent; cursorShape: Qt.PointingHandCursor
                             enabled: !sync.busy
                             onClicked: {
@@ -592,6 +606,7 @@ Popup {
                         border.color: theme.borderColor; border.width: 1
                         Text { anchors.centerIn: parent; text: "推送到对端"; color: theme.textColor; font.pixelSize: 12 }
                         MouseArea {
+                            hoverEnabled: true
                             anchors.fill: parent; cursorShape: Qt.PointingHandCursor
                             enabled: !sync.busy
                             onClicked: {
@@ -927,6 +942,7 @@ Popup {
                             font.pixelSize: 11
                         }
                         MouseArea {
+                            hoverEnabled: true
                             anchors.fill: parent
                             cursorShape: Qt.PointingHandCursor
                             onClicked: settings.lyricTranslation = !settings.lyricTranslation
@@ -954,6 +970,7 @@ Popup {
                             font.pixelSize: 11
                         }
                         MouseArea {
+                            hoverEnabled: true
                             anchors.fill: parent
                             cursorShape: Qt.PointingHandCursor
                             onClicked: settings.lyricRoman = !settings.lyricRoman

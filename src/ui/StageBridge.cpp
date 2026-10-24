@@ -15,11 +15,18 @@
 #include <QTimer>
 #include <QDir>
 #include <QFile>
+
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonArray>
 #include <QEvent>
+#include <QImage>
+#include <QPainter>
+#include <QColor>
+#include <QBuffer>
 #include <QCoreApplication>
+#include <QDateTime>
+#include <QMutex>
 #include <QDebug>
 
 #ifdef Q_OS_WIN
@@ -27,6 +34,18 @@
 #endif
 
 namespace Muyun {
+
+// #5 诊断: 落盘 stage-web.log (桌面启动无 stderr, 只能写文件)
+static void logStageImport(const QString &m)
+{
+    static QMutex s_logMx2;
+    QMutexLocker lk(&s_logMx2);
+    QFile lf(QCoreApplication::applicationDirPath() + "/stage-web.log");
+    if (lf.open(QIODevice::Append | QIODevice::Text)) {
+        lf.write(QByteArray::number(QDateTime::currentMSecsSinceEpoch()) + " " + m.toUtf8() + "\n");
+        lf.close();
+    }
+}
 
 #ifdef MUYUN_SELFTES
 /// 生命周期排障用步印（发布版 SELFTES=OFF 自动消失）：舞台关闭崩溃就靠它定位到行
@@ -499,7 +518,14 @@ void StageBridge::onCmdConnected()
 
 void StageBridge::sendJson(const QJsonObject &obj)
 {
-    if (!m_cmdSock || m_cmdSock->state() != QLocalSocket::ConnectedState) return;
+    if (!m_cmdSock || m_cmdSock->state() != QLocalSocket::ConnectedState) {
+        // 诊断用：stage 未连接时命令会被静默丢弃，用户看到"点了没反应"。仅 fx 类命令打日志。
+        const QString c = obj.value(QStringLiteral("c")).toString();
+        const QString op = obj.value(QStringLiteral("op")).toString();
+        if (c == QLatin1String("fx"))
+            qWarning().noquote() << "[stage-bridge] fx 命令丢弃（stage 未连接）:" << op;
+        return;
+    }
     const QByteArray json = QJsonDocument(obj).toJson(QJsonDocument::Compact);
     m_cmdSock->write(leUint32(quint32(json.size())));
     m_cmdSock->write(json);
@@ -572,7 +598,18 @@ void StageBridge::handleEvent(const QJsonObject &obj)
         return;
     }
     if (e == QLatin1String("log")) {
-        qDebug().noquote() << "[stage-web]" << obj.value(QStringLiteral("m")).toString();
+        const QString m = obj.value(QStringLiteral("m")).toString();
+        qDebug().noquote() << "[stage-web]" << m;
+        // #5 日志可观测: 把 [stage-web] 事件落盘到固定路径, 便于诊断滚放/封面切图问题
+        //   不依赖 GUI stderr (桌面启动时 stderr 无输出), 诊断时直接读文件.
+        //   文件: <appDir>/stage-web.log (MuyunMusic.exe 所在目录)
+        static QMutex s_logMx;
+        QMutexLocker lk(&s_logMx);
+        QFile lf(QCoreApplication::applicationDirPath() + "/stage-web.log");
+        if (lf.open(QIODevice::Append | QIODevice::Text)) {
+            lf.write(QByteArray::number(QDateTime::currentMSecsSinceEpoch()) + " " + m.toUtf8() + "\n");
+            lf.close();
+        }
         return;
     }
     if (e == QLatin1String("fatal")) {
@@ -721,6 +758,10 @@ void StageBridge::testInject(const QString &name, const QString &artist,
         {QStringLiteral("d"), 240000.0},
         {QStringLiteral("p"), 1},
     });
+    // 挂起 50ms 进度时钟：正常播放时该定时器会持续按 m_player 状态推 p=0，
+    // 盖掉上面注入的 p=1（引擎 playing=false → 歌词/粒子不渲染，自检画面中央空白）。
+    // 只有自检路径调用 testInject，正常播放流不受影响。
+    m_holdClock = true;
 }
 
 void StageBridge::tryAttachTrackAudio()
@@ -819,6 +860,7 @@ void StageBridge::pushBounds()
 
 void StageBridge::onClockTick()
 {
+    if (m_holdClock) return;          // 自检注入后挂起：50ms 时钟只反映播放器状态（p=0），会盖掉注入的 p=1
     if (!m_engineReady) return;
     sendJson(QJsonObject{
         {QStringLiteral("c"), QStringLiteral("clk")},
@@ -861,6 +903,12 @@ void StageBridge::fxPreset(int index)
                          {QStringLiteral("i"), index}});
 }
 
+void StageBridge::fxProbe()
+{
+    sendJson(QJsonObject{{QStringLiteral("c"), QStringLiteral("fx")},
+                         {QStringLiteral("op"), QStringLiteral("probe")}});
+}
+
 void StageBridge::fxReset()
 {
     sendJson(QJsonObject{{QStringLiteral("c"), QStringLiteral("fx")},
@@ -871,6 +919,99 @@ void StageBridge::requestFxState()
 {
     sendJson(QJsonObject{{QStringLiteral("c"), QStringLiteral("fx")},
                          {QStringLiteral("op"), QStringLiteral("get")}});
+}
+
+void StageBridge::rollerSetConfig(const QJsonObject &config)
+{
+    sendJson(QJsonObject{{QStringLiteral("c"), QStringLiteral("fx")},
+                         {QStringLiteral("op"), QStringLiteral("roller")},
+                         {QStringLiteral("config"), config}});
+}
+
+// #5 P2 图片导入: 读本地图片 → 缩放成方形 → data URL → 引擎当作封面纹理解析到粒子。
+//   原先直接把原始字节 base64 化后过管道：一张 4000px 的照片会生成 ~5-15MB 的帧，
+//   且靠文件后缀猜 MIME (后缀错/无后缀时引擎解码失败 → 用户看到"粒子没变")。
+//   现统一由 QImage 解码 + 平滑缩放成 768x768 方形画布，帧体积降到 ~100-400KB。
+static QString filePathToDataUrl(const QString &filePath, bool *okOut, int sidePx)
+{
+    *okOut = false;
+    QImage img;
+    if (!img.load(filePath)) return QString();
+    if (img.isNull()) return QString();
+    const int s = qMax(64, sidePx > 0 ? sidePx : 768);
+    // 居中裁成正方形再平滑缩放 (与引擎 makeSquareCoverCanvas 的居中逻辑一致)
+    QImage square = img.copy();
+    square.setDevicePixelRatio(1);
+    QImage out(s, s, QImage::Format_RGB32);
+    out.fill(QColor(28, 28, 40));
+    {
+        // 源图居中裁成正方形区域, 再整体缩放到 s×s
+        const qreal side = qMin(qreal(square.width()), qreal(square.height()));
+        const qreal sx = (square.width() - side) * 0.5;
+        const qreal sy = (square.height() - side) * 0.5;
+        QPainter p(&out);
+        p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        p.drawImage(QRectF(0, 0, s, s), square, QRectF(sx, sy, side, side));
+    }
+    // Qt6 QImage 只重载 save(QIODevice*, ...), QByteArray 不是 QIODevice,
+    // 借 QBuffer 作为内存 I/O 载体
+    QByteArray ba;
+    ba.reserve(s * s / 2);
+    QBuffer buffer(&ba);
+    buffer.open(QIODevice::WriteOnly);
+    const bool saved = out.save(&buffer, "PNG");
+    buffer.close();
+    *okOut = saved && !ba.isEmpty();
+    return ba.isEmpty() ? QString()
+                        : QStringLiteral("data:image/png;base64,") + ba.toBase64();
+}
+
+void StageBridge::importParticleImage(const QString &filePath)
+{
+    logStageImport(QStringLiteral("[stage-import] 单张导入: %1").arg(filePath));
+    bool ok = false;
+    const QString dataUrl = filePathToDataUrl(filePath, &ok, 768);
+    if (!ok) {
+        qWarning().noquote() << "[stage-import] 图片解码失败，已丢弃:" << filePath;
+        return;
+    }
+    sendJson(QJsonObject{{QStringLiteral("c"), QStringLiteral("fx")},
+                         {QStringLiteral("op"), QStringLiteral("importImage")},
+                         {QStringLiteral("data"), dataUrl}});
+}
+
+// #5 多图批量导入: 每个滚放特效槽配一张图, 槽位循环复用; 等全部图解码完引擎才放行滚放。
+//   单张失败不影响其余 (逐张 try), 保证选 5 张里 4 张能读就配 4 张。
+void StageBridge::importParticleImagesLog(int nSelected, const QString &first)
+{
+    logStageImport(QStringLiteral("[stage-import] QML selectedFiles n=%1 first=%2").arg(nSelected).arg(first));
+}
+
+void StageBridge::importParticleImages(const QStringList &filePaths)
+{
+    logStageImport(QStringLiteral("[stage-import] 批量导入 n=%1: %2").arg(filePaths.size()).arg(filePaths.join(QStringLiteral(", "))));
+    QJsonArray arr;
+    for (const QString &p : filePaths) {
+        bool ok = false;
+        const QString d = filePathToDataUrl(p, &ok, 768);
+        if (ok && !d.isEmpty()) arr.append(d);
+        else qWarning().noquote() << "[stage-import] 多图第" << arr.size() + 1
+                                  << "张解码失败，跳过:" << p;
+    }
+    if (arr.isEmpty()) {
+        qWarning().noquote() << "[stage-import] 多图全部解码失败，无图可导入";
+        return;
+    }
+    sendJson(QJsonObject{{QStringLiteral("c"), QStringLiteral("fx")},
+                         {QStringLiteral("op"), QStringLiteral("importImages")},
+                         {QStringLiteral("images"), arr}});
+}
+
+void StageBridge::clearImportedImages()
+{
+    logStageImport(QStringLiteral("[stage-import] 清理导入图片 op=clearImages"));
+    sendJson(QJsonObject{{QStringLiteral("c"), QStringLiteral("fx")},
+                         {QStringLiteral("op"), QStringLiteral("clearImages")}});
 }
 
 } // namespace Muyun

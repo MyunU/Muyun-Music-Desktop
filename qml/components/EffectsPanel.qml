@@ -286,6 +286,7 @@ Popup {
                                 }
 
                                 MouseArea {
+                                    hoverEnabled: true
                                     anchors.fill: parent
                                     cursorShape: Qt.PointingHandCursor
                                     // 按住即接管滚动：拖动推子时外层 Flickable 不再跟着滚
@@ -420,7 +421,7 @@ Popup {
                     Layout.fillWidth: true
                     spacing: 12
                     Text { text: "环绕深度"; color: theme.subTextColor; font.pixelSize: 12 }
-                    Slider {
+                    MuyunSlider {
                         id: radiusSlider
                         objectName: "spRadiusSlider"     // 自检要读它，确认显示的是模型真值而不是写死的 50
                         Layout.fillWidth: true
@@ -440,24 +441,6 @@ Popup {
                                     radiusSlider.value = v
                             }
                         }
-                        background: Rectangle {
-                            x: radiusSlider.leftPadding
-                            y: radiusSlider.topPadding + radiusSlider.availableHeight / 2 - height / 2
-                            width: radiusSlider.availableWidth
-                            height: 3; radius: 2
-                            color: theme.borderColor
-                            Rectangle {
-                                width: radiusSlider.visualPosition * parent.width
-                                height: parent.height; radius: 2
-                                color: theme.accentColor
-                            }
-                        }
-                        handle: Rectangle {
-                            x: radiusSlider.leftPadding + radiusSlider.visualPosition * (radiusSlider.availableWidth - width)
-                            y: radiusSlider.topPadding + radiusSlider.availableHeight / 2 - height / 2
-                            width: 12; height: 12; radius: 6
-                            color: "white"
-                        }
                     }
                 }
 
@@ -465,7 +448,7 @@ Popup {
                     Layout.fillWidth: true
                     spacing: 12
                     Text { text: "摆动速度"; color: theme.subTextColor; font.pixelSize: 12 }
-                    Slider {
+                    MuyunSlider {
                         id: speedSlider
                         objectName: "spSpeedSlider"
                         Layout.fillWidth: true
@@ -479,24 +462,6 @@ Popup {
                                 if (!speedSlider.pressed && Math.abs(speedSlider.value - v) > 0.01)
                                     speedSlider.value = v
                             }
-                        }
-                        background: Rectangle {
-                            x: speedSlider.leftPadding
-                            y: speedSlider.topPadding + speedSlider.availableHeight / 2 - height / 2
-                            width: speedSlider.availableWidth
-                            height: 3; radius: 2
-                            color: theme.borderColor
-                            Rectangle {
-                                width: speedSlider.visualPosition * parent.width
-                                height: parent.height; radius: 2
-                                color: theme.accentColor
-                            }
-                        }
-                        handle: Rectangle {
-                            x: speedSlider.leftPadding + speedSlider.visualPosition * (speedSlider.availableWidth - width)
-                            y: speedSlider.topPadding + speedSlider.availableHeight / 2 - height / 2
-                            width: 12; height: 12; radius: 6
-                            color: "white"
                         }
                     }
                 }
@@ -535,7 +500,7 @@ Popup {
                     Layout.fillWidth: true
                     spacing: 12
                     Text { text: "目标响度"; color: theme.subTextColor; font.pixelSize: 12 }
-                    Slider {
+                    MuyunSlider {
                         id: ldSlider
                         Layout.fillWidth: true
                         from: -24; to: -8
@@ -549,24 +514,6 @@ Popup {
                                 if (!ldSlider.pressed && Math.abs(ldSlider.value - v) > 0.01)
                                     ldSlider.value = v
                             }
-                        }
-                        background: Rectangle {
-                            x: ldSlider.leftPadding
-                            y: ldSlider.topPadding + ldSlider.availableHeight / 2 - height / 2
-                            width: ldSlider.availableWidth
-                            height: 3; radius: 2
-                            color: theme.borderColor
-                            Rectangle {
-                                width: ldSlider.visualPosition * parent.width
-                                height: parent.height; radius: 2
-                                color: theme.accentColor
-                            }
-                        }
-                        handle: Rectangle {
-                            x: ldSlider.leftPadding + ldSlider.visualPosition * (ldSlider.availableWidth - width)
-                            y: ldSlider.topPadding + ldSlider.availableHeight / 2 - height / 2
-                            width: 12; height: 12; radius: 6
-                            color: "white"
                         }
                     }
                     Text {

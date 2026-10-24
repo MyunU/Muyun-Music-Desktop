@@ -114,6 +114,7 @@ Item {
                         font.pixelSize: 12
                     }
                     MouseArea {
+                        hoverEnabled: true
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
                         onClicked: {
@@ -153,6 +154,7 @@ Item {
                             font.pixelSize: 12
                         }
                         MouseArea {
+                            hoverEnabled: true
                             anchors.fill: parent
                             cursorShape: Qt.PointingHandCursor
                             onClicked: reload(modelData)

@@ -6,6 +6,7 @@
 #include <QVariantList>
 #include <QPointer>
 #include <QString>
+#include <QStringList>
 
 #include <functional>
 
@@ -68,8 +69,19 @@ public:
     Q_INVOKABLE void fxSet(const QString &key, double value);
     Q_INVOKABLE void fxToggle(const QString &key);
     Q_INVOKABLE void fxPreset(int index);
+    Q_INVOKABLE void fxProbe();  // 自检诊断: 让壳回传主粒子层 uniform 状态 (log 事件)
     Q_INVOKABLE void fxReset();
     Q_INVOKABLE void requestFxState();
+    /// #5 滚放: 透传完整配置 {enabled, seq, intervalSec} 到引擎
+    Q_INVOKABLE void rollerSetConfig(const QJsonObject &config);
+    /// #5 P2 图片导入: 读本地图片 → data URL → 引擎当作封面纹理解析到粒子
+    Q_INVOKABLE void importParticleImage(const QString &filePath);
+    /// #5 诊断: QML selectedFiles 数量回报 (批量路径是否被调用)
+    Q_INVOKABLE void importParticleImagesLog(int nSelected, const QString &first);
+    /// #5 多图批量导入: 每个滚放特效槽配一张图; 引擎解码齐全部图后才允许滚放前进
+    Q_INVOKABLE void importParticleImages(const QStringList &filePaths);
+    /// #5 修复 (2026-10-24): 面板"清理导入图片"按钮 → 引擎清 rollerImages + 持久化 + 恢复歌曲封面
+    Q_INVOKABLE void clearImportedImages();
     /// 收藏态推送（QML 端在 favorite 变化时调用）
     Q_INVOKABLE void setFav(bool on);
 
@@ -139,6 +151,7 @@ private:
     QByteArray m_evBuf;
 
     QTimer *m_clockTimer = nullptr;    // 50ms 进度时钟
+    bool   m_holdClock = false;        // 自检注入后挂起 50ms 时钟（防 p=0 盖掉注入的 p=1）
     QTimer *m_boundsTimer = nullptr;   // 窗口几何节流
     QTimer *m_audioRetryTimer = nullptr; // 2s：等待播放音频落盘后挂载 track.bin
     bool   m_boundsDirty = false;

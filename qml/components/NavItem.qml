@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls
 import QtQuick.Layouts
 
 // 侧边栏导航项
@@ -10,6 +11,7 @@ Rectangle {
     property int count: -1
     property bool deletable: false   // 显示 hover 删除按钮（歌单用）
     property bool hovered: false     // 整项 hover 状态（独立维护，避免按钮出现即消失的闪烁）
+    property bool collapsed: false   // #31-② 折叠模式：只显示图标，label 变 tooltip
     signal clicked()
     signal deleteRequested()
 
@@ -21,7 +23,7 @@ Rectangle {
 
     RowLayout {
         anchors.fill: parent
-        anchors.leftMargin: 12
+        anchors.leftMargin: item.collapsed ? (parent.width - 17) / 2 : 12
         anchors.rightMargin: 10
         spacing: 10
 
@@ -32,18 +34,24 @@ Rectangle {
         }
         Text {
             Layout.fillWidth: true
+            visible: !item.collapsed
             text: item.label
             color: item.active ? theme.accentColor : theme.textColor
             font.pixelSize: 13
             elide: Text.ElideRight
         }
         Text {
-            visible: item.count > 0
+            visible: !item.collapsed && item.count > 0
             text: item.count
             color: theme.subTextColor
             font.pixelSize: 11
         }
     }
+
+    // 折叠时 hover 显示完整名称
+    ToolTip.visible: item.collapsed && item.hovered
+    ToolTip.delay: 400
+    ToolTip.text: item.label
 
     Rectangle {
         visible: item.active
@@ -58,7 +66,7 @@ Rectangle {
     // hover 删除按钮（歌单）
     Rectangle {
         id: delBtn
-        visible: item.deletable && item.hovered
+        visible: item.deletable && item.hovered && !item.collapsed
         anchors.right: parent.right
         anchors.rightMargin: 8
         anchors.verticalCenter: parent.verticalCenter

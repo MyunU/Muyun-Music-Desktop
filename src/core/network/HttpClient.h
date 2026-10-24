@@ -107,7 +107,7 @@ public:
 
     /// 应用退出收尾：置"正在退出"标志。worker 线程里的同步/下载请求
     /// 会在 ≤200ms 内被中止（否则 main 退出时 QThreadPool::waitForDone()
-    /// 会干等网络超时，播放中退出表现为"未响应"——见 HANDOFF 待办新问题②）。
+    /// 会干等网络超时，播放中退出表现为"未响应"。
     static void beginShutdown();
     static bool shuttingDown();
 

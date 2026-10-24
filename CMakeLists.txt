@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(MuyunMusic VERSION 1.2.6 LANGUAGES CXX C)
+project(MuyunMusic VERSION 1.3.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -133,6 +133,9 @@ endif()
 file(GLOB_RECURSE QML_FILES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/qml/*.qml"
     "${CMAKE_CURRENT_SOURCE_DIR}/qml/*.js"
+    # #29 粒子视觉：qsb 预编译 shader（Qt 6 ShaderEffect 只认 .qsb，构建前用
+    # qsb.exe --qt6 从 qml/shaders/*.frag 生成，同目录提交入库）
+    "${CMAKE_CURRENT_SOURCE_DIR}/qml/*.qsb"
 )
 qt_add_resources(MuyunMusic "qml_resources"
     PREFIX "/"

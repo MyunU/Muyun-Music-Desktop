@@ -48,6 +48,9 @@ stage/web/covers/*.png
 stage/webview2-data/
 wv2data*/
 
+# 开发自检脚本（不入库、不入分发）
+stage/tools/
+
 # 开发备忘录（不属于程序，禁止随仓库/推送分发）
 HANDOFF.md
 MEMORY.md

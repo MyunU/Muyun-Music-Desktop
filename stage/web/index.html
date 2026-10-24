@@ -141,6 +141,8 @@ setTimeout(function () {
   }
 }
 </script>
-<script type="module" src="/host.js"></script>
+<!-- #5 cache-bust: 版本戳。ES 模块被 Chromium 按 30 天启发式缓存,
+     每次发新版都要改这里, 否则用户拿到的是旧 engine.js。 -->
+<script type="module" src="/host.js?v=20261024.8"></script>
 </body>
 </html>

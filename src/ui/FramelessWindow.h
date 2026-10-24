@@ -30,7 +30,7 @@ public:
 
     void attach(QWindow *window);
 
-    /// 绑定"样式位同步"用的窗口句柄（HANDOFF #11）。刻意与 attach 分开：
+    /// 绑定"样式位同步"用的窗口句柄。刻意与 attach 分开：
     /// attach 会补 WS_THICKFRAME 并激活 WM_NCCALCSIZE/WM_NCHITTEST（原生缩放会抖动，
     /// GUI 主路径已弃用），而 setMaximizedStyle 只想动 WS_MAXIMIZE 一个位。
     void bindMaxWindow(QWindow *window);
