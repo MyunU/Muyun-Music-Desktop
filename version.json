@@ -1,8 +1,8 @@
 {
   "_comment": "更新提示用的版本清单。发布版：改 version/notes 与下面两个 url，并把同版本号的安装包传到 Releases。版本号规则：修 bug 末位 +1、加功能中间 +1、项目大改动首位 +1。",
-  "version": "1.3.0",
-  "pubDate": "2026-10-24",
-  "notes": "1.3.0 更新\n· 新增粒子变换：切歌或切换特效时粒子在形态间平滑变形\n· 新增滚放：定时自动轮换特效，可自定顺序、拖拽排序、停留时长\n· 新增导入本地图片生成粒子，重启后自动恢复，可一键清理\n· 新增侧栏折叠、搜索框打磨、设置面板分类标签、统一滑块与弹窗圆角\n· 新增经典模式旋转唱片、封面背景视差、播放条悬停时间气泡\n· 修复舞台特效切换卡顿\n· 修复歌词经常需要手动加载才显示\n· 优化大量粒子下的舞台流畅度与歌词加载效率",
-  "pageUrl": "https://github.com/MyunU/Muyun-Music-Desktop/releases/tag/v1.3.0",
-  "downloadUrl": "https://github.com/MyunU/Muyun-Music-Desktop/releases/download/v1.3.0/MuyunMusic-1.3.0.exe"
+  "version": "1.3.1",
+  "pubDate": "2026-10-25",
+  "notes": "1.3.1 更新\n· 新增双击标题栏最大化 / 还原窗口\n· 新增歌曲列表鼠标悬停整行高亮，正在播放的歌曲行显示跳动的音量竖条\n· 修复切换歌曲后上一首的列表行高亮不消失",
+  "pageUrl": "https://github.com/MyunU/Muyun-Music-Desktop/releases/tag/v1.3.1",
+  "downloadUrl": "https://github.com/MyunU/Muyun-Music-Desktop/releases/download/v1.3.1/MuyunMusic-1.3.1.exe"
 }

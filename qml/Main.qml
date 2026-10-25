@@ -50,14 +50,19 @@ Window {
         if (root.visibility === Window.FullScreen) root.fullScreenOn = true
         else if (root.visibility === Window.Windowed || root.visibility === Window.Maximized
                  || root.visibility === Window.Minimized) root.fullScreenOn = false
+        // 方案②：原生最大化态跟着系统可见性镜像。最小化→从任务栏恢复由 Windows 自己
+        // 还原成最大化，不再需要下面那段"补几何"。
+        if (root._nativeMax) {
+            if (root.visibility === Window.Maximized) root.maximized = true
+            else if (root.visibility === Window.Windowed) root.maximized = false
+        }
         if (root.visibility === Window.Minimized) {
             root._wasMinimized = true
         } else if (root._wasMinimized) {
             root._wasMinimized = false
-            // 手动最大化不走 Windows 最大化机制（ShowWindow SW_MAXIMIZE），
-            // 最小化→从任务栏恢复时 Windows 按普通尺寸放置、还可能丢掉 WS_MAXIMIZE 位
-            // → 表现为"最大化窗口回来变小/系统不认最大化"。恢复时补齐几何 + 样式位。
-            if (root.maximized) {
+            // 仅回退方案①（手动几何最大化）需要补：手动最大化不带 WS_MAXIMIZE 位，
+            // 从任务栏恢复时 Windows 按普通尺寸放置 → 补回工作区几何。
+            if (root.maximized && !root._nativeMax) {
                 root.x = 0; root.y = 0
                 root.width = Screen.desktopAvailableWidth
                 root.height = Screen.desktopAvailableHeight
@@ -66,13 +71,14 @@ Window {
         }
     }
 
-    // 最大化：不依赖 Qt showMaximized()/visibility()（frameless+原生缩放 hack 下二者会误报，
-    // 导致按钮"无效"）。直接手动设置窗口几何到工作区，还原时回到之前尺寸——纯赋值必定生效。
+    // 最大化：v1.4.0 起改走 Windows 原生机制（FramelessWindow::setNativeMaximized）——
+    // IsZoomed() 为真、贴边/任务栏工具/最小化恢复全是系统行为，还原目标也由系统记。
+    // 之前的手动赋几何方案①保留为回退（拿不到 HWND 时用）。
     property bool maximized: false
-    // #11：手动最大化同步 WS_MAXIMIZE 样式位（TranslucentTB 等第三方任务栏工具靠
-    // IsZoomed() 认"最大化"；我们手动改几何从不带这个位 → 工具认不出）。
-    // 全屏(F11)不算最大化：走 showFullScreen，不设该位。
+    property bool _nativeMax: false     // 当前是否由原生机制驱动最大化
     onMaximizedChanged: {
+        // 原生最大化时 WS_MAXIMIZE 位由系统自己加/摘，再手动动它会互相打架
+        if (root._nativeMax) return
         if (typeof frameless !== "undefined")
             frameless.setMaximizedStyle(root.maximized)
     }
@@ -81,6 +87,30 @@ Window {
     property real _rw: 0
     property real _rh: 0
     property bool _saved: false
+
+    /// 回退方案①：手动把窗口铺到工作区并补 WS_MAXIMIZE 位
+    function _manualMaximize() {
+        if (typeof frameless !== "undefined") frameless.setMaximizedStyle(true)
+        if (root.width < Screen.desktopAvailableWidth - 8 || root.height < Screen.desktopAvailableHeight - 8) {
+            _rx = root.x; _ry = root.y; _rw = root.width; _rh = root.height; _saved = true
+        }
+        root.x = 0
+        root.y = 0
+        root.width = Screen.desktopAvailableWidth
+        root.height = Screen.desktopAvailableHeight
+        maximized = true
+    }
+    function _manualRestore() {
+        if (_saved) { root.x = _rx; root.y = _ry; root.width = _rw; root.height = _rh }
+        else {      // 没存到还原目标（启动即最大化等）→ 回默认尺寸，别让按钮空转
+            root.width = Math.round(Screen.width * 0.84)
+            root.height = Math.round(Screen.height * 0.87)
+            root.x = Math.round((Screen.width - root.width) / 2)
+            root.y = Math.round((Screen.height - root.height) / 2)
+        }
+        if (typeof frameless !== "undefined") frameless.setMaximizedStyle(false)
+    }
+
     function toggleMaximize() {
         // 全屏（F11）里点最大化：先退全屏。绝不能把全屏几何当"还原目标"记下来——
         // 那样下一次"还原"还原到的还是这么大，按钮看着就是"按了没反应"（用户实测）。
@@ -89,8 +119,7 @@ Window {
             root.maximized = false
             // ⚠ 退全屏后必须立即恢复几何：showNormal() 只会退回"上次可见状态"
             // （可能仍是最大化尺寸）。不清标志、只赋几何也不行——下次点最大化
-            // 走 else 分支再赋工作区几何，窗口本来就那么大 → "按了没反应"（用户
-            // 实测：全屏→点→无效→再点才还原。此处一并恢复到还原目标/默认尺寸）。
+            // 走 else 分支再赋工作区几何，窗口本来就那么大 → "按了没反应"。
             if (_saved) { root.x = _rx; root.y = _ry; root.width = _rw; root.height = _rh }
             else {
                 root.width = Math.round(Screen.width * 0.84)
@@ -101,29 +130,21 @@ Window {
             return
         }
         if (maximized) {
-            // ⚠ 必须先清标志、再赋几何。清标志触发 onMaximizedChanged → setMaximizedStyle(false)
-            // 摘掉 WS_MAXIMIZE 位；位还在时 Windows 会直接拒绝改窗口大小（stderr: "Unable to set
-            // geometry ... Resulting geometry: <原样>"），几何赋值就被吞掉 → 点「还原」没反应、
-            // 窗口钉在工作区大小。v1.1.0 出厂时顺序正好反了（先赋几何 L76、后清标志 L83），
-            // --test-maximize 稳定 3/3 复现，2026-10-04 修复。
+            // ⚠ 必须先清标志、再改窗口（方案①下位还在时 Windows 会拒绝改大小，
+            // 几何赋值被吞掉 → 点「还原」没反应。v1.1.0 出厂顺序反了，2026-10-04 修）。
             maximized = false
-            if (_saved) { root.x = _rx; root.y = _ry; root.width = _rw; root.height = _rh }
-            else {      // 没存到还原目标（启动即最大化等）→ 回默认尺寸，别让按钮空转
-                root.width = Math.round(Screen.width * 0.84)
-                root.height = Math.round(Screen.height * 0.87)
-                root.x = Math.round((Screen.width - root.width) / 2)
-                root.y = Math.round((Screen.height - root.height) / 2)
-            }
+            if (root._nativeMax && typeof frameless !== "undefined"
+                    && frameless.setNativeMaximized(false))
+                return                       // 原生：系统自己退回最大化前的几何
+            root._nativeMax = false
+            root._manualRestore()
         } else {
-            // 只有"确实比工作区小"的几何才配当还原目标
-            if (root.width < Screen.desktopAvailableWidth - 8 || root.height < Screen.desktopAvailableHeight - 8) {
-                _rx = root.x; _ry = root.y; _rw = root.width; _rh = root.height; _saved = true
+            if (typeof frameless !== "undefined" && frameless.setNativeMaximized(true)) {
+                root._nativeMax = true
+                maximized = true
+                return
             }
-            root.x = 0
-            root.y = 0
-            root.width = Screen.desktopAvailableWidth
-            root.height = Screen.desktopAvailableHeight
-            maximized = true
+            root._manualMaximize()
         }
     }
 
@@ -141,12 +162,27 @@ Window {
 
         // 拖标题栏空白处移动窗口：交给系统级移动，平滑无抖动
         // （手动 root.x += 方式存在事件反馈环路，拖动会抖动/撕裂）
+        // 注意：不能"一按下就 startSystemMove"——系统移动是模态循环，会把双击的第二下
+        // 吞掉，双击标题栏就没反应了。改成拖动超过 4px 才进系统移动，双击照常命中。
         MouseArea {
+            id: titleDrag
             anchors.fill: parent
-            onPressed: root.startSystemMove()
-        }
-        TapHandler {
-            onDoubleTapped: root.toggleMaximize()
+            property real pressX: 0
+            property real pressY: 0
+            property bool moving: false
+            onPressed: function (mouse) {
+                titleDrag.pressX = mouse.x
+                titleDrag.pressY = mouse.y
+                titleDrag.moving = false
+            }
+            onPositionChanged: function (mouse) {
+                if (!pressed || titleDrag.moving) return
+                if (Math.abs(mouse.x - titleDrag.pressX) <= 4 && Math.abs(mouse.y - titleDrag.pressY) <= 4)
+                    return
+                titleDrag.moving = true
+                root.startSystemMove()
+            }
+            onDoubleClicked: root.toggleMaximize()
         }
 
         RowLayout {

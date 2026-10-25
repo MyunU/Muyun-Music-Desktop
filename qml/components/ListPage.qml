@@ -349,6 +349,10 @@ Item {
             property real keepOffset: 0
             property int pendIdx: -1
             property real pendOff: 0
+            // 行 hover 高亮的唯一裁判（-1＝无）：委托只上报进出，避免出现两行同时亮 / 旧行不灭
+            property int hoveredIndex: -1
+            // 滚动/换模型时旧的 hoveredIndex 已经指向别的行 → 一律清空，等鼠标下一次移动重建
+            onContentYChanged: hoveredIndex = -1
             function preserveScroll() {
                 var idx = list.indexAt(list.width / 2, list.contentY + 1)
                 if (idx < 0) { keepIndex = -1; return }
@@ -363,6 +367,7 @@ Item {
                 list.contentY += pendOff
             }
             onModelChanged: {
+                hoveredIndex = -1        // 下标整体变了，旧 hover 归属作废
                 if (keepIndex < 0) return
                 pendIdx = keepIndex
                 pendOff = keepOffset
@@ -385,7 +390,12 @@ Item {
                 removable: page.removable
                 batchMode: page.batchMode
                 picked: page.selected.indexOf(page.keyOf(modelData)) >= 0
+                hovered: list.hoveredIndex === index
                 onTogglePicked: page.togglePick(modelData)
+                onHoverEntered: list.hoveredIndex = index
+                onHoverLeft: {
+                    if (list.hoveredIndex === index) list.hoveredIndex = -1
+                }
             }
 
             Text {

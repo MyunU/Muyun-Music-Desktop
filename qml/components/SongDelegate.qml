@@ -24,11 +24,33 @@ Rectangle {
         return library.isFavorite(row.song)
     }
 
+    // hover 高亮由列表集中裁判（同一时刻只允许一行）：委托各管各的会出现
+    // "上一行没收到 exited 就一直亮着"，所以这里只上报进出、亮不亮听 hovered。
+    property bool hovered: false
+    signal hoverEntered()
+    signal hoverLeft()
+
+    // 正在播放这一行：按 identityKey 比对（下标会随页内过滤/删除漂移，不能用下标）。
+    // player.currentSong 是绑定依赖——切歌/停止时重算，旧行高亮立刻消失。
+    readonly property string songKey: row.song ? library.identityOf(row.song) : ""
+    readonly property bool isCurrentSong: {
+        player.currentSong
+        return row.songKey.length > 0 && player.currentSongKey() === row.songKey
+    }
+
     width: ListView.view ? ListView.view.width : 0
     height: 60
     radius: 8
     color: row.picked ? Qt.alpha(theme.accentColor, 0.14)
-                      : (hover.containsMouse ? theme.hoverColor : "transparent")
+         : row.hovered ? theme.hoverColor
+         : row.isCurrentSong ? Qt.alpha(theme.accentColor, 0.12)
+         : "transparent"
+
+    // hover 用 HoverHandler：鼠标停到行内控件（平台胶囊/爱心）上也不会误判"离开"
+    HoverHandler {
+        id: rowHover
+        onHoveredChanged: rowHover.hovered ? row.hoverEntered() : row.hoverLeft()
+    }
 
     RowLayout {
         anchors.fill: parent
@@ -37,14 +59,58 @@ Rectangle {
         spacing: 14
 
         // 序号位：批量模式换成勾选圈（RowLayout 会跳过 invisible 项，不留空位）
-        Text {
+        // 当前播放的行改显三根跳动小竖条（暂停即停住），宽度与序号一致 → 布局不抖
+        Item {
             Layout.preferredWidth: 26
+            Layout.preferredHeight: 20
+            Layout.alignment: Qt.AlignVCenter
             visible: !row.batchMode
-            text: (row.songIndex + 1)
-            color: theme.subTextColor
-            font.pixelSize: 12
-            horizontalAlignment: Text.AlignHCenter
-            verticalAlignment: Text.AlignVCenter
+
+            Text {
+                anchors.fill: parent
+                visible: !row.isCurrentSong
+                text: (row.songIndex + 1)
+                color: theme.subTextColor
+                font.pixelSize: 12
+                horizontalAlignment: Text.AlignHCenter
+                verticalAlignment: Text.AlignVCenter
+            }
+            Row {
+                id: eqRow
+                anchors.centerIn: parent
+                spacing: 2
+                visible: row.isCurrentSong
+                Repeater {
+                    model: 3
+                    Item {
+                        id: eqBar
+                        required property int index
+                        width: 2
+                        height: 12
+                        Rectangle {
+                            width: parent.width
+                            radius: 1
+                            color: theme.accentColor
+                            anchors.bottom: parent.bottom
+                            height: 4
+                            SequentialAnimation on height {
+                                running: eqRow.visible && player.isPlaying
+                                loops: Animation.Infinite
+                                NumberAnimation {
+                                    to: eqBar.index === 1 ? 11 : 7
+                                    duration: 280 + eqBar.index * 120
+                                    easing.type: Easing.InOutQuad
+                                }
+                                NumberAnimation {
+                                    to: 3 + eqBar.index
+                                    duration: 320 + eqBar.index * 100
+                                    easing.type: Easing.InOutQuad
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
         Rectangle {
             Layout.preferredWidth: 20
@@ -98,7 +164,7 @@ Rectangle {
                 anchors.fill: parent
                 radius: 6
                 color: "#99000000"
-                visible: hover.containsMouse && !row.batchMode
+                visible: row.hovered && !row.batchMode
                 Icon {
                     anchors.centerIn: parent
                     name: "play"
@@ -116,8 +182,9 @@ Rectangle {
             Text {
                 Layout.fillWidth: true
                 text: (row.song && row.song.name) ? row.song.name : "未知歌曲"
-                color: theme.textColor
+                color: row.isCurrentSong ? theme.accentColor : theme.textColor
                 font.pixelSize: 13
+                font.bold: row.isCurrentSong
                 elide: Text.ElideRight
             }
             Text {

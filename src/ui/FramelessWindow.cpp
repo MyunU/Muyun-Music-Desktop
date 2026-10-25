@@ -60,17 +60,88 @@ void FramelessWindow::setMaximizedStyle(bool on)
 #endif
 }
 
+// ---- 方案②：原生最大化 -------------------------------------------------------
+// 实测（v1.3.0 frameless 窗，style=0x96000000 纯 WS_POPUP、无 WS_THICKFRAME）：
+//   ShowWindow(SW_MAXIMIZE) → rect 变成 0,24,1536,840（工作区是 0,0,1536,816），
+//   即整体下移了一个标题栏高度；IsZoomed=1、WS_MAXIMIZE 位被系统补上。
+//   最大化态下 SetWindowPos 仍有效（带 SWP_NOZORDER|SWP_NOACTIVATE 即可），
+//   ShowWindow(SW_RESTORE) 能原样退回最大化前的几何；最小化再从任务栏恢复也仍是最大化。
+bool FramelessWindow::setNativeMaximized(bool on)
+{
+#ifdef Q_OS_WIN
+    if (!m_maxWindow) return false;
+    HWND hwnd = reinterpret_cast<HWND>(m_maxWindow->winId());
+    if (!hwnd) return false;
+    if (on) {
+        ShowWindow(hwnd, SW_MAXIMIZE);
+        // 修"最大化后整体下移一行"：按监视器工作区重新对齐（物理像素）
+        const HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO mi{};
+        mi.cbSize = sizeof(mi);
+        if (mon && GetMonitorInfoW(mon, &mi)) {
+            const RECT &w = mi.rcWork;
+            SetWindowPos(hwnd, nullptr, w.left, w.top, w.right - w.left, w.bottom - w.top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    } else {
+        ShowWindow(hwnd, SW_RESTORE);
+    }
+    return true;
+#else
+    Q_UNUSED(on)
+    return false;
+#endif
+}
+
+bool FramelessWindow::isNativeMaximized() const
+{
+#ifdef Q_OS_WIN
+    if (!m_maxWindow) return false;
+    HWND hwnd = reinterpret_cast<HWND>(m_maxWindow->winId());
+    return hwnd && IsZoomed(hwnd);
+#else
+    return false;
+#endif
+}
+
 bool FramelessWindow::nativeEventFilter(const QByteArray &eventType, void *message, qintptr *result)
 {
 #ifdef Q_OS_WIN
-    if (eventType != "windows_generic_MSG" || !m_window) return false;
+    if (eventType != "windows_generic_MSG") return false;
     MSG *m = static_cast<MSG *>(message);
+
+    // ---- 方案②：原生最大化 → 贴工作区对齐 ----
+    // 系统对"无边框窗"做 SW_MAXIMIZE 时会把窗口整体下移一个边框高度（实测 125% DPI：
+    // 工作区 1920x1020@0,0 → 实际 1920x1020@0,30），表现就是"顶部缺一栏 + 底部钻进任务栏"。
+    // 而 ShowWindow 之后立刻 SetWindowPos 会被后续定位覆盖（最大化是异步完成的）。
+    // 在 WM_WINDOWPOSCHANGING 里直接改 WINDOWPOS 最稳：Windows 按修正值定位，不闪不回弹。
+    // 注：这里只在 IsZoomed 为真时改，不影响普通移动/缩放；也不改 Qt 的最大化状态判定。
+    if (m_maxWindow && m->message == WM_WINDOWPOSCHANGING && m->lParam) {
+        HWND maxHwnd = reinterpret_cast<HWND>(m_maxWindow->winId());
+        if (maxHwnd && m->hwnd == maxHwnd && IsZoomed(maxHwnd)) {
+            auto *wp = reinterpret_cast<WINDOWPOS *>(m->lParam);
+            const HMONITOR mon = MonitorFromWindow(maxHwnd, MONITOR_DEFAULTTONEAREST);
+            MONITORINFO mi{};
+            mi.cbSize = sizeof(mi);
+            if (mon && GetMonitorInfoW(mon, &mi)) {
+                const RECT &w = mi.rcWork;
+                wp->x = w.left;
+                wp->y = w.top;
+                wp->cx = w.right - w.left;
+                wp->cy = w.bottom - w.top;
+            }
+        }
+    }
+
+    if (!m_window) return false;
     HWND hwnd = reinterpret_cast<HWND>(m_window->winId());
     if (!hwnd || m->hwnd != hwnd) return false;
 
     // ---- 非客户区归零：无边框但保留系统行为；最大化时按边框宽度内缩（修顶部缺一行）----
-    // 注：不处理 WM_GETMINMAXINFO / WM_WINDOWPOSCHANGING —— 实测它们会让 Qt 把窗口误判为
-    // 已 Maximized 态（启动即 vis=Maximized），导致最大化按钮首点走了 showNormal()（"无效"）。
+    // 这条 attach 路径（会补 WS_THICKFRAME）仍不处理 WM_GETMINMAXINFO —— 实测会让 Qt 把窗口
+    // 误判为已 Maximized 态（启动即 vis=Maximized），最大化按钮首点走 showNormal()（"无效"）。
+    // 方案②的原生最大化对齐是另一条路径：上面只改"最大化态窗口矩形"的 WM_WINDOWPOSCHANGING
+    // 分支，不动任何状态位，两者互不影响。
     if (m->message == WM_NCCALCSIZE && m->wParam == TRUE && result) {
         auto *p = reinterpret_cast<NCCALCSIZE_PARAMS *>(m->lParam);
         if (IsZoomed(hwnd)) {

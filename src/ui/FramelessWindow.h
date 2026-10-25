@@ -38,6 +38,16 @@ public:
     /// 靠 IsZoomed() 认"最大化"；我们手动改几何从不带这个位 → 工具认不出）
     Q_INVOKABLE void setMaximizedStyle(bool on);
 
+    /// 方案②：走 Windows 原生最大化（ShowWindow SW_MAXIMIZE），而不是手动赋几何。
+    /// 好处：IsZoomed() 为真、任务栏工具/贴边/最小化后从任务栏恢复都按系统行为走，
+    /// 还原目标由系统自己记（QML 不用再存 _rx/_ry/_rw/_rh）。
+    /// 副作用处理：无边框 WS_POPUP 窗被 Windows 最大化后会整体下移一个标题栏高度
+    /// （实测 1536x816 的窗落在 y=24）→ 这里补一次 SetWindowPos 对齐工作区。
+    /// 返回 false 表示没有窗口句柄（非 Windows / 未 bind），QML 侧应退回手动几何方案。
+    Q_INVOKABLE bool setNativeMaximized(bool on);
+    /// 当前是否处于原生最大化态（IsZoomed）
+    Q_INVOKABLE bool isNativeMaximized() const;
+
     bool nativeEventFilter(const QByteArray &eventType, void *message, qintptr *result) override;
 
 private:

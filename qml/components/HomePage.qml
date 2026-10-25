@@ -115,9 +115,14 @@ Item {
                 id: plGrid
                 visible: home.recommendPlaylists.length > 0
                 Layout.fillWidth: true
-                Layout.preferredHeight: 200
+                // 卡片高度必须由"封面 + 8 间距 + 两行标题"算出来：
+                // 原来固定 cellHeight/200 且封面是正方形（边长随列宽变），收起侧边栏后内容变宽
+                // → 列宽变大 → 封面变高 → 标题被挤出格子的可见范围，第二行只剩上半截。
+                readonly property int coverSize: Math.max(80, cellWidth - 24)
+                readonly property int titleHeight: 36          // 12px 字号两行（实测单行 17.25，两行 34.5）+ 余量
                 cellWidth: Math.floor(width / 6)
-                cellHeight: 200
+                cellHeight: coverSize + 8 + titleHeight
+                Layout.preferredHeight: cellHeight
                 clip: true
                 interactive: false
                 model: home.recommendPlaylists
@@ -132,7 +137,7 @@ Item {
                         spacing: 8
 
                         Rectangle {
-                            width: plGrid.cellWidth - 24
+                            width: plGrid.coverSize
                             height: width
                             radius: 10
                             color: theme.cardColor
@@ -180,10 +185,11 @@ Item {
                         }
 
                         Text {
-                            width: plGrid.cellWidth - 24
+                            width: plGrid.coverSize
                             text: modelData.name
                             color: theme.textColor
                             font.pixelSize: 12
+                            lineHeight: 1.15
                             wrapMode: Text.Wrap
                             maximumLineCount: 2
                             elide: Text.ElideRight

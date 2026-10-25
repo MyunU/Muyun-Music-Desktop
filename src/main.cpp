@@ -4709,41 +4709,57 @@ int main(int argc, char *argv[])
     }
 #endif
 
-    // 最大化诊断：走与标题栏按钮完全相同的 Qt showMaximized() 路径，报告几何/可见态
+    // 最大化诊断：走与标题栏按钮完全相同的路径，报告几何/可见态
+    // 关键：同时打印"Qt 认为的几何"与"Windows 真实窗口/客户区矩形"——方案②改的是原生
+    // 窗口位置，若两者不一致（Qt 记 0,0 而真实是 0,24），界面就会"头顶缺一栏 + 底部钻任务栏"。
 #ifdef MUYUN_SELFTES
     if (qEnvironmentVariableIsSet("MUYUN_TEST_MAX") && mainWin) {
         auto dump = [mainWin](const char *tag) {
             const QRect g = mainWin->geometry();
+            printf("[MAXTEST] %-16s qt=%dx%d@%d,%d vis=%d state=0x%x", tag, g.width(), g.height(),
+                   g.x(), g.y(), int(mainWin->visibility()), int(mainWin->windowState()));
 #ifdef Q_OS_WIN
             const HWND hw = reinterpret_cast<HWND>(mainWin->winId());
-            const LONG_PTR st = hw ? GetWindowLongPtr(hw, GWL_STYLE) : 0;
-            const bool thick = st & WS_THICKFRAME;
-            const bool caption = st & WS_CAPTION;
-            const bool z = hw && IsZoomed(hw);
-            printf("[MAXTEST] %s geo=%dx%d@%d,%d vis=%d state=0x%x IsZoomed=%d style=0x%llx THICK=%d CAPTION=%d\n",
-                   tag, g.width(), g.height(), g.x(), g.y(),
-                   int(mainWin->visibility()), int(mainWin->windowState()), int(z),
-                   (unsigned long long)st, int(thick), int(caption));
-#else
-            printf("[MAXTEST] %s geo=%dx%d@%d,%d\n", tag, g.width(), g.height(), g.x(), g.y());
+            if (hw) {
+                RECT wr{}, cr{};
+                GetWindowRect(hw, &wr);
+                GetClientRect(hw, &cr);
+                const LONG_PTR st = GetWindowLongPtr(hw, GWL_STYLE);
+                printf(" real=%dx%d@%d,%d client=%dx%d zoom=%d style=0x%llx THICK=%d",
+                       int(wr.right - wr.left), int(wr.bottom - wr.top), int(wr.left), int(wr.top),
+                       int(cr.right - cr.left), int(cr.bottom - cr.top), int(IsZoomed(hw)),
+                       (unsigned long long)st, int((st & WS_THICKFRAME) != 0));
+            }
 #endif
+            printf("\n");
             fflush(stdout);
         };
         QTimer::singleShot(1500, mainWin, [mainWin, dump, frameless]() {
             dump("before");
-            // 手动几何最大化（与 Main.qml toggleMaximize 同机制，不碰 showMaximized）
-            const QRect avail = mainWin->screen()->availableGeometry();
-            mainWin->setGeometry(avail);
-            QTimer::singleShot(1000, mainWin, [mainWin, dump, frameless]() {
-                dump("afterManualMax");
-                // #11：补 WS_MAXIMIZE 样式位 → IsZoomed 应变真（第三方任务栏工具认最大化）
-                frameless->setMaximizedStyle(true);
-                QTimer::singleShot(400, mainWin, [mainWin, dump, frameless]() {
-                    dump("afterStyleBit");
-                    frameless->setMaximizedStyle(false);
-                    mainWin->showNormal();
-                    mainWin->setGeometry(200, 150, 1200, 720);
-                    QTimer::singleShot(800, mainWin, [mainWin, dump]() {
+            frameless->setNativeMaximized(true);
+            QTimer::singleShot(500, mainWin, [mainWin, dump, frameless]() {
+                dump("nativeMax+500ms");
+#ifdef Q_OS_WIN
+                // 诊断：从外面再强制对齐一次工作区，看是否被 Qt/系统弹回
+                {
+                    const HWND hw = reinterpret_cast<HWND>(mainWin->winId());
+                    const HMONITOR mon = MonitorFromWindow(hw, MONITOR_DEFAULTTONEAREST);
+                    MONITORINFO mi{};
+                    mi.cbSize = sizeof(mi);
+                    if (mon && GetMonitorInfoW(mon, &mi)) {
+                        const RECT &w = mi.rcWork;
+                        printf("[MAXTEST] rcWork=%ld,%ld %ldx%ld\n", (long)w.left, (long)w.top,
+                               (long)(w.right - w.left), (long)(w.bottom - w.top));
+                        SetWindowPos(hw, nullptr, w.left, w.top, w.right - w.left, w.bottom - w.top,
+                                     SWP_NOZORDER | SWP_NOACTIVATE);
+                    }
+                }
+#endif
+                dump("afterForce");
+                QTimer::singleShot(1200, mainWin, [mainWin, dump, frameless]() {
+                    dump("force+1200ms");
+                    frameless->setNativeMaximized(false);
+                    QTimer::singleShot(600, mainWin, [mainWin, dump]() {
                         dump("afterRestore");
                         QCoreApplication::quit();
                     });
@@ -5985,19 +6001,57 @@ int main(int argc, char *argv[])
         QTimer::singleShot(3600, &app, [mainWin, prop, &didMax, call]() {
             const QRect av = mainWin->screen() ? mainWin->screen()->availableGeometry()
                                                : QRect(0, 0, 99999, 99999);
-            didMax = prop("maximized") && mainWin->width() >= av.width() - 4
-                     && mainWin->height() >= av.height() - 4;
-            printf("[%s] 点最大化 → 铺满工作区（%dx%d vs 工作区 %dx%d）\n",
+            // 方案②（v1.4.0）：最大化必须真的是系统最大化态（IsZoomed）——
+            // 旧方案①只是手动赋工作区几何，IsZoomed 永假，任务栏工具认不出。
+            // 并且要看**原生矩形**：Qt 侧几何可能"看起来贴边"，实际窗口比工作区下移了
+            // 一个边框高度（125% DPI 下 30 物理像素），表现为"顶部缺一栏 + 底部钻任务栏"。
+#ifdef Q_OS_WIN
+            const HWND hw = reinterpret_cast<HWND>(mainWin->winId());
+            const bool zoomed = hw && IsZoomed(hw);
+            RECT wr{};
+            const bool hasRect = hw && GetWindowRect(hw, &wr);
+            const int realX = hasRect ? int(wr.left) : 0;
+            const int realY = hasRect ? int(wr.top) : 0;
+            const int realW = hasRect ? int(wr.right - wr.left) : 0;
+            const int realH = hasRect ? int(wr.bottom - wr.top) : 0;
+            bool realOk = false;
+            if (hw) {
+                const HMONITOR mon = MonitorFromWindow(hw, MONITOR_DEFAULTTONEAREST);
+                MONITORINFO mi{};
+                mi.cbSize = sizeof(mi);
+                if (mon && GetMonitorInfoW(mon, &mi)) {
+                    realOk = realX == int(mi.rcWork.left) && realY == int(mi.rcWork.top)
+                             && realW == int(mi.rcWork.right - mi.rcWork.left)
+                             && realH == int(mi.rcWork.bottom - mi.rcWork.top);
+                }
+            }
+#else
+            const bool zoomed = true;
+            const bool realOk = true;
+            const int realX = 0, realY = 0, realW = 0, realH = 0;
+#endif
+            didMax = prop("maximized") && zoomed && realOk
+                     && mainWin->width() >= av.width() - 4 && mainWin->height() >= av.height() - 4
+                     && mainWin->width() <= av.width() + 4 && mainWin->height() <= av.height() + 4
+                     && qAbs(mainWin->y() - av.y()) <= 4;   // 原生最大化会整体下移一行，必须被对齐
+            printf("[%s] 点最大化 → 铺满工作区且是真最大化（qt %dx%d@%d,%d / native %dx%d@%d,%d vs 工作区 %dx%d@%d,%d IsZoomed=%d）\n",
                    didMax ? "PASS" : "FAIL", mainWin->width(), mainWin->height(),
-                   av.width(), av.height());
+                   mainWin->x(), mainWin->y(), realW, realH, realX, realY,
+                   av.width(), av.height(), av.x(), av.y(), int(zoomed));
             call("toggleMaximize");              // 再点 → 还原
         });
         QTimer::singleShot(4300, &app, [mainWin, prop, &didRestore, w0, h0]() {
-            didRestore = !prop("maximized")
+#ifdef Q_OS_WIN
+            const HWND hw = reinterpret_cast<HWND>(mainWin->winId());
+            const bool zoomed = hw && IsZoomed(hw);
+#else
+            const bool zoomed = false;
+#endif
+            didRestore = !prop("maximized") && !zoomed
                          && qAbs(mainWin->width() - w0) <= 6 && qAbs(mainWin->height() - h0) <= 6;
-            printf("[%s] 再点 → 还原到基线（%dx%d，maximized=%d）\n",
+            printf("[%s] 再点 → 还原到基线（%dx%d，maximized=%d IsZoomed=%d）\n",
                    didRestore ? "PASS" : "FAIL", mainWin->width(), mainWin->height(),
-                   int(prop("maximized")));
+                   int(prop("maximized")), int(zoomed));
             const bool all = fs && exitFs && didMax && didRestore;
             printf("%s 最大化按钮三步闭环\n", all ? "[PASS]" : "[FAIL]");
             fflush(stdout);
