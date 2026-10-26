@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(MuyunMusic VERSION 1.3.1 LANGUAGES CXX C)
+project(MuyunMusic VERSION 1.3.2 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -103,6 +103,16 @@ target_include_directories(MuyunMusic PRIVATE
 set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/minimp3/minimp3_impl.cpp"
     PROPERTIES COMPILE_OPTIONS "-w")
 
+# MediaSession.cpp 必须关掉虚函数去虚拟化：
+# 里面手写的 WinRT 接口是纯抽象类（只有 = 0，没有任何实现）。MinGW GCC 在
+# -O2/-O3 下会把对它们的虚调用"去虚拟化"成直接调 __cxa_pure_virtual，
+# MinGW 链接这个未定义导入符号时只生成一个假地址（0x100000000），运行时
+# 一调就 0xc0000005 崩。禁掉去虚拟化后走正常的 vtable 间接调用。
+if(WIN32)
+    set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/ui/MediaSession.cpp"
+        PROPERTIES COMPILE_OPTIONS "-fno-devirtualize")
+endif()
+
 target_link_libraries(MuyunMusic PRIVATE
     quickjs
     Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2
@@ -124,7 +134,9 @@ target_compile_definitions(MuyunMusic PRIVATE
 if(WIN32)
     # imm32：ImeGuard 要在"焦点不在输入框"时把窗口 IME 上下文接回来
     # （Qt 的 QWindowsInputContext 遇到不接受输入法的焦点对象会 ImmAssociateContext(hwnd, NULL)）
-    target_link_libraries(MuyunMusic PRIVATE psapi imm32)
+    # windowsapp：系统媒体控制（SMTC）的 WinRT 激活入口 RoGetActivationFactory/
+    # RoActivateInstance/WindowsCreateString 都在这个导入库里（MinGW 自带）
+    target_link_libraries(MuyunMusic PRIVATE psapi imm32 windowsapp)
 endif()
 
 # ---------------------------------------------------------------------------

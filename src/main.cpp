@@ -79,6 +79,7 @@ class QQuickMouseEvent;   // 定义在 Qt 私有头里；自检只往 clicked �
 #include <functional>
 #include "ui/HotkeyManager.h"
 #include "ui/ImeGuard.h"
+#include "ui/MediaSession.h"
 #include "ui/FramelessWindow.h"
 #include "ui/SyncController.h"
 #include "ui/StageBridge.h"
@@ -2070,6 +2071,9 @@ int main(int argc, char *argv[])
     auto *tray = new TrayController(player, qApp);
     auto *downloads = new DownloadController(qApp);
     auto *sync = new SyncController(library, qApp);
+    // Windows 系统媒体控制（SMTC）：把主窗注册成系统媒体会话，让系统音量弹层的媒体卡、
+    // 锁屏/通知中心媒体控件和键盘多媒体键认到"暮云正在放什么"（窗口建好后再 attach）
+    auto *mediaSession = new MediaSession(player, qApp);
 
     // 下载完成后触发本地库重扫，新文件出现在「本地音乐」
     QObject::connect(downloads, &DownloadController::rescanRequested,
@@ -4683,6 +4687,8 @@ int main(int argc, char *argv[])
     stage->attachWindow(mainWin);
     hotkey->attach(mainWin);
     imeGuard->attach(mainWin);
+    // 系统媒体会话挂在 HWND 上：attach 内部会盯 winId() 变化（全屏进出重建窗口）自动重挂
+    mediaSession->attach(mainWin);
     // 手动最大化样式位同步（#11）：只需窗口句柄，不激活原生过滤器（见 FramelessWindow 头注释）
     frameless->bindMaxWindow(mainWin);
     // mineradio 舞台是独立进程窗，它抢焦点时本应用会判为"后台"→ 热键保活，
@@ -6056,6 +6062,94 @@ int main(int argc, char *argv[])
             printf("%s 最大化按钮三步闭环\n", all ? "[PASS]" : "[FAIL]");
             fflush(stdout);
             finishSelfTest(all ? 0 : 4);
+        });
+    }
+#endif // MUYUN_SELFTES
+
+    // 用法：MuyunMusic.exe --test-smtc   （系统媒体控制：会话是否建立 + 元数据能否被系统读回）
+    // 用户报的 bug：播放歌曲时 Windows 系统媒体播放组件识别不到我们在放歌。
+    // 这条自检不依赖音频文件：直接推一条合成曲目给系统，再回读标题/状态比对——
+    // 回读一致说明系统侧真接住了（而不是我们单方面调了 API）。
+#ifdef MUYUN_SELFTES
+    if (args.contains(QStringLiteral("--test-smtc"))) {
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        static bool smtcSessionOk = false;
+        static QString smtcVerifyErr;
+        QTimer::singleShot(1500, &app, [mediaSession]() {
+            smtcSessionOk = mediaSession->sessionActive();
+            printf("[%s] 系统媒体会话已建立（SMTC interop GetForWindow）\n",
+                   smtcSessionOk ? "PASS" : "FAIL");
+            if (!smtcSessionOk) return;
+            QVariantMap song;
+            song.insert(QStringLiteral("id"), QStringLiteral("smtc-selftest"));
+            song.insert(QStringLiteral("name"), QStringLiteral("暮云系统媒体自检曲目"));
+            song.insert(QStringLiteral("artist"), QStringLiteral("暮云音乐"));
+            song.insert(QStringLiteral("album"), QStringLiteral("自检专辑"));
+            smtcVerifyErr = mediaSession->testPushAndVerify(song, true);
+            printf("[%s] 标题/歌手/播放状态回读一致%s\n",
+                   smtcVerifyErr.isEmpty() ? "PASS" : "FAIL",
+                   smtcVerifyErr.isEmpty() ? "" : qPrintable(QStringLiteral("：") + smtcVerifyErr));
+        });
+        QTimer::singleShot(2400, &app, []() {
+            const bool all = smtcSessionOk && smtcVerifyErr.isEmpty();
+            printf("%s 系统媒体播放组件能识别到本应用在播歌\n", all ? "[PASS]" : "[FAIL]");
+            fflush(stdout);
+            finishSelfTest(all ? 0 : 4);
+        });
+    }
+#endif // MUYUN_SELFTES
+
+    // 用法：MuyunMusic.exe --test-smtc-key   （系统媒体键：真的按一次多媒体键看程序会不会崩）
+    // 现象：系统媒体面板里点播放，程序闪退。这条自检把"正在播放"推出去后模拟按下
+    // VK_MEDIA_PLAY_PAUSE，走的就是 Windows 自己回调我们 Delegate 的同一条路。
+#ifdef MUYUN_SELFTES
+    if (args.contains(QStringLiteral("--test-smtc-key"))) {
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        static QString keyVerifyErr;
+        QTimer::singleShot(1500, &app, [mediaSession]() {
+            QVariantMap song;
+            song.insert(QStringLiteral("id"), QStringLiteral("smtc-keytest"));
+            song.insert(QStringLiteral("name"), QStringLiteral("暮云媒体键自检曲目"));
+            song.insert(QStringLiteral("artist"), QStringLiteral("暮云音乐"));
+            song.insert(QStringLiteral("album"), QStringLiteral("自检专辑"));
+            keyVerifyErr = mediaSession->testPushAndVerify(song, true);
+            printf("[%s] 会话建立并推了在播状态%s\n", keyVerifyErr.isEmpty() ? "PASS" : "FAIL",
+                   keyVerifyErr.isEmpty() ? "" : qPrintable(QStringLiteral("：") + keyVerifyErr));
+        });
+        QTimer::singleShot(2100, &app, [mainWin]() {
+            // 先把主窗抬到前台：多媒体键只会投给"当前"会话，不抬前台时可能落到别的播放器
+            HWND hw = mainWin ? reinterpret_cast<HWND>(mainWin->winId()) : nullptr;
+            if (!hw) return;
+            keybd_event(VK_MENU, 0, 0, 0);
+            keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
+            SetForegroundWindow(hw);
+            BringWindowToTop(hw);
+            printf("[smtc] 已抬前台 hwnd=%p\n", reinterpret_cast<void *>(hw));
+            fflush(stdout);
+        });
+        QTimer::singleShot(2600, &app, []() {
+            printf("[smtc] 模拟按下 VK_MEDIA_PLAY_PAUSE\n");
+            fflush(stdout);
+            keybd_event(VK_MEDIA_PLAY_PAUSE, 0, 0, 0);
+            keybd_event(VK_MEDIA_PLAY_PAUSE, 0, KEYEVENTF_KEYUP, 0);
+        });
+        QTimer::singleShot(3400, &app, []() {
+            printf("[smtc] 再按一次 VK_MEDIA_PLAY_PAUSE\n");
+            fflush(stdout);
+            keybd_event(VK_MEDIA_PLAY_PAUSE, 0, 0, 0);
+            keybd_event(VK_MEDIA_PLAY_PAUSE, 0, KEYEVENTF_KEYUP, 0);
+        });
+        QTimer::singleShot(5000, &app, [mediaSession]() {
+            const int calls = mediaSession->testSystemButtonCount();
+            if (calls <= 0) {
+                printf("[FAIL] 系统侧没把多媒体键送过来（Delegate 的 Invoke 没被调到，按钮等于没用）\n");
+                fflush(stdout);
+                finishSelfTest(4);
+                return;
+            }
+            printf("[PASS] 媒体键回调后程序仍在运行（没崩），系统回调次数=%d\n", calls);
+            fflush(stdout);
+            finishSelfTest(0);
         });
     }
 #endif // MUYUN_SELFTES
