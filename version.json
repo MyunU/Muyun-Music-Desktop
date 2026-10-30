@@ -2,7 +2,7 @@
   "_comment": "更新提示用的版本清单。发布版：改 version/notes 与下面两个 url，并把同版本号的安装包传到 Releases。版本号规则：修 bug 末位 +1、加功能中间 +1、项目大改动首位 +1。",
   "version": "1.4.0",
   "pubDate": "2026-10-31",
-  "notes": "1.4.0 更新\n· 新增 Windows 11 毛玻璃（亚克力）主窗口外观：窗口半透明并跟随系统模糊，支持深色/浅色主题，浮岛式圆角布局\n· 设置新增「窗口外观」页：主程序窗口与设置界面可分别开启毛玻璃并调节不透明度\n· 便携版与安装包体积进一步缩小\n· 修复窗口化时切换窗口后外沿出现黑框/白框\n· 修复拖动窗口左、上边框时窗口剧烈抖动\n· 修复全屏、最大化、最小化恢复或置顶切换后左上角出现系统标题栏",
+  "notes": "1.4.0 更新\n· 新增 Windows 11 毛玻璃（亚克力）主窗口外观：窗口半透明并跟随系统模糊，支持深色/浅色主题，浮岛式圆角布局\n· 设置新增「窗口外观」页：主程序窗口与设置界面可分别开启毛玻璃并调节不透明度\n· 便携版与安装包体积进一步缩小",
   "pageUrl": "https://github.com/MyunU/Muyun-Music-Desktop/releases/tag/v1.4.0",
   "downloadUrl": "https://github.com/MyunU/Muyun-Music-Desktop/releases/download/v1.4.0/MuyunMusic-1.4.0.exe"
 }
