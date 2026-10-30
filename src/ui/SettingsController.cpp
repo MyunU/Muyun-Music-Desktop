@@ -96,6 +96,19 @@ SettingsController::SettingsController(LibraryController *library, QObject *pare
     m_embedLyrics = DocumentStore::instance()->readSync(
         QStringLiteral("general"), QStringLiteral("embedLyrics"), true).toBool();
 
+    // 窗口外观：两个分区各一组「开关 + 透明度」。
+    // 老版本只存过 windowGlass（布尔），升级时若新键不存在就继承它，别让用户的开关白关。
+    const bool legacyGlass = DocumentStore::instance()->readSync(
+        QStringLiteral("general"), QStringLiteral("windowGlass"), true).toBool();
+    m_mainGlass = DocumentStore::instance()->readSync(
+        QStringLiteral("general"), QStringLiteral("mainGlass"), legacyGlass).toBool();
+    m_mainAlpha = qBound(0, DocumentStore::instance()->readSync(
+        QStringLiteral("general"), QStringLiteral("mainAlpha"), 62).toInt(), 100);
+    m_settingsGlass = DocumentStore::instance()->readSync(
+        QStringLiteral("general"), QStringLiteral("settingsGlass"), true).toBool();
+    m_settingsAlpha = qBound(0, DocumentStore::instance()->readSync(
+        QStringLiteral("general"), QStringLiteral("settingsAlpha"), 90).toInt(), 100);
+
     // 缓存大小定期刷：新缓存（下载音频 / 封面）加了要马上更新显示，
     // 别等下次进设置页才刷。只在值变了才 emit，避免无谓的 QML 重求值。
     m_cacheTimer.setInterval(3000);
@@ -125,6 +138,44 @@ void SettingsController::setEmbedLyrics(bool v)
     DocumentStore::instance()->write(QStringLiteral("general"),
                                      QStringLiteral("embedLyrics"), v);
     emit embedChanged();
+}
+
+void SettingsController::setMainGlass(bool v)
+{
+    if (m_mainGlass == v) return;
+    m_mainGlass = v;
+    DocumentStore::instance()->write(QStringLiteral("general"),
+                                     QStringLiteral("mainGlass"), v);
+    emit appearanceChanged();
+}
+
+void SettingsController::setMainAlpha(int v)
+{
+    v = qBound(0, v, 100);
+    if (m_mainAlpha == v) return;
+    m_mainAlpha = v;
+    DocumentStore::instance()->write(QStringLiteral("general"),
+                                     QStringLiteral("mainAlpha"), v);
+    emit appearanceChanged();
+}
+
+void SettingsController::setSettingsGlass(bool v)
+{
+    if (m_settingsGlass == v) return;
+    m_settingsGlass = v;
+    DocumentStore::instance()->write(QStringLiteral("general"),
+                                     QStringLiteral("settingsGlass"), v);
+    emit appearanceChanged();
+}
+
+void SettingsController::setSettingsAlpha(int v)
+{
+    v = qBound(0, v, 100);
+    if (m_settingsAlpha == v) return;
+    m_settingsAlpha = v;
+    DocumentStore::instance()->write(QStringLiteral("general"),
+                                     QStringLiteral("settingsAlpha"), v);
+    emit appearanceChanged();
 }
 
 void SettingsController::setPlayerStyle(const QString &style)

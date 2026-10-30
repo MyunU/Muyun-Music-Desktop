@@ -7,9 +7,20 @@ Rectangle {
     id: bar
     Layout.fillWidth: true
     Layout.preferredHeight: 76
-    color: theme.panelColor
+    // 浮岛式：玻璃模式下用卡片色 + 圆角，和上方内容区之间留出间距（见 Main.qml 的 spacing）
+    radius: 12
+    property bool edgeFlush: false   // 由 Main.qml 传进来（本文件看不到那边的 root id）
+    color: theme.glass ? theme.cardColor : theme.panelColor
+    // 贴边态（全屏/最大化）卡片压在屏幕最外沿，1px 描边会变成屏幕边上一圈"白框" → 不画
+    border.width: (theme.glass && !edgeFlush) ? 1 : 0
+    border.color: theme.borderColor
 
-    Rectangle { width: parent.width; height: 1; color: theme.borderColor }
+    Rectangle {
+        width: parent.width
+        height: 1
+        color: theme.borderColor
+        visible: !theme.glass
+    }
 
     // 绑定 favoritesVersion，收藏变化立即刷新
     property bool favState: {

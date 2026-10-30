@@ -112,6 +112,9 @@ void HotkeyManager::refresh()
 void HotkeyManager::syncHwnd()
 {
     if (!m_window) return;
+    // 平台窗已销毁（退出关窗过程中）→ 直接放弃，不能碰 winId()：
+    // 那会把窗口重新创建出来（详见 ui/WindowHwnd.h 的事故说明）。
+    if (!m_window->handle()) return;
     const quintptr cur = reinterpret_cast<quintptr>(m_window->winId());
     if (!cur || cur == m_hwnd) return;
     HKLOG("HWND 变化 %p → %p，重定位热键注册\n", reinterpret_cast<void *>(m_hwnd),

@@ -146,9 +146,11 @@ Item {
         visible: coverBg.visible
     }
     // 无封面时的纯色背景
+    // 必须完全不透明：播放页是盖在主页之上的整页层，底色只要漏一点（旧值 #ee ≈ 93%）
+    // 就会把主页的卡片/列表当残影透上来，看起来像两层界面叠在一起（#35-补）
     Rectangle {
         anchors.fill: parent
-        color: theme.dark ? "#ee101014" : "#eef2f2f4"
+        color: theme.dark ? "#101014" : "#f2f2f4"
         visible: !coverBg.visible
     }
     // 边缘渐变（增强景深感）

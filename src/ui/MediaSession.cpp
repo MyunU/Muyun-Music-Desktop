@@ -11,6 +11,7 @@
 #include <cwchar>
 
 #include "PlayerController.h"
+#include "WindowHwnd.h"
 #include "core/Types.h"
 
 #if defined(Q_OS_WIN)
@@ -541,7 +542,9 @@ bool MediaSession::sessionActive() const
 void MediaSession::syncHwnd()
 {
     if (!d->window) return;
-    HWND cur = reinterpret_cast<HWND>(d->window->winId());
+    // 平台窗已销毁（退出关窗过程中）→ 直接摘掉会话，绝不能碰 winId()：
+    // 那会把窗口重新创建出来（ui/WindowHwnd.h 记录了这条事故链）。
+    HWND cur = hwndWithoutCreating(d->window);
     MSLOG("syncHwnd cur=%p 旧=%p\n", reinterpret_cast<void *>(cur),
           reinterpret_cast<void *>(d->hwnd));
     if (cur == d->hwnd) return;

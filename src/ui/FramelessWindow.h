@@ -38,6 +38,14 @@ public:
     /// 靠 IsZoomed() 认"最大化"；我们手动改几何从不带这个位 → 工具认不出）
     Q_INVOKABLE void setMaximizedStyle(bool on);
 
+    /// 边缘拖拽缩放的**原子**几何写入：一次 setGeometry(x,y,w,h) → 平台层一次
+    /// SetWindowPos（移动+缩放同一拍完成）。
+    /// QML 里分别赋 width 再赋 x（或 height 再赋 y）看着等价，实际是两次独立的
+    /// SetWindowPos：第一次先把窗口向右/向下撑开、第二次才把左/上边挪过去 ——
+    /// 一帧内两次几何跳变，拖左/上边框时整界面就是肉眼可见的"激烈抖动"（右/下只改
+    /// 一个维度所以不抖，正好对上用户报的症状）。必须一次写全。
+    Q_INVOKABLE void applyWindowGeometry(int x, int y, int w, int h);
+
     /// 方案②：走 Windows 原生最大化（ShowWindow SW_MAXIMIZE），而不是手动赋几何。
     /// 好处：IsZoomed() 为真、任务栏工具/贴边/最小化后从任务栏恢复都按系统行为走，
     /// 还原目标由系统自己记（QML 不用再存 _rx/_ry/_rw/_rh）。
@@ -47,6 +55,12 @@ public:
     Q_INVOKABLE bool setNativeMaximized(bool on);
     /// 当前是否处于原生最大化态（IsZoomed）
     Q_INVOKABLE bool isNativeMaximized() const;
+
+    /// 当前鼠标全局位置（逻辑像素，Windows 下直接读系统光标，不依赖窗口自身位置）。
+    /// QML 的 mapToGlobal(m.x, m.y) 在窗口被拖动时会把「窗口新位置」和「鼠标旧局部坐标」
+    /// 混在一起算出错的全局点，拖左/上边形成正反馈 → 剧烈抖动；这里绕开窗口几何，
+    /// 取真实光标，天然稳定。
+    Q_INVOKABLE QPointF globalCursorLogical() const;
 
     bool nativeEventFilter(const QByteArray &eventType, void *message, qintptr *result) override;
 

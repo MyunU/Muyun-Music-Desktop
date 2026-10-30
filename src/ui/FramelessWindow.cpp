@@ -1,6 +1,9 @@
 #include "FramelessWindow.h"
+#include "Backdrop.h"
+#include "WindowHwnd.h"
 
 #include <QApplication>
+#include <QPointF>
 #include <QWindow>
 
 #ifdef Q_OS_WIN
@@ -60,6 +63,14 @@ void FramelessWindow::setMaximizedStyle(bool on)
 #endif
 }
 
+void FramelessWindow::applyWindowGeometry(int x, int y, int w, int h)
+{
+    if (!m_maxWindow) return;
+    // 一次 setGeometry = 平台层一次 SetWindowPos（位置+尺寸同一拍），
+    // 不会出现"先撑开再挪边"的双跳；最小值/最大化尺寸钳制也由 Qt 统一处理。
+    m_maxWindow->setGeometry(x, y, w, h);
+}
+
 // ---- 方案②：原生最大化 -------------------------------------------------------
 // 实测（v1.3.0 frameless 窗，style=0x96000000 纯 WS_POPUP、无 WS_THICKFRAME）：
 //   ShowWindow(SW_MAXIMIZE) → rect 变成 0,24,1536,840（工作区是 0,0,1536,816），
@@ -104,6 +115,20 @@ bool FramelessWindow::isNativeMaximized() const
 #endif
 }
 
+QPointF FramelessWindow::globalCursorLogical() const
+{
+#ifdef Q_OS_WIN
+    POINT p{};
+    if (!GetCursorPos(&p)) return {};
+    const qreal dpr = m_maxWindow ? m_maxWindow->devicePixelRatio() : 1.0;
+    // GetCursorPos 返回物理像素；QML 的全局坐标是逻辑像素（DPR 缩放后）。
+    // 直接读系统光标、不经过窗口自身几何，拖动过程中窗口怎么动都不受影响。
+    return QPointF(static_cast<qreal>(p.x) / dpr, static_cast<qreal>(p.y) / dpr);
+#else
+    return {};
+#endif
+}
+
 bool FramelessWindow::nativeEventFilter(const QByteArray &eventType, void *message, qintptr *result)
 {
 #ifdef Q_OS_WIN
@@ -117,7 +142,7 @@ bool FramelessWindow::nativeEventFilter(const QByteArray &eventType, void *messa
     // 在 WM_WINDOWPOSCHANGING 里直接改 WINDOWPOS 最稳：Windows 按修正值定位，不闪不回弹。
     // 注：这里只在 IsZoomed 为真时改，不影响普通移动/缩放；也不改 Qt 的最大化状态判定。
     if (m_maxWindow && m->message == WM_WINDOWPOSCHANGING && m->lParam) {
-        HWND maxHwnd = reinterpret_cast<HWND>(m_maxWindow->winId());
+        HWND maxHwnd = hwndWithoutCreating(m_maxWindow);
         if (maxHwnd && m->hwnd == maxHwnd && IsZoomed(maxHwnd)) {
             auto *wp = reinterpret_cast<WINDOWPOS *>(m->lParam);
             const HMONITOR mon = MonitorFromWindow(maxHwnd, MONITOR_DEFAULTTONEAREST);
@@ -134,7 +159,7 @@ bool FramelessWindow::nativeEventFilter(const QByteArray &eventType, void *messa
     }
 
     if (!m_window) return false;
-    HWND hwnd = reinterpret_cast<HWND>(m_window->winId());
+    HWND hwnd = hwndWithoutCreating(m_window);
     if (!hwnd || m->hwnd != hwnd) return false;
 
     // ---- 非客户区归零：无边框但保留系统行为；最大化时按边框宽度内缩（修顶部缺一行）----
@@ -143,6 +168,10 @@ bool FramelessWindow::nativeEventFilter(const QByteArray &eventType, void *messa
     // 方案②的原生最大化对齐是另一条路径：上面只改"最大化态窗口矩形"的 WM_WINDOWPOSCHANGING
     // 分支，不动任何状态位，两者互不影响。
     if (m->message == WM_NCCALCSIZE && m->wParam == TRUE && result) {
+        // 玻璃（DWM 亚克力）接管时让路：那边把普通态算成"窗口矩形"、最大化态算成"工作区"，
+        // 是亚克力唯一正确的算法。这里若抢先按"缩进一圈边框"算（最大化），屏幕四边会留
+        // 一条实色带（深色模式=黑框），而且两处都写 *result=0，谁先谁赢，结果不稳定。
+        if (Muyun::Backdrop::glassActive()) return false;
         auto *p = reinterpret_cast<NCCALCSIZE_PARAMS *>(m->lParam);
         if (IsZoomed(hwnd)) {
             const UINT dpi = GetDpiForWindow(hwnd);

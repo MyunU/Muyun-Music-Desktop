@@ -2,6 +2,7 @@
 
 #include "ui/PlayerController.h"
 #include "ui/SettingsController.h"
+#include "ui/WindowHwnd.h"
 #include "core/Types.h"
 #include "core/network/HttpClient.h"
 #include "core/storage/DocumentStore.h"
@@ -427,7 +428,7 @@ void StageBridge::onProcFinished(int exitCode)
             if (!m_window) return;
             const auto vis = m_window->visibility();
             if (!m_window->isVisible() || vis == QWindow::Minimized || vis == QWindow::Hidden) return;
-            HWND hwnd = reinterpret_cast<HWND>(m_window->winId());
+            HWND hwnd = hwndWithoutCreating(m_window);
             if (!hwnd || GetForegroundWindow() == hwnd) return;   // 已在前台，别打扰
             if (nudge) {
                 keybd_event(VK_MENU, 0, 0, 0);                    // 单次 Alt 骗过前台锁
@@ -843,7 +844,7 @@ void StageBridge::pushBounds()
 {
 #ifdef Q_OS_WIN
     if (!m_window) return;
-    HWND hwnd = reinterpret_cast<HWND>(m_window->winId());
+    HWND hwnd = hwndWithoutCreating(m_window);
     RECT rc{};
     if (!GetWindowRect(hwnd, &rc)) return;
     const bool fs = m_window->visibility() == QWindow::FullScreen;

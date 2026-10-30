@@ -12,9 +12,14 @@ Popup {
     modal: true
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
 
+    // 玻璃模式下设置面板背后还压着主页内容：只用薄薄一层 panelColor 会把字糊掉，
+    // 所以这里用「设置界面」那层厚底（theme.settingsBaseColor，默认 0.90，可调）。
+    // 关了「设置界面」的毛玻璃就换成不透明实底（panelSolidColor）——玻璃模式下的
+    // panelColor 只有 0.14 的薄染色，拿它当面板底会透成一片，字照样看不清。
     background: Rectangle {
         radius: 14
-        color: theme.panelColor
+        color: !theme.glass ? theme.panelColor
+               : (settings.settingsGlass ? theme.settingsBaseColor : theme.panelSolidColor)
         border.color: theme.borderColor
         border.width: 1
     }
@@ -26,6 +31,7 @@ Popup {
         { id: "source", name: "在线音源" },
         { id: "lyrics", name: "歌词设置" },
         { id: "player", name: "播放界面" },
+        { id: "appearance", name: "窗口外观" },
         { id: "sync",   name: "同步" },
         { id: "about",  name: "关于" }
     ]
@@ -721,6 +727,189 @@ Popup {
                 Connections {
                     target: lxsync
                     function onSyncEvent(text) { syncStatus.text = text }
+                }
+            }
+
+            // ---------- 窗口外观 ----------
+            ColumnLayout {
+                visible: panel.section === "appearance"
+                Layout.fillWidth: true
+                spacing: 10
+
+                Text { text: "窗口外观"; color: theme.textColor; font.pixelSize: 16; font.bold: true }
+                Text {
+                    text: backdrop.available
+                          ? "毛玻璃 = 窗口半透明、背后由系统做模糊（Windows 11 亚克力材质）。"
+                            + "下面两组各自独立：主程序窗口管整个窗口，设置界面管这块设置面板本身。"
+                          : "当前系统不支持毛玻璃（需 Windows 11 22H2 及以上且开启透明效果），已使用纯色背景。"
+                    color: theme.subTextColor; font.pixelSize: 11; wrapMode: Text.Wrap
+                    Layout.fillWidth: true
+                }
+
+                // ---- 主程序窗口：开关 + 厚度 ----
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 98
+                    radius: 10
+                    color: theme.cardColor
+                    border.color: theme.borderColor
+                    border.width: 1
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.margins: 12
+                        spacing: 8
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Text { text: "主程序窗口"; color: theme.textColor; font.pixelSize: 13; font.bold: true }
+                            Item { Layout.fillWidth: true }
+                            Repeater {
+                                model: [ { id: true, name: "开" }, { id: false, name: "关" } ]
+                                delegate: Rectangle {
+                                    id: mainGlassItem
+                                    required property var modelData
+                                    property bool isSel: settings.mainGlass === modelData.id
+                                    objectName: modelData.id ? "mainGlassSwitchOn" : "mainGlassSwitchOff"
+                                    width: 40; height: 24; radius: 12
+                                    opacity: backdrop.available ? 1.0 : 0.45
+                                    color: isSel ? theme.activeColor
+                                                 : (mgHover.containsMouse ? theme.hoverColor : theme.cardColor)
+                                    border.color: isSel ? theme.accentColor : theme.borderColor
+                                    border.width: 1
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: mainGlassItem.modelData.name
+                                        color: mainGlassItem.isSel ? theme.accentColor : theme.textColor
+                                        font.pixelSize: 11
+                                    }
+                                    MouseArea {
+                                        id: mgHover
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        enabled: backdrop.available
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: settings.mainGlass = mainGlassItem.modelData.id
+                                    }
+                                }
+                            }
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 10
+                            Text { text: "不透明度"; color: theme.subTextColor; font.pixelSize: 12 }
+                            MuyunSlider {
+                                id: mainAlphaSlider
+                                objectName: "mainAlphaSlider"
+                                Layout.fillWidth: true
+                                enabled: settings.mainGlass && backdrop.available
+                                opacity: enabled ? 1.0 : 0.45
+                                from: 0; to: 100; stepSize: 1
+                                value: settings.mainAlpha
+                                onMoved: settings.mainAlpha = Math.round(value)
+                                Connections {
+                                    target: settings
+                                    function onAppearanceChanged() {
+                                        const v = settings.mainAlpha
+                                        if (!mainAlphaSlider.pressed
+                                                && Math.abs(mainAlphaSlider.value - v) > 0.01)
+                                            mainAlphaSlider.value = v
+                                    }
+                                }
+                            }
+                            Text {
+                                text: settings.mainAlpha + "%"
+                                color: theme.subTextColor; font.pixelSize: 12
+                                Layout.preferredWidth: 34
+                                horizontalAlignment: Text.AlignRight
+                            }
+                        }
+                    }
+                }
+
+                // ---- 设置界面：开关 + 厚度 ----
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 98
+                    radius: 10
+                    color: theme.cardColor
+                    border.color: theme.borderColor
+                    border.width: 1
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.margins: 12
+                        spacing: 8
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Text { text: "设置界面"; color: theme.textColor; font.pixelSize: 13; font.bold: true }
+                            Item { Layout.fillWidth: true }
+                            Repeater {
+                                model: [ { id: true, name: "开" }, { id: false, name: "关" } ]
+                                delegate: Rectangle {
+                                    id: settingsGlassItem
+                                    required property var modelData
+                                    property bool isSel: settings.settingsGlass === modelData.id
+                                    objectName: modelData.id ? "settingsGlassSwitchOn" : "settingsGlassSwitchOff"
+                                    width: 40; height: 24; radius: 12
+                                    opacity: (settings.mainGlass && backdrop.available) ? 1.0 : 0.45
+                                    color: isSel ? theme.activeColor
+                                                 : (sgHover.containsMouse ? theme.hoverColor : theme.cardColor)
+                                    border.color: isSel ? theme.accentColor : theme.borderColor
+                                    border.width: 1
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: settingsGlassItem.modelData.name
+                                        color: settingsGlassItem.isSel ? theme.accentColor : theme.textColor
+                                        font.pixelSize: 11
+                                    }
+                                    MouseArea {
+                                        id: sgHover
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        enabled: settings.mainGlass && backdrop.available
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: settings.settingsGlass = settingsGlassItem.modelData.id
+                                    }
+                                }
+                            }
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 10
+                            Text { text: "不透明度"; color: theme.subTextColor; font.pixelSize: 12 }
+                            MuyunSlider {
+                                id: settingsAlphaSlider
+                                objectName: "settingsAlphaSlider"
+                                Layout.fillWidth: true
+                                enabled: settings.settingsGlass && settings.mainGlass && backdrop.available
+                                opacity: enabled ? 1.0 : 0.45
+                                from: 0; to: 100; stepSize: 1
+                                value: settings.settingsAlpha
+                                onMoved: settings.settingsAlpha = Math.round(value)
+                                Connections {
+                                    target: settings
+                                    function onAppearanceChanged() {
+                                        const v = settings.settingsAlpha
+                                        if (!settingsAlphaSlider.pressed
+                                                && Math.abs(settingsAlphaSlider.value - v) > 0.01)
+                                            settingsAlphaSlider.value = v
+                                    }
+                                }
+                            }
+                            Text {
+                                text: settings.settingsAlpha + "%"
+                                color: theme.subTextColor; font.pixelSize: 12
+                                Layout.preferredWidth: 34
+                                horizontalAlignment: Text.AlignRight
+                            }
+                        }
+                    }
+                }
+
+                Text {
+                    text: "提示：设置界面背后还有主页内容，压得太透会看不清字，建议 80% 以上。"
+                    color: theme.subTextColor; font.pixelSize: 11; wrapMode: Text.Wrap
+                    Layout.fillWidth: true
                 }
             }
 

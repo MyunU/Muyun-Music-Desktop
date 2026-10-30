@@ -60,6 +60,14 @@ class SettingsController : public QObject
     /// 下载完成后是否把封面/歌词内嵌进音频文件（默认开）
     Q_PROPERTY(bool embedCover READ embedCover WRITE setEmbedCover NOTIFY embedChanged)
     Q_PROPERTY(bool embedLyrics READ embedLyrics WRITE setEmbedLyrics NOTIFY embedChanged)
+    /// 主程序窗口毛玻璃（Win11 亚克力）：关掉后窗口回到不透明的纯色背景
+    Q_PROPERTY(bool mainGlass READ mainGlass WRITE setMainGlass NOTIFY appearanceChanged)
+    /// 主程序窗口厚底不透明度（0..100，滑块用整数免得 QML 出现 0.62000000001）
+    Q_PROPERTY(int mainAlpha READ mainAlpha WRITE setMainAlpha NOTIFY appearanceChanged)
+    /// 设置界面毛玻璃：设置面板是否也用半透明厚底（背后压着主页内容）
+    Q_PROPERTY(bool settingsGlass READ settingsGlass WRITE setSettingsGlass NOTIFY appearanceChanged)
+    /// 设置界面厚底不透明度（0..100）
+    Q_PROPERTY(int settingsAlpha READ settingsAlpha WRITE setSettingsAlpha NOTIFY appearanceChanged)
 
 public:
     explicit SettingsController(LibraryController *library, QObject *parent = nullptr);
@@ -131,6 +139,16 @@ public:
     bool embedLyrics() const { return m_embedLyrics; }
     void setEmbedLyrics(bool v);
 
+    // ---- 窗口外观 ----
+    bool mainGlass() const { return m_mainGlass; }
+    void setMainGlass(bool v);
+    int mainAlpha() const { return m_mainAlpha; }
+    void setMainAlpha(int v);
+    bool settingsGlass() const { return m_settingsGlass; }
+    void setSettingsGlass(bool v);
+    int settingsAlpha() const { return m_settingsAlpha; }
+    void setSettingsAlpha(int v);
+
 signals:
     void foldersChanged();
     void localStatsChanged();
@@ -147,6 +165,8 @@ signals:
     void playerStyleChanged();
     void lyricSettingsChanged();
     void embedChanged();
+    /// 窗口外观（毛玻璃开关 / 双区透明度）任一变化都发这个，main.cpp 一处接线就够
+    void appearanceChanged();
 
 private:
     void loadLxSources();
@@ -175,6 +195,10 @@ private:
     bool m_lyricRoman = false;
     bool m_embedCover = true;
     bool m_embedLyrics = true;
+    bool m_mainGlass = true;
+    int m_mainAlpha = 62;      ///< 主窗厚底不透明度百分比
+    bool m_settingsGlass = true;
+    int m_settingsAlpha = 90;   ///< 设置面板厚底不透明度百分比
     QTimer m_cacheTimer;
     qint64 m_lastSongCacheSize = -1, m_lastOtherCacheSize = -1;
     void clearCacheInternal(const QStringList &dirs, const QString &label);

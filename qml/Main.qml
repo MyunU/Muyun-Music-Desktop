@@ -9,18 +9,56 @@ import "components"
 Window {
     id: root
     // 默认尺寸 = 屏幕 84%×87%（对齐用户红框比例），启动时屏幕居中
-    width: Math.round(Screen.width * 0.84)
-    height: Math.round(Screen.height * 0.87)
+    //
+    // ⚠ x/y **绝对不能**写成 `(Screen.width - width) / 2` 这种带 width 的绑定：
+    //   v1.4.0 起窗口可以用鼠标拉边框缩放，而 width 一变 qml 就会把 x 按"居中"重算一遍
+    //   → 每拉一像素窗口就往中间弹一下，表现就是"拖左边框时窗口抖得厉害"（用户报的症状）。
+    //   v1.3.x 没有边框缩放，这个绑定一直没暴露而已。
+    //   这里把默认尺寸提成常量属性，x/y 只依赖常量和屏幕尺寸，跟窗口 resize 彻底脱钩。
+    readonly property int defaultW: Math.round(Screen.width * 0.84)
+    readonly property int defaultH: Math.round(Screen.height * 0.87)
+    width: defaultW
+    height: defaultH
     minimumWidth: 820
     minimumHeight: 560
-    x: Math.round((Screen.width - width) / 2)
-    y: Math.round((Screen.height - height) / 2)
+    x: Math.round((Screen.width - defaultW) / 2)
+    y: Math.round((Screen.height - defaultH) / 2)
     visible: true
     title: "暮云音乐"
-    color: theme.bgColor
+    // 毛玻璃模式：窗口底色全透明，DWM 在窗口背后做模糊（Backdrop），这里只叠一层渐变
+    color: theme.windowColor
 
     // 无边框：只保留自绘标题栏，避免出现「系统窗口套一层 UI」的双重壳
     flags: Qt.Window | Qt.FramelessWindowHint
+
+    // ==================================================================
+    // 窗口底：玻璃模式下一层"有光"的渐变（顶部提亮、底部压暗），
+    // 让模糊背景不是均匀一片；纯色模式则直接铺 bgColor。
+    // ==================================================================
+    Rectangle {
+        id: windowUnderlay
+        anchors.fill: parent
+        // 多铺 2px：125% DPI 下窗口的"逻辑高度"常带小数（如 881.6），内容层按整像素取整后
+        // 底部/右侧会漏出 1px。那 1px 露的是 DWM 的模糊底（浅色壁纸下就是一条白线），
+        // 所以宁可多铺出去被窗口裁掉，也不能少。负 margins = 向外扩。
+        anchors.margins: -2
+        z: -1
+        gradient: Gradient {
+            orientation: Gradient.Vertical
+            GradientStop { position: 0.0; color: theme.glassSheen }
+            GradientStop { position: 0.42; color: theme.glassBaseColor }
+            GradientStop { position: 1.0; color: theme.bgDeepColor }
+        }
+    }
+
+    // ==================================================================
+    // 浮岛外侧那 8px 缝隙**什么都不画**：它就是窗口底那层玻璃（和标题栏背后的渐变同色）。
+    // 这里曾放了一圈 10px 深色环带（glassRimBand）去压失焦白线；但 `45` 已去掉
+    // WS_THICKFRAME，DWM 失焦描边根本不再存在，失焦白线已不是问题。反过来这条
+    // 环带在失焦时会以 α0.85 深色压住缝隙，现场截图就是一圈 (32,36,44) 的"黑框"
+    // （窗口态失焦复现、点回主程序恢复；全屏/最大化 edgeFlush 本来就不画）。
+    // 所以环带整个删除，缝隙纯透玻璃。
+    // ==================================================================
 
     property string currentPage: "home"
     property var songList: []
@@ -29,6 +67,24 @@ Window {
     property string listBackTarget: "home"   // 点"返回"时回到哪一页（首页 / 歌单广场）
     // #31-②：侧栏折叠（200px ↔ 64px 图标模式）
     property bool sidebarCollapsed: false
+
+    // ==================================================================
+    // 全屏 / 最大化：贴边模式。
+    // 浮岛布局那 8px 缝隙只在**窗口态**有意义（让玻璃透出壁纸、做圆角）；
+    // 一旦铺满屏幕，缝隙和圆角都没有意义（四角会露出壁纸）。所以贴边模式：
+    // 缝隙 0、间距 0、圆角 0，卡片描边也关掉（压在屏幕最外沿的 1px 白描边 = 一圈白框）。
+    // ==================================================================
+    readonly property bool edgeFlush: root.visibility === Window.FullScreen
+                                      || root.visibility === Window.Maximized
+
+    // ==================================================================
+    // 圆角：窗口外形由系统（DWM）按 8 物理像素裁圆，QML 管不着；
+    // 卡片自己画 12（卡片内缩了 8px 缝隙，系统只裁窗口外形，碰不到它）。
+    // 外层不再有"染色圈"——实色圈会被看作黑边框，缝隙直接透玻璃。
+    // ==================================================================
+    readonly property int islandRadius: edgeFlush ? 0 : 12
+    readonly property int islandMargin: edgeFlush ? 0 : 8
+    readonly property int islandSpacing: edgeFlush ? 0 : 8
 
     // 当前打开的「在线歌单」（广场/推荐点进来的那张），收藏歌单按钮要用它做键；
     // 切到别的页面/自建歌单时必须清空，否则收藏按钮会挂到不相干的列表上。
@@ -157,7 +213,8 @@ Window {
         anchors.left: parent.left
         anchors.right: parent.right
         height: 44
-        color: theme.panelColor
+        // 玻璃模式下标题栏不再铺一块实色，直接露出窗口渐变（浮岛式布局的一部分）
+        color: theme.glass ? "transparent" : theme.panelColor
         z: 10
 
         // 拖标题栏空白处移动窗口：交给系统级移动，平滑无抖动
@@ -233,6 +290,16 @@ Window {
                 onClicked: root.close()
             }
         }
+
+        // 标题栏底部分隔线（玻璃模式下只留一道极淡的细白线）
+        Rectangle {
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            height: 1
+            color: theme.borderColor
+            opacity: theme.glass ? 0.35 : 0.6
+        }
     }
 
     // ==================================================================
@@ -243,7 +310,11 @@ Window {
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: parent.bottom
-        spacing: 0
+        // 浮岛布局：左右下各留 8px，露出窗口底渐变，面板之间靠间距分隔（不再靠分隔线）
+        // 全屏/最大化时贴边（见 root.edgeFlush）
+        anchors.margins: root.islandMargin
+        anchors.topMargin: 0
+        spacing: root.islandSpacing
 
         // ------------------ 侧边栏 ------------------
         Rectangle {
@@ -251,7 +322,11 @@ Window {
             Layout.preferredWidth: root.sidebarCollapsed ? 64 : 200
             // #31-②：折叠/展开平滑过渡
             Behavior on Layout.preferredWidth { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
-            color: theme.panelColor
+            radius: root.islandRadius
+            color: theme.glass ? theme.cardColor : theme.panelColor
+            // 贴边态卡片是压在屏幕最外沿上的，这时 1px 描边就是屏幕边上一圈"白框"
+            border.width: (theme.glass && !root.edgeFlush) ? 1 : 0
+            border.color: theme.borderColor
 
             ColumnLayout {
                 anchors.fill: parent
@@ -298,21 +373,35 @@ Window {
                     onClicked: root.sidebarCollapsed = !root.sidebarCollapsed
                 }
             }
+
+            // 玻璃模式下侧栏是"浮岛"，靠间距分区；纯色模式才补一道竖线
+            Rectangle {
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.bottom: parent.bottom
+                width: 1
+                color: theme.borderColor
+                opacity: 0.6
+                visible: !theme.glass
+            }
         }
 
         // ------------------ 右侧 ------------------
         ColumnLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            spacing: 0
+            spacing: root.islandSpacing
 
             // ========== 顶栏 ==========
             // z:10 让搜索联想/热搜下拉（顶栏子元素、悬浮超出顶栏高度）
             // 绘制在下方内容区之上，否则会被后声明的 StackLayout 内容盖住
             Rectangle {
                 Layout.fillWidth: true
-                Layout.preferredHeight: 60
-                color: theme.panelColor
+                Layout.preferredHeight: 56
+                radius: root.islandRadius
+                color: theme.glass ? theme.cardColor : theme.panelColor
+                border.width: (theme.glass && !root.edgeFlush) ? 1 : 0
+                border.color: theme.borderColor
                 z: 10
 
                 RowLayout {
@@ -1028,7 +1117,8 @@ Window {
             }
 
             // ========== 底部播放条 ==========
-            PlayBar { id: playBar }
+            // 播放条圆角跟浮岛一起走（窗口态 12、贴边态 0），跟侧栏/顶栏保持一致
+            PlayBar { id: playBar; radius: root.islandRadius; edgeFlush: root.edgeFlush }
         }
     }
 
@@ -2785,6 +2875,7 @@ Window {
         property real _sh: 0
         property real _gx: 0
         property real _gy: 0
+        property bool _applying: false   // 防重入：MoveWindow 同步回调可能再触发 onPositionChanged
         acceptedButtons: Qt.LeftButton
         cursorShape: ((le && tp) || (ri && bt)) ? Qt.SizeFDiagCursor
                      : ((ri && tp) || (le && bt)) ? Qt.SizeBDiagCursor
@@ -2793,23 +2884,42 @@ Window {
         onPressed: (m) => {
             if (target.maximized) target.maximized = false   // 手动缩放即视为还原态
             _sx = target.x; _sy = target.y; _sw = target.width; _sh = target.height
-            const gp = mapToGlobal(m.x, m.y)
+            // ⚠ 不用 mapToGlobal(m.x, m.y)：拖动过程中窗口位置一变，mapToGlobal 会把
+            //    「窗口新位置」和「鼠标旧局部坐标」混算，全局点带上一份窗口位移 → 正反馈，
+            //    拖左/上边越拖越跳（右/下边位置不动所以不抖）。这里直读系统光标，稳。
+            const gp = (typeof frameless !== "undefined" && frameless.globalCursorLogical)
+                ? frameless.globalCursorLogical()
+                : mapToGlobal(m.x, m.y)
             _gx = gp.x; _gy = gp.y
         }
         onPositionChanged: (m) => {
-            if (!pressed) return
-            const gp = mapToGlobal(m.x, m.y)
+            if (!pressed || _applying) return
+            const gp = (typeof frameless !== "undefined" && frameless.globalCursorLogical)
+                ? frameless.globalCursorLogical()
+                : mapToGlobal(m.x, m.y)
             const dx = gp.x - _gx
             const dy = gp.y - _gy
-            var nx = _sx, ny = _sy, nw = _sw, nh = _sh
-            if (ri) nw = _sw + dx
-            if (bt) nh = _sh + dy
-            if (le) { nw = _sw - dx; nx = _sx + dx }
-            if (tp) { nh = _sh - dy; ny = _sy + dy }
-            if (le && nw < target.minimumWidth) { nw = target.minimumWidth; nx = _sx + (_sw - nw) }
-            if (tp && nh < target.minimumHeight) { nh = target.minimumHeight; ny = _sy + (_sh - nh) }
-            if (nw >= target.minimumWidth) { target.width = nw; target.x = nx }
-            if (nh >= target.minimumHeight) { target.height = nh; target.y = ny }
+            // ⚠ 固定边（拖左/上时右/下边不动）**先取整**，再由它派生被拖那条边。
+            // 若分别 Math.round(nx) 与 Math.round(nw)，两者舍入方向不同会让固定边
+            // ±1px 漂移，鼠标每动一像素就左右/上下摆一次 → 拖左/上边剧烈抖动；
+            // 右/下只改一个维度、位置不动，所以不抖（正好对上现场症状）。
+            const fixedR = Math.round(_sx + _sw)   // 右边缘：拖左边时保持不动
+            const fixedB = Math.round(_sy + _sh)   // 下边缘：拖上边时保持不动
+            var nx, ny, nw, nh
+            if (ri)      { nx = _sx; nw = Math.round(_sw + dx) }
+            else if (le) { nw = Math.round(_sw - dx); nx = fixedR - nw }
+            else         { nx = _sx; nw = _sw }
+            if (bt)      { ny = _sy; nh = Math.round(_sh + dy) }
+            else if (tp) { nh = Math.round(_sh - dy); ny = fixedB - nh }
+            else         { ny = _sy; nh = _sh }
+            // 顶到最小尺寸：被拖的那条边停在最小尺寸处，对面边不动
+            if (nw < target.minimumWidth) { nw = target.minimumWidth; if (le) nx = fixedR - nw }
+            if (nh < target.minimumHeight) { nh = target.minimumHeight; if (tp) ny = fixedB - nh }
+            // ⚠ 必须**一次**写全几何：分两次赋 width/x（height/y）是两次独立 SetWindowPos，
+            //    拖左/上边框时窗口会"先向右撑开、再向左挪边"，一帧内两次跳变 → 整界面剧烈抖动。
+            _applying = true
+            frameless.applyWindowGeometry(nx, ny, nw, nh)
+            _applying = false
         }
     }
     readonly property int _rz: 6      // 边缘把手厚度

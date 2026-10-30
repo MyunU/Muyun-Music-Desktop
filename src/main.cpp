@@ -33,6 +33,7 @@ class QQuickMouseEvent;   // 定义在 Qt 私有头里；自检只往 clicked �
 
 #ifdef Q_OS_WIN
 #include <windows.h>
+#include <dwmapi.h>
 #include <psapi.h>
 #ifdef MUYUN_SELFTES
 #include <imm.h>      // --test-ime：读/断言窗口的 IME 上下文与转换状态
@@ -81,6 +82,7 @@ class QQuickMouseEvent;   // 定义在 Qt 私有头里；自检只往 clicked �
 #include "ui/ImeGuard.h"
 #include "ui/MediaSession.h"
 #include "ui/FramelessWindow.h"
+#include "ui/Backdrop.h"
 #include "ui/SyncController.h"
 #include "ui/StageBridge.h"
 #include "core/audio/AudioEffects.h"
@@ -1698,6 +1700,9 @@ int main(int argc, char *argv[])
 
     QGuiApplication::setHighDpiScaleFactorRoundingPolicy(
         Qt::HighDpiScaleFactorRoundingPolicy::PassThrough);
+    // 毛玻璃（DWM 亚克力）必须：默认给所有 QQuickWindow 开 alpha buffer，
+    // 否则 backing store 不透明，模糊层透不上来（必须在建窗前设）
+    QQuickWindow::setDefaultAlphaBuffer(true);
 
 #ifdef Q_OS_WIN
     // 让控制台以 UTF-8 显示中文，避免自检输出乱码
@@ -2066,6 +2071,27 @@ int main(int argc, char *argv[])
     auto *home = new HomeController(qApp);
     auto *theme = new Theme(qApp);
     auto *settings = new SettingsController(library, qApp);
+    // 窗口毛玻璃（Win11 亚克力）：内容画在透明面上，DWM 在窗口背后做模糊。
+    // 系统不支持（Win10 / 系统关了"透明效果"）时自动退回不透明，避免界面糊成一团。
+    auto *backdrop = new Backdrop(qApp);
+    backdrop->setDark(theme->dark());
+    // 窗口外观分两区：主程序窗口（亚克力 + 厚底）与设置界面（面板厚底）。
+    // 系统不支持亚克力时整体退回不透明，开关变灰（QML 里看 backdrop.available）。
+    const bool glassOn = settings->mainGlass() && backdrop->available();
+    theme->setGlass(glassOn);
+    theme->setMainAlpha(settings->mainAlpha() / 100.0);
+    theme->setSettingsAlpha(settings->settingsAlpha() / 100.0);
+    backdrop->setEnabled(glassOn);
+    QObject::connect(settings, &SettingsController::appearanceChanged, backdrop,
+                     [backdrop, theme, settings]() {
+                         const bool on = settings->mainGlass() && backdrop->available();
+                         theme->setGlass(on);
+                         theme->setMainAlpha(settings->mainAlpha() / 100.0);
+                         theme->setSettingsAlpha(settings->settingsAlpha() / 100.0);
+                         backdrop->setEnabled(on);
+                     });
+    QObject::connect(theme, &Theme::changed, backdrop,
+                     [backdrop, theme]() { backdrop->setDark(theme->dark()); });
     // 应用自身更新提示（开源方案 A：纯 GitHub 清单；见 core/update/UpdateChecker）
     auto *updater = new UpdateChecker(qApp);
     auto *tray = new TrayController(player, qApp);
@@ -2101,6 +2127,7 @@ int main(int argc, char *argv[])
     engine.rootContext()->setContextProperty(QStringLiteral("library"), library);
     engine.rootContext()->setContextProperty(QStringLiteral("home"), home);
     engine.rootContext()->setContextProperty(QStringLiteral("theme"), theme);
+    engine.rootContext()->setContextProperty(QStringLiteral("backdrop"), backdrop);
     engine.rootContext()->setContextProperty(QStringLiteral("settings"), settings);
     engine.rootContext()->setContextProperty(QStringLiteral("updater"), updater);
     engine.rootContext()->setContextProperty(QStringLiteral("tray"), tray);
@@ -4691,6 +4718,143 @@ int main(int argc, char *argv[])
     mediaSession->attach(mainWin);
     // 手动最大化样式位同步（#11）：只需窗口句柄，不激活原生过滤器（见 FramelessWindow 头注释）
     frameless->bindMaxWindow(mainWin);
+    // 毛玻璃：给主窗补标准边框 + 通知 DWM 用亚克力（关闭时内部会还原）。F11 全屏会
+    // 被 Qt 重写样式，进出全屏都要重挂一次。
+    backdrop->attach(mainWin);
+    QObject::connect(mainWin, &QQuickWindow::visibilityChanged, backdrop,
+                     [backdrop]() { backdrop->refresh(); });
+
+    // 诊断（MUYUN_UI_DUMP=1）：启动瞬间/建立过程中枚举本进程所有顶层窗，定位"窗口边缘
+    // 多出来一圈框"到底是哪个 HWND 画的（主窗？舞台桥？歌词窗？某个 QML Popup？）
+    if (!qEnvironmentVariableIsEmpty("MUYUN_GRAB")) {
+        // 场景自身渲染结果（不含 DWM 合成）：用来区分"QML 自己没画"与"表面被挪位"。
+        // 每 2s 抓一张、共 8 张，方便外部脚本在 F11 往返/最大化之后对照屏幕像素。
+        auto *grabTimer = new QTimer(&app);
+        grabTimer->setInterval(2000);
+        auto seq = QSharedPointer<int>::create(0);
+        QObject::connect(grabTimer, &QTimer::timeout, &app, [mainWin, grabTimer, seq]() {
+            QImage img = mainWin->grabWindow().convertToFormat(QImage::Format_ARGB32);
+            const QString path =
+                QDir::temp().filePath(QStringLiteral("muyun_grab_%1.png").arg(*seq));
+            img.save(path);
+            fprintf(stderr, "[ui] grab#%d %dx%d -> %s\n", *seq, img.width(), img.height(),
+                    qPrintable(path));
+            if (img.width() > 0 && img.height() > 0) {
+                const int cx = img.width() / 2;
+                QString top, left;
+                for (int i = 0; i < 12; ++i) {
+                    const QRgb t = img.pixel(cx, i);
+                    top += QStringLiteral("%1%2%3%4 ")
+                               .arg(qRed(t), 2, 16, QLatin1Char('0'))
+                               .arg(qGreen(t), 2, 16, QLatin1Char('0'))
+                               .arg(qBlue(t), 2, 16, QLatin1Char('0'))
+                               .arg(qAlpha(t), 2, 16, QLatin1Char('0'));
+                    const QRgb l = img.pixel(i, img.height() / 2);
+                    left += QStringLiteral("%1%2%3%4 ")
+                                .arg(qRed(l), 2, 16, QLatin1Char('0'))
+                                .arg(qGreen(l), 2, 16, QLatin1Char('0'))
+                                .arg(qBlue(l), 2, 16, QLatin1Char('0'))
+                                .arg(qAlpha(l), 2, 16, QLatin1Char('0'));
+                }
+                fprintf(stderr, "[ui] grab#%d top=%s\n", *seq, qPrintable(top));
+                fprintf(stderr, "[ui] grab#%d left=%s\n", *seq, qPrintable(left));
+                // 边缘亮像素扫描：判"窗口边那圈白线"是不是 QML 自己画的。
+                // 只打数字（不打图、不开前台），亮 = 亮度 > 170。
+                {
+                    struct Edge { const char *name; int x0, y0, x1, y1; };
+                    const int w = img.width(), h = img.height();
+                    const Edge edges[4] = {
+                        {"top", 0, 0, w - 1, 15}, {"bottom", 0, h - 16, w - 1, h - 1},
+                        {"left", 0, 0, 15, h - 1}, {"right", w - 16, 0, w - 1, h - 1}};
+                    for (const Edge &e : edges) {
+                        int bright = 0, maxLum = 0;
+                        int bx = -1, by = -1;
+                        for (int y = e.y0; y <= e.y1; ++y) {
+                            for (int x = e.x0; x <= e.x1; ++x) {
+                                const QRgb p = img.pixel(x, y);
+                                const int lum = (qRed(p) * 299 + qGreen(p) * 587 + qBlue(p) * 114) / 1000;
+                                if (lum > maxLum) { maxLum = lum; bx = x; by = y; }
+                                if (lum > 170) ++bright;
+                            }
+                        }
+                        const QRgb mp = (bx >= 0) ? img.pixel(bx, by) : 0;
+                        fprintf(stderr, "[ui] grab#%d edge=%s bright=%d max=%d@%d,%d rgb=%02x%02x%02x%02x\n",
+                                *seq, e.name, bright, maxLum, bx, by, qRed(mp), qGreen(mp),
+                                qBlue(mp), qAlpha(mp));
+                    }
+                }
+            }
+            // 整屏扫描（含 DWM 合成）：MUYUN_GRAB=full 时抓桌面合成路径，
+            // 判"全屏白线"是 DWM 画的还是 QML 画的。只打四边亮度数字。
+            if (qEnvironmentVariable("MUYUN_GRAB") == QLatin1String("full")) {
+                const QPixmap full = QGuiApplication::primaryScreen()->grabWindow(0);
+                if (!full.isNull()) {
+                    const QImage fi = full.toImage().convertToFormat(QImage::Format_RGB32);
+                    const int W = fi.width(), H = fi.height();
+                    // 只扫**主窗矩形**（不是整屏）：最大化/贴边态下窗口=工作区，
+                    // 整屏底部是任务栏（浅色=白），会误判成窗口边缘的白线。
+                    QRect wr(0, 0, W, H);
+                    if (mainWin) {
+                        // Qt 侧几何是逻辑像素；grabWindow(0) 是物理像素（DPI 缩放）
+                        const qreal dpr = mainWin->devicePixelRatio();
+                        const int wx = qRound(mainWin->x() * dpr),
+                                  wy = qRound(mainWin->y() * dpr);
+                        const int ww = qRound(mainWin->width() * dpr),
+                                  wh = qRound(mainWin->height() * dpr);
+                        if (ww > 0 && wh > 0 && wx >= 0 && wy >= 0
+                            && wx + ww <= W && wy + wh <= H)
+                            wr = QRect(wx, wy, ww, wh);
+                    }
+                    fprintf(stderr, "[ui] full %dx%d win=%d,%d %dx%d\n", W, H,
+                            wr.x(), wr.y(), wr.width(), wr.height());
+                    // 避开四角圆角（DWM 圆角外透出桌面壁纸，会误判成白线）：
+                    // 每边只扫中间 60%，两端各留 20% 不碰圆角。
+                    const int inset = qMax(8, qRound(wr.width() * 0.2));
+                    struct FEdge { const char *name; int x0, y0, x1, y1; };
+                    const FEdge fedges[4] = {
+                        {"top", wr.x() + inset, wr.y(), wr.x() + wr.width() - inset, wr.y() + 3},
+                        {"bottom", wr.x() + inset, wr.y() + wr.height() - 3,
+                         wr.x() + wr.width() - inset, wr.y() + wr.height() - 1},
+                        {"left", wr.x(), wr.y() + inset, wr.x() + 3,
+                         wr.y() + wr.height() - inset},
+                        {"right", wr.x() + wr.width() - 4, wr.y() + inset,
+                         wr.x() + wr.width() - 1, wr.y() + wr.height() - inset}};
+                    for (const FEdge &e : fedges) {
+                        int bright = 0, maxLum = 0, bx = -1, by = -1;
+                        for (int y = e.y0; y <= e.y1; ++y)
+                            for (int x = e.x0; x <= e.x1; ++x) {
+                                const QRgb p = fi.pixel(x, y);
+                                const int lum = (qRed(p) * 299 + qGreen(p) * 587 + qBlue(p) * 114) / 1000;
+                                if (lum > maxLum) { maxLum = lum; bx = x; by = y; }
+                                if (lum > 170) ++bright;
+                            }
+                        const QRgb mp = (bx >= 0) ? fi.pixel(bx, by) : 0;
+                        fprintf(stderr, "[ui] full edge=%s bright=%d max=%d@%d,%d rgb=%02x%02x%02x\n",
+                                e.name, bright, maxLum, bx, by, qRed(mp), qGreen(mp), qBlue(mp));
+                    }
+                }
+            }
+            fflush(stderr);
+            if (++(*seq) >= 8) grabTimer->stop();
+        });
+        grabTimer->start();
+    }
+
+    if (!qEnvironmentVariableIsEmpty("MUYUN_UI_DUMP")) {
+        const int delays[] = {0, 200, 600, 1500, 3000, 6000};
+        for (int d : delays) {
+            QTimer::singleShot(d, &app, [d, mainWin]() {
+                Muyun::Backdrop::dumpProcessWindows(qPrintable(QStringLiteral("t+%1ms").arg(d)));
+                fprintf(stderr, "[ui] mainWin=%s vis=%d geom=%d,%d %dx%d frame=%d,%d,%d,%d\n",
+                        qPrintable(QStringLiteral("%1").arg(static_cast<quintptr>(mainWin->winId()), 0, 16)),
+                        static_cast<int>(mainWin->visibility()), mainWin->x(), mainWin->y(),
+                        mainWin->width(), mainWin->height(), mainWin->frameMargins().left(),
+                        mainWin->frameMargins().top(), mainWin->frameMargins().right(),
+                        mainWin->frameMargins().bottom());
+                fflush(stderr);
+            });
+        }
+    }
     // mineradio 舞台是独立进程窗，它抢焦点时本应用会判为"后台"→ 热键保活，
     // 保证舞台全屏界面里 F11 仍能切主窗全屏。
     QObject::connect(stage, &Muyun::StageBridge::activeChanged, hotkey,
@@ -6014,12 +6178,18 @@ int main(int argc, char *argv[])
 #ifdef Q_OS_WIN
             const HWND hw = reinterpret_cast<HWND>(mainWin->winId());
             const bool zoomed = hw && IsZoomed(hw);
-            RECT wr{};
-            const bool hasRect = hw && GetWindowRect(hw, &wr);
-            const int realX = hasRect ? int(wr.left) : 0;
-            const int realY = hasRect ? int(wr.top) : 0;
-            const int realW = hasRect ? int(wr.right - wr.left) : 0;
-            const int realH = hasRect ? int(wr.bottom - wr.top) : 0;
+            // ⚠ 量**客户区**（映射到屏幕坐标），不要量窗口矩形：
+            // 玻璃模式下窗口带 WS_THICKFRAME，Windows 会把最大化窗口在工作区外各扩一圈
+            // （125% DPI 下 9 物理像素）——那圈边框本来就该在工作区外（Backdrop 的
+            // WM_NCCALCSIZE 把客户区按工作区重算）。量窗口矩形会永远比工作区大一圈，
+            // 但"内容有没有铺满/有没有丢边"取决于客户区，所以判客户区才对。
+            POINT ctl{0, 0};
+            RECT crc{};
+            const bool hasRect = hw && ClientToScreen(hw, &ctl) && GetClientRect(hw, &crc);
+            const int realX = hasRect ? int(ctl.x) : 0;
+            const int realY = hasRect ? int(ctl.y) : 0;
+            const int realW = hasRect ? int(crc.right - crc.left) : 0;
+            const int realH = hasRect ? int(crc.bottom - crc.top) : 0;
             bool realOk = false;
             if (hw) {
                 const HMONITOR mon = MonitorFromWindow(hw, MONITOR_DEFAULTTONEAREST);
@@ -6040,7 +6210,7 @@ int main(int argc, char *argv[])
                      && mainWin->width() >= av.width() - 4 && mainWin->height() >= av.height() - 4
                      && mainWin->width() <= av.width() + 4 && mainWin->height() <= av.height() + 4
                      && qAbs(mainWin->y() - av.y()) <= 4;   // 原生最大化会整体下移一行，必须被对齐
-            printf("[%s] 点最大化 → 铺满工作区且是真最大化（qt %dx%d@%d,%d / native %dx%d@%d,%d vs 工作区 %dx%d@%d,%d IsZoomed=%d）\n",
+            printf("[%s] 点最大化 → 铺满工作区且是真最大化（qt %dx%d@%d,%d / client %dx%d@%d,%d vs 工作区 %dx%d@%d,%d IsZoomed=%d）\n",
                    didMax ? "PASS" : "FAIL", mainWin->width(), mainWin->height(),
                    mainWin->x(), mainWin->y(), realW, realH, realX, realY,
                    av.width(), av.height(), av.x(), av.y(), int(zoomed));

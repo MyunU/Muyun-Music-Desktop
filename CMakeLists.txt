@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(MuyunMusic VERSION 1.3.2 LANGUAGES CXX C)
+project(MuyunMusic VERSION 1.4.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -136,7 +136,8 @@ if(WIN32)
     # （Qt 的 QWindowsInputContext 遇到不接受输入法的焦点对象会 ImmAssociateContext(hwnd, NULL)）
     # windowsapp：系统媒体控制（SMTC）的 WinRT 激活入口 RoGetActivationFactory/
     # RoActivateInstance/WindowsCreateString 都在这个导入库里（MinGW 自带）
-    target_link_libraries(MuyunMusic PRIVATE psapi imm32 windowsapp)
+    # dwmapi：窗口毛玻璃（DwmSetWindowAttribute / DwmExtendFrameIntoClientArea）
+    target_link_libraries(MuyunMusic PRIVATE psapi imm32 windowsapp dwmapi)
 endif()
 
 # ---------------------------------------------------------------------------
